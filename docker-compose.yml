@@ -1,0 +1,12 @@
+services:
+  voxel-fps:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voxel-fps-game
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
