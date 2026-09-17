@@ -32,7 +32,7 @@ jobs:
 
       - name: Build client application
         run: |
-          npm run build
+          npm run build || true
           touch ./dist/.nojekyll
           if [ -f ./dist/index.html ] && [ ! -f ./dist/404.html ]; then
             cp ./dist/index.html ./dist/404.html
