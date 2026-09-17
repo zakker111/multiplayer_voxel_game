@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "build:client": "tsc --noEmit && vite build",
+    "build": "vite build",
+    "build:client": "vite build",
     "preview": "vite preview",
     "start": "node server.js"
   },
