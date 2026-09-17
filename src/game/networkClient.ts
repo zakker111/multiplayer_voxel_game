@@ -1,180 +1,198 @@
-import { ClientMessage, ServerMessage, PlayerState, PlayerInput, Position } from '../shared/types';
+import { ServerToClientMessage, ClientToServerMessage, GameState } from '../shared/types';
 
 export class NetworkClient {
   private ws: WebSocket | null = null;
-  private messageHandlers: Map<string, (message: any) => void> = new Map();
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectDelay = 2000;
-  private serverUrl: string;
-  private onConnectCallback: (() => void) | null = null;
-  private onDisconnectCallback: (() => void) | null = null;
+  private connected: boolean = false;
+  private reconnectAttempts: number = 0;
+  private maxReconnectAttempts: number = 5;
+  private messageQueue: ClientToServerMessage[] = [];
+  
+  public isSinglePlayer: boolean = false;
+  public gameState: GameState | null = null;
+  
+  private onGameStateCallback: ((state: GameState) => void) | null = null;
+  private onErrorCallback: ((error: string) => void) | null = null;
+  private onPlayerJoinedCallback: ((player: any) => void) | null = null;
+  private onPlayerLeftCallback: ((id: string) => void) | null = null;
+  private onFlagCapturedCallback: ((team: 'red' | 'blue', scorer: string) => void) | null = null;
 
-  constructor(serverUrl?: string) {
-    if (serverUrl && serverUrl.trim()) {
-      let url = serverUrl.trim();
-      if (!url.startsWith('ws://') && !url.startsWith('wss://')) {
-        const protocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-        url = `${protocol}${url}`;
-      }
-      this.serverUrl = url;
-    } else if (typeof window !== 'undefined') {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      this.serverUrl = `${protocol}//${window.location.host}`;
-    } else {
-      this.serverUrl = 'ws://localhost:3000';
+  constructor() {
+    // Detect if running on GitHub Pages
+    const isGitHubPages = window.location.hostname.includes('github.io');
+    if (isGitHubPages) {
+      console.log('[Network] Running on GitHub Pages - Single Player Mode');
+      this.isSinglePlayer = true;
+      this.initSinglePlayer();
     }
   }
 
-  getServerUrl(): string {
-    return this.serverUrl;
+  private initSinglePlayer() {
+    // Initialize single player game state
+    this.gameState = {
+      players: [],
+      flags: {
+        red: { x: 0, y: 8, z: 95, captured: false },
+        blue: { x: 0, y: 8, z: -95, captured: false }
+      },
+      scores: { red: 0, blue: 0 },
+      timeRemaining: 600
+    };
+    this.connected = true;
+    console.log('[Network] Single player mode initialized');
   }
 
-  connect(): Promise<void> {
-    return new Promise((resolve) => {
-      let settled = false;
-      try {
-        console.log('Connecting to server:', this.serverUrl);
-        this.ws = new WebSocket(this.serverUrl);
+  connect(serverUrl?: string): Promise<boolean> {
+    if (this.isSinglePlayer) {
+      return Promise.resolve(true);
+    }
 
+    const url = serverUrl || `ws://${window.location.hostname}:3000`;
+    
+    return new Promise((resolve) => {
+      try {
+        this.ws = new WebSocket(url);
+        
         this.ws.onopen = () => {
-          settled = true;
-          console.log('Connected to server');
+          console.log('[Network] Connected to server');
+          this.connected = true;
           this.reconnectAttempts = 0;
-          if (this.onConnectCallback) {
-            this.onConnectCallback();
-          }
-          resolve();
+          
+          // Send queued messages
+          this.messageQueue.forEach(msg => this.send(msg));
+          this.messageQueue = [];
+          
+          resolve(true);
         };
 
         this.ws.onmessage = (event) => {
           try {
-            const message: ServerMessage = JSON.parse(event.data);
+            const message: ServerToClientMessage = JSON.parse(event.data);
             this.handleMessage(message);
-          } catch (error) {
-            console.error('Error parsing message:', error);
+          } catch (e) {
+            console.error('[Network] Failed to parse message:', e);
           }
         };
 
         this.ws.onclose = () => {
-          console.log('Disconnected from server');
-          if (this.onDisconnectCallback) {
-            this.onDisconnectCallback();
+          console.log('[Network] Disconnected from server');
+          this.connected = false;
+          
+          if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            setTimeout(() => {
+              console.log(`[Network] Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+              this.connect(serverUrl).then(resolve);
+            }, 2000 * this.reconnectAttempts);
+          } else {
+            console.log('[Network] Max reconnect attempts reached - switching to single player');
+            this.isSinglePlayer = true;
+            this.initSinglePlayer();
+            resolve(true);
           }
-          if (!settled) {
-            settled = true;
-            resolve();
-          }
-          this.attemptReconnect();
         };
 
         this.ws.onerror = (error) => {
-          console.warn('WebSocket notice (non-fatal):', error);
-          if (!settled) {
-            settled = true;
-            resolve();
+          console.error('[Network] WebSocket error:', error);
+          if (this.onErrorCallback) {
+            this.onErrorCallback('Connection failed');
           }
         };
-      } catch (error) {
-        console.warn('Connection notice (non-fatal):', error);
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
+      } catch (e) {
+        console.error('[Network] Failed to connect:', e);
+        this.isSinglePlayer = true;
+        this.initSinglePlayer();
+        resolve(true);
       }
     });
   }
 
-  private handleMessage(message: ServerMessage): void {
-    const handler = this.messageHandlers.get(message.type);
-    if (handler) {
-      handler(message);
-    } else {
-      console.warn('No handler for message type:', message.type);
+  private handleMessage(message: ServerToClientMessage) {
+    switch (message.type) {
+      case 'gameState':
+        this.gameState = message.state;
+        if (this.onGameStateCallback) {
+          this.onGameStateCallback(message.state);
+        }
+        break;
+      case 'playerJoined':
+        if (this.onPlayerJoinedCallback) {
+          this.onPlayerJoinedCallback(message.player);
+        }
+        break;
+      case 'playerLeft':
+        if (this.onPlayerLeftCallback) {
+          this.onPlayerLeftCallback(message.playerId);
+        }
+        break;
+      case 'flagCaptured':
+        if (this.onFlagCapturedCallback) {
+          this.onFlagCapturedCallback(message.team, message.scorer);
+        }
+        break;
+      case 'error':
+        if (this.onErrorCallback) {
+          this.onErrorCallback(message.message);
+        }
+        break;
     }
   }
 
-  private attemptReconnect(): void {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      console.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-      setTimeout(() => {
-        this.connect().catch((error) => {
-          console.error('Reconnection failed:', error);
-        });
-      }, this.reconnectDelay);
-    } else {
-      console.error('Max reconnection attempts reached');
+  send(message: ClientToServerMessage) {
+    if (this.isSinglePlayer) {
+      // Handle single player logic locally
+      this.handleSinglePlayerMessage(message);
+      return;
     }
-  }
 
-  send(message: ClientMessage): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.connected && this.ws) {
       this.ws.send(JSON.stringify(message));
     } else {
-      console.warn('Cannot send message: WebSocket not connected');
+      this.messageQueue.push(message);
     }
   }
 
-  onMessage(type: string, handler: (message: any) => void): void {
-    this.messageHandlers.set(type, handler);
+  private handleSinglePlayerMessage(message: ClientToServerMessage) {
+    if (!this.gameState) return;
+
+    switch (message.type) {
+      case 'move':
+        // Update local player position (handled by game loop)
+        break;
+      case 'shoot':
+        // Handle shooting locally (add bot hits etc.)
+        break;
+      case 'destroyBlock':
+      case 'placeBlock':
+        // Handle world modifications locally
+        break;
+    }
   }
 
-  onConnect(callback: () => void): void {
-    this.onConnectCallback = callback;
-  }
-
-  onDisconnect(callback: () => void): void {
-    this.onDisconnectCallback = callback;
-  }
-
-  disconnect(): void {
+  disconnect() {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
+    this.connected = false;
   }
 
-  isConnected(): boolean {
-    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  onGameState(callback: (state: GameState) => void) {
+    this.onGameStateCallback = callback;
   }
 
-  // Helper methods for common messages
-  sendJoin(team: 'red' | 'blue', position?: Position, name?: string): void {
-    this.send({ type: 'join', team, position, name });
+  onPlayerJoined(callback: (player: any) => void) {
+    this.onPlayerJoinedCallback = callback;
   }
 
-  sendPlayerInput(input: PlayerInput): void {
-    this.send({ type: 'playerInput', input });
+  onPlayerLeft(callback: (id: string) => void) {
+    this.onPlayerLeftCallback = callback;
   }
 
-  sendShoot(origin: Position, direction: Position, hitTarget?: { targetId: string; isHeadshot: boolean }): void {
-    this.send({
-      type: 'shoot',
-      origin,
-      direction,
-      targetId: hitTarget?.targetId,
-      isHeadshot: hitTarget?.isHeadshot,
-    });
+  onFlagCaptured(callback: (team: 'red' | 'blue', scorer: string) => void) {
+    this.onFlagCapturedCallback = callback;
   }
 
-  sendReload(): void {
-    this.send({ type: 'reload' });
-  }
-
-  sendUseTool(tool: 'pickaxe' | 'spade', target: Position): void {
-    this.send({ type: 'useTool', tool, target });
-  }
-
-  sendBuild(position: Position): void {
-    this.send({ type: 'build', position });
-  }
-
-  sendToggleSpectator(): void {
-    this.send({ type: 'toggleSpectator' });
-  }
-
-  sendFootstep(volume: number, pitch: number): void {
-    this.send({ type: 'footstep', volume, pitch });
+  onError(callback: (error: string) => void) {
+    this.onErrorCallback = callback;
   }
 }

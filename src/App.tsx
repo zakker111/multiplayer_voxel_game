@@ -1,730 +1,313 @@
-import { useEffect, useRef, useState } from 'react';
-import { Game, GameState } from './game/game';
-import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2 } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
+import { NetworkClient } from './game/networkClient';
 
-function App() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const gameRef = useRef<Game | null>(null);
-  const [gameState, setGameState] = useState<GameState>({
-    hp: 100, maxHp: 100, equipment: 'rifle', inventory: 0,
-    isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
-    message: '', messageTimer: 0, buildMode: false, buildValid: true,
-    blueKills: 0, redKills: 0, blueCaptures: 0, redCaptures: 0, isAiming: false,
-    currentAmmo: 10, magazineSize: 10, isReloading: false,
-    playerCarryingFlag: false, flagCarrierName: '',
-    isSpectating: false,
-    spectatorMode: 'action',
-    spectatorTrackedName: '',
-  });
-  const [started, setStarted] = useState(false);
-  const [gameMode, setGameMode] = useState<'multiplayer' | 'singleplayer' | 'online' | null>(null);
+const App: React.FC = () => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [gameState, setGameState] = useState<{ scores: { red: number; blue: number }; timeRemaining: number } | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [showMenu, setShowMenu] = useState(true);
+  const [playerName, setPlayerName] = useState('');
   const [selectedTeam, setSelectedTeam] = useState<'red' | 'blue'>('blue');
-  const [isPointerLocked, setIsPointerLocked] = useState(false);
+  
+  const networkRef = useRef<NetworkClient | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const playerRef = useRef({ x: 0, y: 10, z: -120, yaw: 0, pitch: 0 });
 
-  // Multiplayer Server & Team Selection state
-  const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
-  const [serverType, setServerType] = useState<'default' | 'custom'>('default');
-  const [customServerUrl, setCustomServerUrl] = useState('');
-  const [playerName, setPlayerName] = useState(() => 'Soldier_' + Math.floor(100 + Math.random() * 900));
-  const [modalTeam, setModalTeam] = useState<'blue' | 'red'>('blue');
-  const [serverUrl, setServerUrl] = useState<string | undefined>(undefined);
-  const [copiedInvite, setCopiedInvite] = useState(false);
-
-  // Auto-launch support for automated previewing and AI testing via URL query parameters (?mode=spectator, ?mode=bots, ?mode=online)
   useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const modeParam = params.get('mode');
-      const teamParam = (params.get('team') === 'red' ? 'red' : 'blue') as 'red' | 'blue';
-      const serverParam = params.get('server');
-      if (serverParam) setServerUrl(serverParam);
+    networkRef.current = new NetworkClient();
+    
+    networkRef.current.onGameState((state) => {
+      setGameState({ scores: state.scores, timeRemaining: state.timeRemaining });
+      setIsConnected(true);
+    });
 
-      if (modeParam === 'spectator') {
-        setSelectedTeam(teamParam);
-        setGameMode('multiplayer');
-        setTimeout(() => gameRef.current?.toggleSpectator(), 400);
-      } else if (modeParam === 'bots' || modeParam === 'multiplayer') {
-        setSelectedTeam(teamParam);
-        setGameMode('multiplayer');
-      } else if (modeParam === 'online') {
-        setSelectedTeam(teamParam);
-        setGameMode('online');
-      } else if (modeParam === 'sandbox' || modeParam === 'singleplayer') {
-        setSelectedTeam(teamParam);
-        setGameMode('singleplayer');
-      }
-    } catch {
-      // Ignore URL parsing errors in restricted sandbox environments
-    }
+    networkRef.current.onError((error) => {
+      console.error('Network error:', error);
+    });
+
+    return () => {
+      networkRef.current?.disconnect();
+    };
   }, []);
 
   useEffect(() => {
-    const handleLockChange = () => {
-      setIsPointerLocked(!!document.pointerLockElement);
-    };
-    document.addEventListener('pointerlockchange', handleLockChange);
-    return () => document.removeEventListener('pointerlockchange', handleLockChange);
-  }, []);
+    if (!containerRef.current || !showMenu) return;
 
-  useEffect(() => {
-    if (!canvasRef.current || gameRef.current || !gameMode) return;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = new THREE.Fog(0x87ceeb, 50, 300);
+    sceneRef.current = scene;
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 10, -120);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    containerRef.current.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(100, 200, 100);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+
+    // Ground
+    const groundGeometry = new THREE.PlaneGeometry(400, 400);
+    const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x3d8c40 });
+    const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = 0;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Blue Base
+    const blueBaseGeo = new THREE.BoxGeometry(40, 20, 40);
+    const blueBaseMat = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+    const blueBase = new THREE.Mesh(blueBaseGeo, blueBaseMat);
+    blueBase.position.set(0, 10, -100);
+    blueBase.castShadow = true;
+    scene.add(blueBase);
+
+    // Red Base
+    const redBaseGeo = new THREE.BoxGeometry(40, 20, 40);
+    const redBaseMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+    const redBase = new THREE.Mesh(redBaseGeo, redBaseMat);
+    redBase.position.set(0, 10, 100);
+    redBase.castShadow = true;
+    scene.add(redBase);
+
+    // Flag poles
+    const poleGeo = new THREE.CylinderGeometry(0.5, 0.5, 15);
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x8b4513 });
     
-    const canvas = canvasRef.current;
-    console.log('Creating game with mode:', gameMode, 'team:', selectedTeam, 'server:', serverUrl, 'player:', playerName);
+    const bluePole = new THREE.Mesh(poleGeo, poleMat);
+    bluePole.position.set(0, 7.5, -95);
+    scene.add(bluePole);
+
+    const redPole = new THREE.Mesh(poleGeo, poleMat);
+    redPole.position.set(0, 7.5, 95);
+    scene.add(redPole);
+
+    // Flags
+    const flagGeo = new THREE.BoxGeometry(4, 3, 0.5);
     
-    // Ensure canvas has dimensions
-    if (canvas.width === 0 || canvas.height === 0) {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+    const blueFlagMat = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+    const blueFlag = new THREE.Mesh(flagGeo, blueFlagMat);
+    blueFlag.position.set(2, 13, -95);
+    scene.add(blueFlag);
+
+    const redFlagMat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+    const redFlag = new THREE.Mesh(flagGeo, redFlagMat);
+    redFlag.position.set(2, 13, 95);
+    scene.add(redFlag);
+
+    // Random obstacles
+    for (let i = 0; i < 30; i++) {
+      const size = Math.random() * 8 + 4;
+      const obsGeo = new THREE.BoxGeometry(size, size, size);
+      const obsMat = new THREE.MeshStandardMaterial({ 
+        color: new THREE.Color().setHSL(Math.random(), 0.7, 0.5) 
+      });
+      const obstacle = new THREE.Mesh(obsGeo, obsMat);
+      obstacle.position.set(
+        (Math.random() - 0.5) * 200,
+        size / 2,
+        (Math.random() - 0.5) * 200
+      );
+      // Keep away from bases
+      if (Math.abs(obstacle.position.z) > 60 || Math.abs(obstacle.position.x) > 30) {
+        obstacle.castShadow = true;
+        obstacle.receiveShadow = true;
+        scene.add(obstacle);
+      }
     }
-    
-    // Create game after a small delay to ensure canvas is ready
-    setTimeout(() => {
-      if (!canvasRef.current || gameRef.current) return;
-      
-      const game = new Game(canvasRef.current, gameMode, selectedTeam, serverUrl, playerName);
-      game.onStateChange = (state) => setGameState(state);
-      
-      game.start();
-      gameRef.current = game;
-      console.log('Game created and started with mode:', gameMode, 'team:', selectedTeam);
-      
-      // Auto-start when game is created
-      game.requestPointerLock(canvasRef.current);
-      setStarted(true);
-    }, 100);
-    
-    return () => { 
-      console.log('Cleaning up game');
-      if (gameRef.current) {
-        gameRef.current.destroy(); 
-        gameRef.current = null;
+
+    const handleResize = () => {
+      if (cameraRef.current && rendererRef.current) {
+        cameraRef.current.aspect = window.innerWidth / window.innerHeight;
+        cameraRef.current.updateProjectionMatrix();
+        rendererRef.current.setSize(window.innerWidth, window.innerHeight);
       }
     };
-  }, [gameMode, selectedTeam, serverUrl, playerName]);
 
-  const handleStart = (mode: 'multiplayer' | 'singleplayer' | 'online', team: 'red' | 'blue' = 'blue', targetServer?: string) => {
-    setSelectedTeam(team);
-    setServerUrl(targetServer);
-    setGameMode(mode);
-  };
+    window.addEventListener('resize', handleResize);
 
-  const handleDeployMultiplayer = () => {
-    const target = serverType === 'custom' && customServerUrl.trim() ? customServerUrl.trim() : undefined;
-    handleStart('online', modalTeam, target);
-    setShowMultiplayerModal(false);
-  };
+    const animate = () => {
+      requestAnimationFrame(animate);
+      if (rendererRef.current && sceneRef.current && cameraRef.current) {
+        rendererRef.current.render(sceneRef.current, cameraRef.current);
+      }
+    };
 
-  const copyInviteLink = (targetTeam?: 'red' | 'blue') => {
+    animate();
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (rendererRef.current && containerRef.current) {
+        containerRef.current.removeChild(rendererRef.current.domElement);
+      }
+    };
+  }, [showMenu]);
+
+  const joinGame = async () => {
+    if (!playerName.trim()) return;
+    
     try {
-      const origin = window.location.origin;
-      const team = targetTeam || (modalTeam === 'blue' ? 'red' : 'blue');
-      let url = `${origin}/?mode=online&team=${team}`;
-      if (serverType === 'custom' && customServerUrl.trim()) {
-        url += `&server=${encodeURIComponent(customServerUrl.trim())}`;
-      }
-      navigator.clipboard.writeText(url);
-      setCopiedInvite(true);
-      setTimeout(() => setCopiedInvite(false), 2500);
-    } catch (err) {
-      console.error('Failed to copy link', err);
+      await networkRef.current?.connect();
+      networkRef.current?.send({ 
+        type: 'join', 
+        name: playerName, 
+        team: selectedTeam 
+      });
+      setShowMenu(false);
+      setIsConnected(true);
+    } catch (e) {
+      console.error('Failed to join:', e);
     }
-  };
-
-  const handleCanvasClick = () => {
-    if (canvasRef.current && gameRef.current && !document.pointerLockElement) {
-      gameRef.current.requestPointerLock(canvasRef.current);
-    }
-  };
-
-  const handleRightClick = (e: React.MouseEvent) => {
-    e.preventDefault();
-    if (gameRef.current) gameRef.current.handleBuildClick();
-  };
-
-  const equipmentNames: Record<string, string> = {
-    rifle: '🎯 Rifle', smg: '💨 SMG', spade: '🪣 Spade', pickaxe: '⛏️ Pickaxe',
-  };
-  const equipmentKeys: Record<string, string> = {
-    rifle: '1', smg: '2', spade: '3', pickaxe: '4',
   };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-black">
-      <canvas ref={canvasRef} className="w-full h-full block" onClick={handleCanvasClick} onContextMenu={handleRightClick} />
-
-      {!started && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-50">
-          <div className="text-center max-w-3xl px-4">
-            <h1 className="text-5xl font-bold text-white mb-1">🎮 Voxel FPS</h1>
-            <div className="text-xs text-gray-500 font-mono mb-3">Version 1.4.0</div>
-            <p className="text-lg text-gray-300 mb-1">Red vs Blue — Capture the Flag</p>
-            <p className="text-sm text-gray-400 mb-6">You are <span className="text-blue-400 font-bold">BLUE</span> team. Push to the <span className="text-red-400 font-bold">RED</span> flag!</p>
-            <div className="flex flex-wrap gap-3 justify-center mb-6">
-              <button
-                onClick={() => setShowMultiplayerModal(true)}
-                className="px-6 py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold text-lg rounded-xl hover:from-blue-500 hover:to-indigo-500 transition-all shadow-lg shadow-blue-600/30 cursor-pointer flex items-center gap-2.5"
-              >
-                <Globe className="w-5 h-5" /> <span>Multiplayer (Choose Server & Team)</span>
-              </button>
-              <button
-                onClick={() => handleStart('multiplayer', 'blue')}
-                className="px-6 py-3.5 bg-[#00ff88] text-black font-bold text-lg rounded-xl hover:bg-[#00cc66] transition-colors shadow-lg cursor-pointer"
-              >
-                🤖 Play vs Bots
-              </button>
-              <button
-                onClick={() => { handleStart('multiplayer'); setTimeout(() => gameRef.current?.toggleSpectator(), 300); }}
-                className="px-6 py-3.5 bg-indigo-600 text-white font-bold text-lg rounded-xl hover:bg-indigo-500 transition-colors shadow-lg cursor-pointer flex items-center gap-2"
-              >
-                <span>🎥</span> AI Spectator
-              </button>
-              <button
-                onClick={() => handleStart('singleplayer')}
-                className="px-5 py-3.5 bg-gray-700 text-gray-200 font-bold text-base rounded-xl hover:bg-gray-600 transition-colors shadow-lg cursor-pointer"
-              >
-                🧪 Free Sandbox
-              </button>
-            </div>
-            
-            <p className="text-xs text-purple-300/80 mb-2">
-              💡 <b>Multiplayer Testing:</b> Click <b>Multiplayer</b> to select your server and team, or open in 2 tabs (one Blue, one Red) to test real-time CTF!
-            </p>
-            <div className="mt-6 bg-gray-900/60 rounded-xl p-5 text-left max-w-xl mx-auto text-sm">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <h4 className="text-[#00ff88] font-bold mb-2">Movement</h4>
-                  <p className="text-gray-300">WASD - Move</p>
-                  <p className="text-gray-300">Mouse - Look</p>
-                  <p className="text-gray-300">Space - Jump</p>
-                  <p className="text-gray-300">Shift - Sprint</p>
-                  <p className="text-gray-300">Ctrl/C - Crouch</p>
-                </div>
-                <div>
-                  <h4 className="text-[#00ff88] font-bold mb-2">Equipment</h4>
-                  <p className="text-gray-300"><b>1</b> 🎯 Rifle (WW2 iron sights)</p>
-                  <p className="text-gray-300"><b>2</b> 💨 SMG (WW2 iron sights)</p>
-                  <p className="text-gray-300"><b>3</b> 🪣 Spade (dig 2 blocks)</p>
-                  <p className="text-gray-300"><b>4</b> ⛏️ Pickaxe (harvest)</p>
-                </div>
-              </div>
-              <div className="mt-3 pt-3 border-t border-gray-700">
-                <p className="text-gray-300"><b>Left Click</b> — Shoot / Use tool</p>
-                <p className="text-gray-300"><b>Right Click</b> — Toggle iron sights / Place block (instant)</p>
-                <p className="text-gray-300"><b>R</b> — Reload weapon</p>
-                <p className="text-gray-300"><b>Mouse Wheel</b> — Switch equipment</p>
-                <div className="mt-2 text-xs text-gray-400 space-y-1">
-                  <p>🎯 1 headshot / 3 body shots to kill</p>
-                  <p>🔫 Rifle: 10 rounds | SMG: 30 rounds (unlimited ammo)</p>
-                  <p>🏃 Running + shooting = less accurate | 🧎 Crouching = more accurate</p>
-                  <p>🏗️ <b>How to build:</b> Harvest blocks with pickaxe (4), then right-click to place instantly like Minecraft!</p>
-                  <p>💥 All terrain is destroyable by gunfire (3 shots per voxel)</p>
-                  <p>🧪 Singleplayer mode: No bots, test building & combat freely</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Multiplayer Server & Team Lobby Modal */}
-      {showMultiplayerModal && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/90 z-50 p-4">
-          <div className="bg-gray-900 border border-gray-700 rounded-2xl max-w-xl w-full p-6 text-left shadow-2xl text-white">
-            <div className="flex items-center justify-between pb-4 mb-4 border-b border-gray-800">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 bg-blue-600/20 text-blue-400 rounded-xl border border-blue-500/30">
-                  <Globe className="w-6 h-6" />
-                </div>
-                <div>
-                  <h2 className="text-2xl font-bold">Multiplayer Server Lobby</h2>
-                  <p className="text-xs text-gray-400">Select server, callsign, and team affiliation</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowMultiplayerModal(false)}
-                className="p-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition-colors cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            {/* 1. Server Choice */}
-            <div className="mb-5">
-              <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
-                1. Choose Server
-              </label>
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <button
-                  type="button"
-                  onClick={() => setServerType('default')}
-                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                    serverType === 'default'
-                      ? 'bg-blue-950/40 border-blue-500 shadow-sm shadow-blue-500/20'
-                      : 'bg-gray-800/60 border-gray-700 hover:border-gray-600'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-sm flex items-center gap-1.5">
-                      <Server className="w-4 h-4 text-blue-400" /> Official Server
-                    </span>
-                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800/40">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Online
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-400">
-                    Host: <span className="text-gray-300 font-mono">{typeof window !== 'undefined' ? (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host : 'ws://localhost:3000'}</span>
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setServerType('custom')}
-                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                    serverType === 'custom'
-                      ? 'bg-purple-950/40 border-purple-500 shadow-sm shadow-purple-500/20'
-                      : 'bg-gray-800/60 border-gray-700 hover:border-gray-600'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-sm flex items-center gap-1.5">
-                      <Wifi className="w-4 h-4 text-purple-400" /> Custom Server
-                    </span>
-                    <span className="text-[11px] text-gray-400">External ws://</span>
-                  </div>
-                  <p className="text-xs text-gray-400">Connect to remote or private host</p>
-                </button>
-              </div>
-
-              {serverType === 'custom' && (
-                <div className="mt-2">
-                  <input
-                    type="text"
-                    value={customServerUrl}
-                    onChange={(e) => setCustomServerUrl(e.target.value)}
-                    placeholder="ws://localhost:3000 or wss://..."
-                    className="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 font-mono"
-                  />
-                </div>
-              )}
-            </div>
-
-            {/* 2. Player Callsign */}
-            <div className="mb-5">
-              <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
-                2. Callsign / Player Name
-              </label>
-              <div className="relative">
-                <Crosshair className="w-4 h-4 absolute left-3.5 top-3 text-gray-400" />
-                <input
-                  type="text"
-                  value={playerName}
-                  onChange={(e) => setPlayerName(e.target.value)}
-                  maxLength={18}
-                  placeholder="Enter soldier name..."
-                  className="w-full bg-gray-950 border border-gray-700 rounded-xl pl-10 pr-4 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-            </div>
-
-            {/* 3. Team Selection */}
-            <div className="mb-5">
-              <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
-                3. Choose Your Team
-              </label>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setModalTeam('blue')}
-                  className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-                    modalTeam === 'blue'
-                      ? 'bg-blue-900/40 border-blue-500 ring-2 ring-blue-500/50'
-                      : 'bg-gray-800/40 border-gray-700 hover:border-gray-600'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-bold text-base text-blue-400 flex items-center gap-2">
-                      <Shield className="w-5 h-5" /> BLUE TEAM
-                    </span>
-                    {modalTeam === 'blue' && <Check className="w-4 h-4 text-blue-400" />}
-                  </div>
-                  <p className="text-xs text-gray-300">Base at North (-95m). Capture South flag.</p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setModalTeam('red')}
-                  className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-                    modalTeam === 'red'
-                      ? 'bg-red-900/40 border-red-500 ring-2 ring-red-500/50'
-                      : 'bg-gray-800/40 border-gray-700 hover:border-gray-600'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-bold text-base text-red-400 flex items-center gap-2">
-                      <Shield className="w-5 h-5" /> RED TEAM
-                    </span>
-                    {modalTeam === 'red' && <Check className="w-4 h-4 text-red-400" />}
-                  </div>
-                  <p className="text-xs text-gray-300">Base at South (+95m). Capture North flag.</p>
-                </button>
-              </div>
-            </div>
-
-            {/* 4. Play Over Internet Invite Link */}
-            <div className="mb-6 p-3 bg-gray-950/80 border border-gray-800 rounded-xl">
-              <div className="flex items-center justify-between mb-1">
-                <div className="flex items-center gap-2 text-xs text-gray-300 font-semibold">
-                  <Link2 className="w-4 h-4 text-indigo-400" />
-                  <span>Play over Internet with a friend</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => copyInviteLink(modalTeam === 'blue' ? 'red' : 'blue')}
-                  className="px-3 py-1.5 bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-200 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>{copiedInvite ? 'Copied Link!' : `Copy Link (Join as ${modalTeam === 'blue' ? 'RED' : 'BLUE'})`}</span>
-                </button>
-              </div>
-              <p className="text-[11px] text-gray-400">
-                Copies a direct match join URL to your clipboard. Send it to a friend anywhere on the internet to join your live game!
-              </p>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex items-center justify-between pt-4 border-t border-gray-800">
-              <button
-                type="button"
-                onClick={() => setShowMultiplayerModal(false)}
-                className="px-4 py-2.5 text-gray-400 hover:text-white text-sm font-medium rounded-xl hover:bg-gray-800 transition-colors flex items-center gap-2 cursor-pointer"
-              >
-                <ArrowLeft className="w-4 h-4" /> Cancel
-              </button>
-
-              <button
-                type="button"
-                onClick={handleDeployMultiplayer}
-                className="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-base rounded-xl transition-all shadow-lg shadow-blue-600/30 flex items-center gap-2 cursor-pointer"
-              >
-                <Play className="w-4 h-4 fill-white" /> Connect & Deploy
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {started && (
-        <>
-          {/* Quick Preview & Spectator Toolbar (Top Left) */}
-          <div className="absolute top-4 left-4 z-40 flex items-center gap-2">
-            {!isPointerLocked && !gameState.isSpectating && (
-              <div 
-                onClick={handleCanvasClick}
-                className="bg-gray-900/90 backdrop-blur-md px-3.5 py-2 rounded-xl border border-gray-700 text-xs text-gray-300 flex items-center gap-2 cursor-pointer hover:bg-gray-800 transition-colors shadow-lg"
-                title="Click anywhere to lock pointer aim"
-              >
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span><b>Click Canvas</b> to Lock Aim</span>
-                <span className="text-gray-500">|</span>
-                <span className="text-gray-400">Drag/Arrows to turn</span>
-              </div>
-            )}
-            
-            <button
-              onClick={() => gameRef.current?.toggleSpectator()}
-              className={`px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-lg cursor-pointer ${
-                gameState.isSpectating
-                  ? 'bg-indigo-600 hover:bg-indigo-500 text-white ring-2 ring-indigo-400'
-                  : 'bg-gray-900/80 hover:bg-gray-800 text-gray-300 border border-gray-700'
-              }`}
-            >
-              <span>🎥</span>
-              <span>{gameState.isSpectating ? 'Exit Spectator (P)' : 'Spectate AI (P)'}</span>
-            </button>
-
-            {gameMode === 'online' && (
-              <div className="bg-gray-900/90 backdrop-blur-md px-3 py-2 rounded-xl border border-emerald-500/40 text-xs text-gray-300 flex items-center gap-2 shadow-lg">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span className="text-emerald-400 font-bold">ONLINE</span>
-                <button
-                  type="button"
-                  onClick={() => copyInviteLink(selectedTeam === 'blue' ? 'red' : 'blue')}
-                  className="px-2 py-0.5 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/50 rounded flex items-center gap-1 cursor-pointer transition-colors text-[11px] font-medium"
-                  title="Copy Opponent Join Link to share with a friend"
-                >
-                  <Copy className="w-3 h-3" />
-                  <span>{copiedInvite ? 'Copied!' : 'Invite Friend'}</span>
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Spectator Mode Active Banner & Controls */}
-          {gameState.isSpectating && (
-            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-2 pointer-events-auto">
-              <div className="bg-indigo-950/90 border border-indigo-500/60 backdrop-blur-md px-4 py-2 rounded-2xl shadow-2xl flex items-center gap-3 text-xs text-indigo-100">
-                <span className="w-2.5 h-2.5 rounded-full bg-indigo-400 animate-ping"></span>
-                <span className="font-bold tracking-wide uppercase text-indigo-300">
-                  {gameState.spectatorMode === 'free' ? '🦅 Free-Fly Drone Cam' : '🎯 Action Combat Cam'}
-                </span>
-                <span className="text-gray-500">|</span>
-                <button
-                  onClick={() => gameRef.current?.cycleSpectatorMode()}
-                  className="px-2.5 py-1 bg-indigo-700/80 hover:bg-indigo-600 text-white rounded-lg font-semibold transition-colors cursor-pointer flex items-center gap-1"
-                  title="Switch between Action Tracking and Free-Fly Drone Cam (C)"
-                >
-                  <span>🔄 Switch Mode (C)</span>
-                </button>
-                <button
-                  onClick={() => gameRef.current?.toggleSpectator()}
-                  className="px-2.5 py-1 bg-gray-800/80 hover:bg-gray-700 text-gray-200 rounded-lg font-semibold transition-colors cursor-pointer"
-                  title="Return to Player (P)"
-                >
-                  Exit (P)
-                </button>
-              </div>
-
-              {gameState.spectatorMode === 'action' && gameState.spectatorTrackedName && (
-                <div className="bg-black/80 border border-indigo-500/40 backdrop-blur-md px-4 py-1.5 rounded-xl text-xs text-yellow-300 font-medium shadow-lg flex items-center gap-2">
-                  <span>🔭 Focusing:</span>
-                  <span className="text-white font-bold">{gameState.spectatorTrackedName}</span>
-                </div>
-              )}
-
-              {gameState.spectatorMode === 'free' && (
-                <div className="bg-black/85 border border-indigo-500/40 backdrop-blur-md px-4 py-1.5 rounded-xl text-[11px] text-gray-200 flex flex-wrap items-center justify-center gap-2.5 shadow-xl">
-                  <span>🎮 <b>WASD / Arrows:</b> Fly & Pan</span>
-                  <span className="text-gray-600">•</span>
-                  <span><b>Space / E:</b> Up</span>
-                  <span className="text-gray-600">•</span>
-                  <span><b>Q / Shift:</b> Down</span>
-                  <span className="text-gray-600">•</span>
-                  <span><b>Shift:</b> Turbo</span>
-                  <span className="text-gray-600">•</span>
-                  <span><b>Drag / Lock:</b> Look</span>
-                  <span className="text-gray-600">•</span>
-                  <span><b>Wheel:</b> Speed</span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Online Multiplayer Live Status */}
-          {gameMode === 'online' && (
-            <div className="absolute top-4 right-4 z-30 flex flex-col items-end gap-1.5">
-              <div className="bg-gray-900/90 backdrop-blur-md px-3.5 py-2 rounded-xl border border-purple-500/50 shadow-xl flex items-center gap-2.5 text-xs text-white">
-                <span className={`w-2.5 h-2.5 rounded-full ${gameState.isNetworkConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
-                <span className="font-semibold">
-                  {gameState.isNetworkConnected ? `Live Server: ${gameState.connectedPlayersCount || 1} Player${(gameState.connectedPlayersCount || 1) > 1 ? 's' : ''}` : 'Connecting to Server...'}
-                </span>
-                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${selectedTeam === 'blue' ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-red-950 text-red-300 border border-red-800'}`}>
-                  {selectedTeam} Team
-                </span>
-              </div>
-              {(gameState.connectedPlayersCount || 1) <= 1 && (
-                <div className="bg-black/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-gray-700 text-[11px] text-gray-300 max-w-xs text-right">
-                  💡 Open in a 2nd tab/window to test 1v1 PvP & flags!
-                </div>
-              )}
-            </div>
-          )}
-          {/* Scoreboard - only in multiplayer */}
-          {(gameMode === 'multiplayer' || gameMode === 'online') && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
-              <div className="flex flex-col items-center gap-2">
-                <div className="flex items-center bg-gray-900/90 rounded-xl overflow-hidden border-2 border-gray-700">
-                  <div className="px-5 py-2 bg-blue-900/40 flex flex-col items-center gap-1">
-                    <span className="text-blue-300 font-bold text-sm">BLUE</span>
-                    <div className="flex items-center gap-3">
-                      <div className="flex flex-col items-center">
-                        <span className="text-gray-400 text-xs">Kills</span>
-                        <span className="text-white font-bold text-xl">{gameState.blueKills}</span>
-                      </div>
-                      <div className="flex flex-col items-center">
-                        <span className="text-gray-400 text-xs">Flags</span>
-                        <span className="text-yellow-400 font-bold text-xl">{gameState.blueCaptures}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="px-3 py-2 text-gray-500 font-bold">VS</div>
-                  <div className="px-5 py-2 bg-red-900/40 flex flex-col items-center gap-1">
-                    <span className="text-red-300 font-bold text-sm">RED</span>
-                    <div className="flex items-center gap-3">
-                      <div className="flex flex-col items-center">
-                        <span className="text-gray-400 text-xs">Kills</span>
-                        <span className="text-white font-bold text-xl">{gameState.redKills}</span>
-                      </div>
-                      <div className="flex flex-col items-center">
-                        <span className="text-gray-400 text-xs">Flags</span>
-                        <span className="text-yellow-400 font-bold text-xl">{gameState.redCaptures}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                
-                {/* Flag carrier indicator */}
-                {gameState.flagCarrierName && (
-                  <div className="bg-yellow-900/90 px-4 py-2 rounded-lg border-2 border-yellow-500 animate-pulse">
-                    <span className="text-yellow-300 font-bold text-sm">
-                      🚩 Flag Carrier: {gameState.flagCarrierName}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+    <div style={{ width: '100vw', height: '100vh', margin: 0, overflow: 'hidden' }}>
+      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+      
+      {showMenu && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          background: 'rgba(0,0,0,0.8)',
+          padding: '40px',
+          borderRadius: '10px',
+          color: 'white',
+          textAlign: 'center',
+          fontFamily: 'Arial, sans-serif'
+        }}>
+          <h1 style={{ marginBottom: '30px', fontSize: '36px' }}>VOXEL FPS CTF</h1>
           
-          {/* Singleplayer mode indicator */}
-          {gameMode === 'singleplayer' && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
-              <div className="bg-blue-900/80 rounded-xl px-6 py-2 border-2 border-blue-600">
-                <span className="text-blue-200 font-bold text-sm">🧪 SINGLEPLAYER MODE</span>
-              </div>
-            </div>
+          <input
+            type="text"
+            placeholder="Enter your name"
+            value={playerName}
+            onChange={(e) => setPlayerName(e.target.value)}
+            style={{
+              padding: '12px',
+              fontSize: '18px',
+              marginBottom: '20px',
+              width: '250px',
+              borderRadius: '5px',
+              border: 'none'
+            }}
+          />
+          
+          <div style={{ marginBottom: '20px' }}>
+            <p style={{ marginBottom: '10px' }}>Select Team:</p>
+            <button
+              onClick={() => setSelectedTeam('blue')}
+              style={{
+                padding: '10px 20px',
+                margin: '0 10px',
+                fontSize: '16px',
+                background: selectedTeam === 'blue' ? '#0000ff' : '#333',
+                color: 'white',
+                border: 'none',
+                borderRadius: '5px',
+                cursor: 'pointer'
+              }}
+            >
+              BLUE
+            </button>
+            <button
+              onClick={() => setSelectedTeam('red')}
+              style={{
+                padding: '10px 20px',
+                margin: '0 10px',
+                fontSize: '16px',
+                background: selectedTeam === 'red' ? '#ff0000' : '#333',
+                color: 'white',
+                border: 'none',
+                borderRadius: '5px',
+                cursor: 'pointer'
+              }}
+            >
+              RED
+            </button>
+          </div>
+          
+          <button
+            onClick={joinGame}
+            disabled={!playerName.trim()}
+            style={{
+              padding: '15px 40px',
+              fontSize: '20px',
+              background: playerName.trim() ? '#4CAF50' : '#666',
+              color: 'white',
+              border: 'none',
+              borderRadius: '5px',
+              cursor: playerName.trim() ? 'pointer' : 'not-allowed'
+            }}
+          >
+            JOIN GAME
+          </button>
+          
+          {!isConnected && networkRef.current?.isSinglePlayer && (
+            <p style={{ marginTop: '20px', color: '#ffa500' }}>
+              Single Player Mode (No server available)
+            </p>
           )}
+        </div>
+      )}
 
-          {/* First-person gameplay HUD (hidden during spectator mode) */}
-          {!gameState.isSpectating && (
-            <>
-              {/* Health */}
-              <div className="absolute bottom-8 left-8 z-10">
-                <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl px-5 py-3 border-2 border-gray-700">
-                  <div className="flex items-center gap-3">
-                    <div className="w-32 h-3 bg-gray-700 rounded-full overflow-hidden">
-                      <div className="h-full rounded-full transition-all" style={{
-                        width: `${(gameState.hp / gameState.maxHp) * 100}%`,
-                        background: gameState.hp > 50 ? '#00ff88' : gameState.hp > 25 ? '#ffcc00' : '#ff3366',
-                      }}></div>
-                    </div>
-                    <span className="text-white font-bold text-lg">{gameState.hp}</span>
-                  </div>
-                </div>
-              </div>
+      {gameState && !showMenu && (
+        <div style={{
+          position: 'absolute',
+          top: '20px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: 'rgba(0,0,0,0.7)',
+          padding: '15px 30px',
+          borderRadius: '5px',
+          color: 'white',
+          fontFamily: 'Arial, sans-serif',
+          fontSize: '24px',
+          display: 'flex',
+          gap: '30px'
+        }}>
+          <span style={{ color: '#ff4444' }}>RED: {gameState.scores.red}</span>
+          <span>|</span>
+          <span style={{ color: '#4444ff' }}>BLUE: {gameState.scores.blue}</span>
+          <span>|</span>
+          <span>{Math.floor(gameState.timeRemaining / 60)}:{(gameState.timeRemaining % 60).toString().padStart(2, '0')}</span>
+        </div>
+      )}
 
-              {/* Equipment */}
-              <div className="absolute bottom-8 right-8 z-10">
-                <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl px-5 py-3 border-2 border-gray-700">
-                  <div className="space-y-1">
-                    {(['rifle', 'smg', 'spade', 'pickaxe'] as const).map((item) => (
-                      <div key={item} className={`flex items-center gap-2 px-2 py-1 rounded text-sm ${
-                        gameState.equipment === item ? 'bg-[#00ff88]/20 text-[#00ff88]' : 'text-gray-400'
-                      }`}>
-                        <span className="font-mono w-3">{equipmentKeys[item]}</span>
-                        <span>{equipmentNames[item]}</span>
-                        {gameState.equipment === item && <span className="ml-auto">●</span>}
-                      </div>
-                    ))}
-                  </div>
-                  {(gameState.equipment === 'rifle' || gameState.equipment === 'smg') && (
-                    <div className="text-xs text-gray-500 mt-2 pt-1 border-t border-gray-700">
-                      {gameState.isAiming ? '🎯 Iron Sights' : 'Right-click to aim'}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Ammo Counter */}
-              {(gameState.equipment === 'rifle' || gameState.equipment === 'smg') && (
-                <div className="absolute bottom-32 right-8 z-10">
-                  <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl px-5 py-3 border-2 border-gray-700">
-                    <div className="text-gray-400 text-xs mb-1">Ammo</div>
-                    <div className="flex items-baseline gap-2">
-                      <span className={`text-2xl font-bold ${
-                        (gameState.currentAmmo ?? 0) === 0 ? 'text-red-500' : 
-                        (gameState.currentAmmo ?? 0) < (gameState.magazineSize ?? 10) * 0.3 ? 'text-yellow-500' : 
-                        'text-white'
-                      }`}>
-                        {gameState.currentAmmo ?? 0}
-                      </span>
-                      <span className="text-gray-500 text-sm">/ {gameState.magazineSize ?? 0}</span>
-                    </div>
-                    {gameState.isReloading && (
-                      <div className="text-xs text-yellow-500 mt-1 animate-pulse">
-                        🔄 Reloading...
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Inventory */}
-              <div className="absolute top-8 right-8 z-10">
-                <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl px-5 py-3 border-2 border-gray-700">
-                  <div className="text-gray-400 text-xs">Inventory</div>
-                  <div className="text-white font-bold text-xl">📦 {gameState.inventory}</div>
-                </div>
-              </div>
-
-              {/* Crosshair */}
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-10">
-                <div className="relative w-8 h-8">
-                  {gameState.isAiming && <div className="absolute inset-0 rounded-full border-2 border-white/30"></div>}
-                  <div className="absolute top-1/2 left-0 w-3 h-0.5 bg-white -translate-y-1/2"></div>
-                  <div className="absolute top-1/2 right-0 w-3 h-0.5 bg-white -translate-y-1/2"></div>
-                  <div className="absolute left-1/2 top-0 w-0.5 h-3 bg-white -translate-x-1/2"></div>
-                  <div className="absolute left-1/2 bottom-0 w-0.5 h-3 bg-white -translate-x-1/2"></div>
-                  <div className="absolute top-1/2 left-1/2 w-1 h-1 bg-white rounded-full -translate-x-1/2 -translate-y-1/2"></div>
-                </div>
-              </div>
-
-              {/* Target info */}
-              {gameState.targetInfo && (
-                <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-10">
-                  <div className="bg-gray-900/60 rounded-lg px-3 py-1">
-                    <p className="text-gray-300 text-xs">{gameState.targetInfo}</p>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Hit marker - flashes red on target hit, auto-fades */}
-          {gameState.hitMarker && !gameState.isSpectating && (
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-30">
-              <div className="w-6 h-6 relative">
-                <div className="absolute top-0 left-0 w-2.5 h-0.5 bg-red-500 shadow-[0_0_6px_#ef4444] rotate-45 origin-left"></div>
-                <div className="absolute top-0 right-0 w-2.5 h-0.5 bg-red-500 shadow-[0_0_6px_#ef4444] -rotate-45 origin-right"></div>
-                <div className="absolute bottom-0 left-0 w-2.5 h-0.5 bg-red-500 shadow-[0_0_6px_#ef4444] -rotate-45 origin-left"></div>
-                <div className="absolute bottom-0 right-0 w-2.5 h-0.5 bg-red-500 shadow-[0_0_6px_#ef4444] rotate-45 origin-right"></div>
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-red-500 shadow-[0_0_8px_#ef4444]"></div>
-              </div>
-            </div>
-          )}
-
-          {/* Message */}
-          {gameState.message && gameState.messageTimer > 0 && (
-            <div className="absolute top-1/3 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
-              <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl px-6 py-3 border border-gray-700">
-                <p className="text-white font-medium text-center">{gameState.message}</p>
-              </div>
-            </div>
-          )}
-
-          {/* Death screen */}
-          {gameState.isDead && !gameState.isSpectating && (
-            <div className="absolute inset-0 flex items-center justify-center bg-red-950/60 backdrop-blur-sm z-30">
-              <div className="text-center bg-gray-900/90 border border-red-500/40 p-8 rounded-2xl shadow-2xl max-w-md mx-4">
-                <h2 className="text-4xl font-extrabold text-red-500 mb-2 tracking-tight">☠️ ELIMINATED</h2>
-                <p className="text-gray-300 font-medium mb-1">
-                  Respawning at base in <span className="text-white font-bold text-lg">{Math.ceil(gameState.respawnTimer)}s</span>
-                </p>
-                <p className="text-gray-400 text-xs mb-5">BLUE {gameState.blueKills} — {gameState.redKills} RED</p>
-                
-                <button
-                  onClick={() => gameRef.current?.toggleSpectator()}
-                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-xl transition-all shadow-lg cursor-pointer flex items-center justify-center gap-2 mx-auto"
-                >
-                  <span>🎥</span>
-                  <span>Spectate Battle While Waiting (P)</span>
-                </button>
-              </div>
-            </div>
-          )}
-        </>
+      {!showMenu && (
+        <div style={{
+          position: 'absolute',
+          bottom: '20px',
+          left: '20px',
+          color: 'white',
+          fontFamily: 'Arial, sans-serif',
+          fontSize: '14px',
+          background: 'rgba(0,0,0,0.5)',
+          padding: '10px',
+          borderRadius: '5px'
+        }}>
+          <p>WASD - Move | Mouse - Look | Click - Shoot</p>
+          <p>R - Respawn | ESC - Menu</p>
+        </div>
       )}
     </div>
   );
-}
+};
 
 export default App;
