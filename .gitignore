@@ -1,22 +1,29 @@
 ```
-# Dependencies
-node_modules/
-
-# Build outputs
+# Build artifacts
 dist/
 build/
-*.js.map
-*.ts.map
+*.js
+*.css
+*.svg
+
+# Dependencies
+node_modules/
 
 # Environment
 .env
 .env.local
 *.env.*
 
-# Logs
-*.log
+# Editors
+.vscode/
+.idea/
 
-# Coverage
-coverage/
-.nyc_output/
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# OS generated files
+.DS_Store
+Thumbs.db
 ```
