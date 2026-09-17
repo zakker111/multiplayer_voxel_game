@@ -35,10 +35,10 @@ export const VOXEL_LEAVES = 6;
 
 // Weapons
 export const WEAPONS = {
-  rifle: { name: 'M1 Garand', damage: 25, range: 100, fireRate: 0.8, ammo: 8 },
-  smg: { name: 'Thompson', damage: 15, range: 50, fireRate: 0.15, ammo: 30 },
-  spade: { name: 'Spade', damage: 50, range: 3, fireRate: 0.6, ammo: Infinity },
-  pickaxe: { name: 'Pickaxe', damage: 30, range: 4, fireRate: 0.5, ammo: Infinity }
+  rifle: { name: 'M1 Garand', damage: { head: 50, body: 25 }, range: 100, fireRate: 0.8, ammo: 8 },
+  smg: { name: 'Thompson', damage: { head: 30, body: 15 }, range: 50, fireRate: 0.15, ammo: 30 },
+  spade: { name: 'Spade', damage: { head: 100, body: 50 }, range: 3, fireRate: 0.6, ammo: Infinity },
+  pickaxe: { name: 'Pickaxe', damage: { head: 60, body: 30 }, range: 4, fireRate: 0.5, ammo: Infinity }
 };
 
 // Tools
@@ -61,25 +61,34 @@ export interface Rotation {
 
 export interface PlayerState {
   id: string;
-  x: number;
-  y: number;
-  z: number;
-  yaw: number;
-  pitch: number;
+  x?: number;
+  y?: number;
+  z?: number;
+  yaw?: number;
+  pitch?: number;
   team: 'red' | 'blue' | 'spectator';
-  health: number;
+  health?: number;
   hp: number; // Legacy alias
-  weapon: string;
-  hasFlag: boolean;
-  ammo: number;
-  isAlive: boolean;
+  weapon?: string;
+  hasFlag?: boolean;
+  ammo?: number;
+  isAlive?: boolean;
   isDead: boolean; // Computed property
-  isSpectator: boolean;
+  isSpectator?: boolean;
   position: { x: number; y: number; z: number };
   rotation: { yaw: number; pitch: number };
   name?: string;
   velocity?: { x: number; y: number; z: number };
-  equipment?: number | string;
+  equipment?: string;
+  isAiming?: boolean;
+  isCrouching?: boolean;
+  isSprinting?: boolean;
+  isShooting?: boolean;
+  currentAmmo?: number;
+  magazineSize?: number;
+  isReloading?: boolean;
+  aimTransition?: number;
+  carryingFlag?: boolean;
 }
 
 export interface PlayerInput {
@@ -178,7 +187,7 @@ export type ServerMessage =
   | { type: 'inventoryUpdated'; inventory: number }
   | { type: 'voxelChanged'; x: number; y: number; z: number; voxelType: number; change?: { x: number; y: number; z: number; type: number; durability?: number } }
   | { type: 'ammoUpdate'; ammo: number }
-  | { type: 'init'; playerId: string; captures?: { blue: number; red: number }; scores?: { blue: number; red: number }; players?: Array<{ id: string; state: PlayerState }>; inventory?: number; voxelChanges?: VoxelChange[] }
+  | { type: 'init'; playerId: string; captures?: { blue: number; red: number }; scores?: { blue: number; red: number }; players?: Array<{ id: string; state: PlayerState }>; inventory?: number; voxelChanges?: VoxelChange[]; state?: PlayerState }
   | { type: 'spectatorToggled'; playerId: string; isSpectator: boolean; isSpectating?: boolean }
   | { type: 'footstep'; playerId: string; volume: number; pitch?: number }
   | { type: 'playerShot'; playerId: string; targetId?: string; origin?: { x: number; y: number; z: number }; direction?: { x: number; y: number; z: number }; weapon?: string }
