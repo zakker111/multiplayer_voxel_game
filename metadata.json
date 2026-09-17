@@ -1,0 +1,6 @@
+{
+  "name": "Voxel FPS",
+  "description": "Voxel FPS multiplayer game featuring Red vs Blue Capture the Flag with destructible terrain and bot combat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
