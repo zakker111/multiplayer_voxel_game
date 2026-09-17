@@ -60,11 +60,14 @@ export class ServerPlayer {
   };
 
   private input: PlayerInput = {
+    forward: 0,
+    right: 0,
     moveX: 0,
     moveZ: 0,
     jump: false,
     crouch: false,
     sprint: false,
+    shoot: false,
     yaw: 0,
     pitch: 0,
   };
@@ -84,7 +87,12 @@ export class ServerPlayer {
     this.isCrouching = input.crouch;
     this.isSprinting = input.sprint;
     if (input.equipment && input.equipment !== this.equipment) {
-      this.changeEquipment(input.equipment);
+      const validEquipment = ['rifle', 'smg', 'pickaxe', 'spade'].includes(input.equipment) 
+        ? (input.equipment as 'rifle' | 'smg' | 'pickaxe' | 'spade')
+        : this.equipment;
+      if (validEquipment !== this.equipment) {
+        this.changeEquipment(validEquipment);
+      }
     }
     if (input.isAiming !== undefined) this.isAiming = input.isAiming;
     if (input.position) {
