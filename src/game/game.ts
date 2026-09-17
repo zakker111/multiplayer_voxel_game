@@ -1809,7 +1809,7 @@ export class Game {
 
       this.showMessage('🎥 Spectator Mode: Active (Action Cam • Press C for Free Fly)');
       
-      if (this.networkClient && this.networkClient.isConnected) {
+      if (this.networkClient && this.networkClient.isConnected()) {
         this.networkClient.sendToggleSpectator();
       }
     } else {
@@ -1832,7 +1832,7 @@ export class Game {
       this.player.updateCamera();
       this.showMessage('🎯 Player First-Person: Active');
       
-      if (this.networkClient && this.networkClient.isConnected) {
+      if (this.networkClient && this.networkClient.isConnected()) {
         this.networkClient.sendToggleSpectator();
       }
     }
@@ -1947,10 +1947,11 @@ export class Game {
     }
 
     // Send shoot event to network server with hit candidate
-    if (this.networkClient && this.networkClient.isConnected) {
+    if (this.networkClient && this.networkClient.isConnected()) {
       this.networkClient.sendShoot(
-        muzzlePos.x, muzzlePos.y, muzzlePos.z,
-        dir.x, dir.y, dir.z
+        { x: muzzlePos.x, y: muzzlePos.y, z: muzzlePos.z },
+        { x: dir.x, y: dir.y, z: dir.z },
+        hitRemoteId ? { targetId: hitRemoteId, isHeadshot: hitIsHeadshot } : undefined
       );
     }
 
@@ -2019,8 +2020,8 @@ export class Game {
         this.inventory++;
         this.sounds.pickaxeHit();
       }
-      if (this.networkClient && this.networkClient.isConnected) {
-        this.networkClient.sendUseTool('destroy', hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 0);
+      if (this.networkClient && this.networkClient.isConnected()) {
+        this.networkClient.sendUseTool('pickaxe', { x: hit.voxelPos.x, y: hit.voxelPos.y, z: hit.voxelPos.z });
       }
     }
   }
@@ -2052,8 +2053,8 @@ export class Game {
       }
       
       this.sounds.spadeHit();
-      if (this.networkClient && this.networkClient.isConnected) {
-        this.networkClient.sendUseTool('destroy', vx, vy, vz, 0);
+      if (this.networkClient && this.networkClient.isConnected()) {
+        this.networkClient.sendUseTool('spade', { x: vx, y: vy, z: vz });
       }
     }
   }
@@ -2225,8 +2226,8 @@ export class Game {
         this.world.setVoxel(px, py, pz, VOXEL_BUILT, 3);
         this.inventory--;
         this.sounds.buildPlace();
-        if (this.networkClient && this.networkClient.isConnected) {
-          this.networkClient.sendBuild(px, py, pz, 4);
+        if (this.networkClient && this.networkClient.isConnected()) {
+          this.networkClient.sendBuild({ x: px, y: py, z: pz });
         }
         
         // Add instant visual feedback - flash the placed block
@@ -2288,7 +2289,7 @@ export class Game {
     this.reloadAnimationTime = 0;
     this.reloadAnimationDuration = weapon.reloadTime;
     this.sounds.reload();
-    if (this.networkClient && this.networkClient.isConnected) {
+    if (this.networkClient && this.networkClient.isConnected()) {
       this.networkClient.sendReload();
     }
   }
@@ -2369,16 +2370,18 @@ export class Game {
     this.sounds.respawn();
     this.showMessage(`🎖️ Respawned at ${this.playerTeam.toUpperCase()} Base!`);
 
-    if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected) {
+    if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected()) {
       this.networkClient.sendPlayerInput({
-        forward: 0,
-        right: 0,
+        moveX: 0,
+        moveZ: 0,
         jump: false,
         crouch: false,
         sprint: false,
-        shoot: false,
         yaw: this.player.yaw,
         pitch: this.player.pitch,
+        position: { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z },
+        equipment: this.equipment,
+        isAiming: false,
       });
     }
   }
@@ -2489,19 +2492,21 @@ export class Game {
     this.updateBots(dt);
 
     // Send network player input to server
-    if (this.networkClient && this.networkClient.isConnected && !this.player.isDead) {
+    if (this.networkClient && this.networkClient.isConnected() && !this.player.isDead) {
       const now = performance.now();
       if (now - this.lastInputSendTime > this.inputSendRate) {
         this.lastInputSendTime = now;
         this.networkClient.sendPlayerInput({
-          forward: (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0),
-          right: (this.player.hasKey('KeyD') ? 1 : 0) - (this.player.hasKey('KeyA') ? 1 : 0),
+          moveX: (this.player.hasKey('KeyD') ? 1 : 0) - (this.player.hasKey('KeyA') ? 1 : 0),
+          moveZ: (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0),
           jump: this.player.hasKey('Space'),
           crouch: this.player.isCrouching,
           sprint: this.player.isSprinting,
-          shoot: false,
           yaw: this.player.yaw,
           pitch: this.player.pitch,
+          position: { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z },
+          equipment: this.equipment,
+          isAiming: this.isAiming,
         });
       }
     }
@@ -3146,8 +3151,8 @@ export class Game {
               this.sounds.buildPlace();
               bot.inventoryBlocks--;
               this.resolveBotVoxelPenetration(bot);
-              if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected) {
-                this.networkClient.sendBuild(blk.x, blk.y, blk.z, 4);
+              if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected()) {
+                this.networkClient.sendBuild({ x: blk.x, y: blk.y, z: blk.z });
               }
             }
             bot.buildTimer = 0.28; // Next block in queue
@@ -3195,8 +3200,8 @@ export class Game {
             bot.inventoryBlocks += 2;
             bot.trenchDepth += 2;
             bot.isInTrench = true;
-            if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected) {
-              this.networkClient.sendUseTool('destroy', x, y, z, 0);
+            if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected()) {
+              this.networkClient.sendUseTool('spade', { x, y, z });
             }
           }
           bot.isDigging = false;
@@ -3418,8 +3423,8 @@ export class Game {
             }
             if (breached) {
               this.sounds.spadeHit();
-              if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected) {
-                this.networkClient.sendUseTool('destroy', fwdX, footY, fwdZ, 0);
+              if (this.gameMode === 'online' && this.networkClient && this.networkClient.isConnected()) {
+                this.networkClient.sendUseTool('spade', { x: fwdX, y: footY, z: fwdZ });
               }
               bot.stuckTimer = 0.15;
             }
@@ -3653,7 +3658,7 @@ export class Game {
 
     // Target cylinder intersection test:
     let isHit = false;
-    const hitPoint = new THREE.Vector3();
+    let hitPoint = new THREE.Vector3();
     let isHeadshot = false;
 
     // Solve closest approach along 3D ray to target center axis
@@ -3804,7 +3809,7 @@ export class Game {
         spectatorTrackedName: this.spectatorTrackedName,
         isOnline: this.gameMode === 'online',
         connectedPlayersCount: this.remotePlayers.size + 1,
-        isNetworkConnected: this.networkClient ? this.networkClient.isConnected : false,
+        isNetworkConnected: this.networkClient ? this.networkClient.isConnected() : false,
         localPlayerId: this.localPlayerId,
       });
     }

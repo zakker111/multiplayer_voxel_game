@@ -71,7 +71,7 @@ export class ServerGame {
       captures: this.captures,
       inventory: this.inventories.get(playerId) || 20,
       voxelChanges: this.world.getModifiedVoxels(),
-    } as ServerMessage);
+    });
     
     console.log(`Player ${playerId} connected (total: ${this.players.size})`);
     return playerId;
@@ -115,9 +115,9 @@ export class ServerGame {
         });
         this.broadcastExcept(playerId, {
           type: 'playerJoined',
-          player: player.getState(),
           playerId,
-        } as ServerMessage);
+          state: player.getState(),
+        });
         break;
 
       case 'playerInput':
@@ -129,10 +129,7 @@ export class ServerGame {
         break;
 
       case 'useTool':
-        if ((message.tool === 'spade' || message.tool === 'pickaxe') && message.target) {
-          const target: Position = JSON.parse(message.target);
-          this.handleUseTool(playerId, message.tool, target);
-        }
+        this.handleUseTool(playerId, message.tool, message.target);
         break;
 
       case 'build':
@@ -158,8 +155,8 @@ export class ServerGame {
         this.broadcast({
           type: 'spectatorToggled',
           playerId,
-          isSpectator: player.isSpectating,
-        } as ServerMessage);
+          isSpectating: player.isSpectating,
+        });
         console.log(`Player ${playerId} ${player.isSpectating ? 'entered' : 'exited'} spectator mode`);
         break;
 
@@ -169,7 +166,7 @@ export class ServerGame {
           type: 'footstep',
           playerId,
           volume: message.volume,
-          pitch: (message as any).pitch,
+          pitch: message.pitch,
         });
         break;
 
@@ -295,11 +292,10 @@ export class ServerGame {
       // Notify attacker of confirmed hit
       this.sendToPlayer(playerId, {
         type: 'hitConfirmed',
-        playerId,
         targetId,
         damage,
         isHeadshot: confirmedTarget.isHeadshot,
-      } as ServerMessage);
+      });
 
       // Notify victim and everyone of damage
       this.broadcast({
@@ -362,10 +358,6 @@ export class ServerGame {
         const voxel = this.world.getVoxel(x, y, z);
         this.broadcast({
           type: 'voxelChanged',
-          x,
-          y,
-          z,
-          voxelType: voxel ? voxel.type : VOXEL_AIR,
           change: {
             x,
             y,
@@ -373,29 +365,21 @@ export class ServerGame {
             type: voxel ? voxel.type : VOXEL_AIR,
             durability: voxel ? voxel.durability : 0,
           },
-        } as ServerMessage);
+        });
         
         // Check for collapse
         const collapsed = this.world.collapseDisconnected(x, y, z);
         for (const change of collapsed) {
           this.broadcast({
             type: 'voxelChanged',
-            x: change.x,
-            y: change.y,
-            z: change.z,
-            voxelType: change.type ?? VOXEL_AIR,
             change,
-          } as ServerMessage);
+          });
         }
       } else {
         const voxel = this.world.getVoxel(x, y, z);
         if (voxel) {
           this.broadcast({
             type: 'voxelChanged',
-            x,
-            y,
-            z,
-            voxelType: voxel.type,
             change: {
               x,
               y,
@@ -403,7 +387,7 @@ export class ServerGame {
               type: voxel.type,
               durability: voxel.durability,
             },
-          } as ServerMessage);
+          });
         }
       }
     }
@@ -422,7 +406,7 @@ export class ServerGame {
     this.lastToolTime.set(playerId, now);
 
     const { x, y, z } = target;
-    const destroyed = this.world.damageVoxel(x, y, z, toolData.digSpeed);
+    const destroyed = this.world.damageVoxel(x, y, z, toolData.damage);
     
     if (destroyed) {
       if (toolData.harvests) {
@@ -437,10 +421,6 @@ export class ServerGame {
       const voxel = this.world.getVoxel(x, y, z);
       this.broadcast({
         type: 'voxelChanged',
-        x,
-        y,
-        z,
-        voxelType: voxel ? voxel.type : VOXEL_AIR,
         change: {
           x,
           y,
@@ -448,29 +428,21 @@ export class ServerGame {
           type: voxel ? voxel.type : VOXEL_AIR,
           durability: voxel ? voxel.durability : 0,
         },
-      } as ServerMessage);
+      });
       
       // Check for collapse
       const collapsed = this.world.collapseDisconnected(x, y, z);
       for (const change of collapsed) {
         this.broadcast({
           type: 'voxelChanged',
-          x: change.x,
-          y: change.y,
-          z: change.z,
-          voxelType: change.type ?? VOXEL_AIR,
           change,
-        } as ServerMessage);
+        });
       }
     } else {
       const voxel = this.world.getVoxel(x, y, z);
       if (voxel) {
         this.broadcast({
           type: 'voxelChanged',
-          x,
-          y,
-          z,
-          voxelType: voxel.type,
           change: {
             x,
             y,
@@ -478,7 +450,7 @@ export class ServerGame {
             type: voxel.type,
             durability: voxel.durability,
           },
-        } as ServerMessage);
+        });
       }
     }
   }
@@ -522,10 +494,6 @@ export class ServerGame {
       
       this.broadcast({
         type: 'voxelChanged',
-        x,
-        y,
-        z,
-        voxelType: 4,
         change: {
           x,
           y,
@@ -533,7 +501,7 @@ export class ServerGame {
           type: 4,
           durability: 3,
         },
-      } as ServerMessage);
+      });
     }
   }
 
@@ -561,10 +529,9 @@ export class ServerGame {
         
         this.broadcast({
           type: 'flagPickedUp',
-          team: 'red',
           playerId: playerId,
           flagTeam: 'red',
-        } as ServerMessage);
+        });
       } else if (player.team === 'red' && this.blueFlagAtBase) {
         this.blueFlagAtBase = false;
         this.blueFlagCarrier = playerId;
@@ -572,10 +539,9 @@ export class ServerGame {
         
         this.broadcast({
           type: 'flagPickedUp',
-          team: 'blue',
           playerId: playerId,
           flagTeam: 'blue',
-        } as ServerMessage);
+        });
       }
     }
 
@@ -601,10 +567,9 @@ export class ServerGame {
           
           this.broadcast({
             type: 'flagPickedUp',
-            team: enemyFlagTeam,
             playerId: playerId,
             flagTeam: enemyFlagTeam,
-          } as ServerMessage);
+          });
         } else if (droppedFlag.team === player.team) {
           // Return friendly dropped flag to base
           this.droppedFlags.splice(i, 1);
@@ -615,9 +580,8 @@ export class ServerGame {
           }
           this.broadcast({
             type: 'flagReturned',
-            team: player.team,
             flagTeam: player.team,
-          } as ServerMessage);
+          });
         }
       }
     }
@@ -641,11 +605,9 @@ export class ServerGame {
         
         this.broadcast({
           type: 'flagDropped',
-          team: 'blue',
-          playerId,
           position: { ...player.position },
           flagTeam: 'blue',
-        } as ServerMessage);
+        });
       } else if (this.redFlagCarrier === playerId) {
         this.redFlagCarrier = null;
         this.droppedFlags.push({
@@ -656,11 +618,9 @@ export class ServerGame {
         
         this.broadcast({
           type: 'flagDropped',
-          team: 'red',
-          playerId,
           position: { ...player.position },
           flagTeam: 'red',
-        } as ServerMessage);
+        });
       }
     }
   }
@@ -693,9 +653,8 @@ export class ServerGame {
         this.blueFlagAtBase = true;
         this.broadcast({
           type: 'flagReturned',
-          team: 'blue',
           flagTeam: 'blue',
-        } as ServerMessage);
+        });
       }
     }
     if (this.redFlagRespawnTimer > 0) {
@@ -705,9 +664,8 @@ export class ServerGame {
         this.redFlagAtBase = true;
         this.broadcast({
           type: 'flagReturned',
-          team: 'red',
           flagTeam: 'red',
-        } as ServerMessage);
+        });
       }
     }
     
@@ -732,9 +690,8 @@ export class ServerGame {
         
         this.broadcast({
           type: 'flagReturned',
-          team: droppedFlag.team,
           flagTeam: droppedFlag.team,
-        } as ServerMessage);
+        });
       }
     }
   }
@@ -772,7 +729,7 @@ export class ServerGame {
           this.broadcast({
             type: 'flagCaptured',
             team: player.team,
-            scorer: playerId,
+            playerId: playerId,
             captures: this.captures,
           });
         }
@@ -792,7 +749,7 @@ export class ServerGame {
 
             this.broadcast({
               type: 'flagReturned',
-              team: friendlyTeam,
+              flagTeam: friendlyTeam,
             });
           }
         }

@@ -107,7 +107,7 @@ export class ServerWorld {
     
     // Track persistent voxel modifications for late-joining players
     if (!this.isGeneratingTerrain) {
-      this.modifiedVoxels.set(this.getVoxelKey(x, y, z), { x, y, z, oldValue: 0, newValue: type, type, durability });
+      this.modifiedVoxels.set(this.getVoxelKey(x, y, z), { x, y, z, type, durability });
     }
 
     // Mark neighboring chunks dirty if on edge
@@ -285,7 +285,7 @@ export class ServerWorld {
       const z = parseInt(parts[2]);
       
       this.setVoxel(x, y, z, VOXEL_AIR, 0);
-      changes.push({ x, y, z, oldValue: 1, newValue: VOXEL_AIR, type: VOXEL_AIR, durability: 0 });
+      changes.push({ x, y, z, type: VOXEL_AIR, durability: 0 });
     }
 
     return changes;
@@ -380,8 +380,6 @@ export class ServerWorld {
             x,
             y,
             z,
-            oldValue: 0,
-            newValue: voxel.type,
             type: voxel.type,
             durability: voxel.durability,
           });
