@@ -1,29 +1,15 @@
-```
-# Build artifacts
-dist/
-build/
-*.js
-*.css
-*.svg
-
-# Dependencies
 node_modules/
-
-# Environment
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 .env
 .env.local
-*.env.*
-
-# Editors
+.env.*
+.DS_Store
+*.log
+coverage/
+.nyc_output/
+test-report.xml
+*.tmp
 .vscode/
 .idea/
-
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-
-# OS generated files
-.DS_Store
-Thumbs.db
-```
