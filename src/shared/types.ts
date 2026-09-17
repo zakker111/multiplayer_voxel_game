@@ -178,7 +178,7 @@ export type ServerMessage =
   | { type: 'inventoryUpdated'; inventory: number }
   | { type: 'voxelChanged'; x: number; y: number; z: number; voxelType: number; change?: { x: number; y: number; z: number; type: number; durability?: number } }
   | { type: 'ammoUpdate'; ammo: number }
-  | { type: 'init'; playerId: string; captures?: { blue: number; red: number }; scores?: { blue: number; red: number }; players?: Array<{ id: string; state: PlayerState }>; inventory?: number; voxelChanges?: Array<{ x: number; y: number; z: number; type: number; durability: number }> }
+  | { type: 'init'; playerId: string; captures?: { blue: number; red: number }; scores?: { blue: number; red: number }; players?: Array<{ id: string; state: PlayerState }>; inventory?: number; voxelChanges?: VoxelChange[] }
   | { type: 'spectatorToggled'; playerId: string; isSpectator: boolean; isSpectating?: boolean }
   | { type: 'footstep'; playerId: string; volume: number; pitch?: number }
   | { type: 'playerShot'; playerId: string; targetId?: string; origin?: { x: number; y: number; z: number }; direction?: { x: number; y: number; z: number }; weapon?: string }

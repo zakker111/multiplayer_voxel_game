@@ -3653,7 +3653,7 @@ export class Game {
 
     // Target cylinder intersection test:
     let isHit = false;
-    let hitPoint = new THREE.Vector3();
+    const hitPoint = new THREE.Vector3();
     let isHeadshot = false;
 
     // Solve closest approach along 3D ray to target center axis

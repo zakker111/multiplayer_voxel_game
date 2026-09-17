@@ -541,7 +541,7 @@ export class VoxelWorld {
     let tMaxY = dy > 0 ? (voxelY + 1 - origin.y) * tDeltaY : (origin.y - voxelY) * tDeltaY;
     let tMaxZ = dz > 0 ? (voxelZ + 1 - origin.z) * tDeltaZ : (origin.z - voxelZ) * tDeltaZ;
 
-    let normal = new THREE.Vector3();
+    const normal = new THREE.Vector3();
     let dist = 0;
 
     for (let i = 0; i < maxDist * 3; i++) {
