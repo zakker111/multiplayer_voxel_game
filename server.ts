@@ -88,7 +88,11 @@ async function startServer() {
   server.on('upgrade', (request, socket, head) => {
     const { url, headers } = request;
     // Don't intercept Vite HMR websocket in dev mode
-    if (url?.startsWith('/@vite') || headers['sec-websocket-protocol'] === 'vite-hmr') {
+    if (
+      url?.startsWith('/@vite') ||
+      url?.includes('vite') ||
+      headers['sec-websocket-protocol'] === 'vite-hmr'
+    ) {
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) => {
@@ -114,7 +118,10 @@ async function startServer() {
   // Vite middleware in dev / static in prod
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

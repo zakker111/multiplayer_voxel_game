@@ -31,13 +31,15 @@ export class ServerGame {
   // Flag positions (must match client)
   private readonly BLUE_FLAG_POS = BLUE_FLAG_POS;
   private readonly RED_FLAG_POS = RED_FLAG_POS;
-  private readonly CAPTURE_DISTANCE = 3;
+  private readonly CAPTURE_DISTANCE = 4.8;
   
   // Flag state tracking
   private blueFlagAtBase: boolean = true;
   private redFlagAtBase: boolean = true;
   private blueFlagCarrier: string | null = null; // Player ID carrying blue flag
   private redFlagCarrier: string | null = null; // Player ID carrying red flag
+  private blueFlagRespawnTimer: number = 0; // Disappears while respawning after capture
+  private redFlagRespawnTimer: number = 0; // Disappears while respawning after capture
   private droppedFlags: Array<{ position: Position; team: 'red' | 'blue'; respawnTimer: number }> = [];
 
   constructor() {
@@ -551,7 +553,7 @@ export class ServerGame {
       const dz = player.position.z - droppedFlag.position.z;
       const distance = Math.sqrt(dx * dx + dz * dz);
 
-      if (distance < 2.5) {
+      if (distance < 4.8) {
         if (droppedFlag.team === enemyFlagTeam) {
           // Pick up dropped enemy flag
           this.droppedFlags.splice(i, 1);
@@ -642,6 +644,30 @@ export class ServerGame {
     
     // Update dropped flag timers
     this.updateDroppedFlags(dt);
+
+    // Update captured flags respawn timers (flags disappear during this period)
+    if (this.blueFlagRespawnTimer > 0) {
+      this.blueFlagRespawnTimer -= dt;
+      if (this.blueFlagRespawnTimer <= 0) {
+        this.blueFlagRespawnTimer = 0;
+        this.blueFlagAtBase = true;
+        this.broadcast({
+          type: 'flagReturned',
+          flagTeam: 'blue',
+        });
+      }
+    }
+    if (this.redFlagRespawnTimer > 0) {
+      this.redFlagRespawnTimer -= dt;
+      if (this.redFlagRespawnTimer <= 0) {
+        this.redFlagRespawnTimer = 0;
+        this.redFlagAtBase = true;
+        this.broadcast({
+          type: 'flagReturned',
+          flagTeam: 'red',
+        });
+      }
+    }
     
     // Check for flag captures
     this.checkFlagCaptures();
@@ -684,31 +710,27 @@ export class ServerGame {
         const dz = player.position.z - homeBase.z;
         const distance = Math.hypot(dx, dz);
 
-        if (distance < 5) {
-          // SCORE A CAPTURE!
+        if (distance < 6.5) {
+          // SCORE A CAPTURE! Flag disappears on capture and enters respawn timer
           if (player.team === 'blue') {
             this.captures.blue++;
-            this.redFlagAtBase = true;
+            this.redFlagAtBase = false; // Disappears!
             this.redFlagCarrier = null;
+            this.redFlagRespawnTimer = 8.0;
           } else {
             this.captures.red++;
-            this.blueFlagAtBase = true;
+            this.blueFlagAtBase = false; // Disappears!
             this.blueFlagCarrier = null;
+            this.blueFlagRespawnTimer = 8.0;
           }
           player.carryingFlag = false;
 
-          // Broadcast capture event
+          // Broadcast capture event (flag disappears across all clients)
           this.broadcast({
             type: 'flagCaptured',
             team: player.team,
             playerId: playerId,
             captures: this.captures,
-          });
-
-          // Broadcast flag returned
-          this.broadcast({
-            type: 'flagReturned',
-            flagTeam: player.team === 'blue' ? 'red' : 'blue',
           });
         }
       }

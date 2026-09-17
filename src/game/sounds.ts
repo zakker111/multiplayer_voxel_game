@@ -349,6 +349,29 @@ export class SoundManager {
     this.capture();
   }
 
+  bulletWhiz(pan: number = 0) {
+    if (!this.enabled || !this.audioContext) return;
+    const panner = this.audioContext.createStereoPanner();
+    panner.pan.value = Math.max(-1, Math.min(1, pan));
+
+    const osc = this.audioContext.createOscillator();
+    const gain = this.audioContext.createGain();
+    osc.connect(gain);
+    gain.connect(panner);
+    panner.connect(this.audioContext.destination);
+
+    // Fast Doppler sonic snap/whiz
+    osc.frequency.setValueAtTime(2400, this.audioContext.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(700, this.audioContext.currentTime + 0.09);
+    osc.type = 'sine';
+
+    gain.gain.setValueAtTime(0.18, this.audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.09);
+
+    osc.start();
+    osc.stop(this.audioContext.currentTime + 0.09);
+  }
+
   // Footstep sound for remote players in multiplayer
   playFootstepRemote(volume: number, pitch: number, pan: number) {
     if (!this.enabled || !this.audioContext) return;

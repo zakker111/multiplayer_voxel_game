@@ -137,8 +137,8 @@ export class ServerWorld {
   }
 
   getGroundHeight(x: number, z: number): number {
-    const ix = Math.floor(x);
-    const iz = Math.floor(z);
+    const ix = Math.round(x);
+    const iz = Math.round(z);
     
     // Search from high above down to find the topmost solid block
     for (let y = GROUND_LEVEL + MAX_BUILD_UP + 10; y >= 0; y--) {
@@ -148,6 +148,19 @@ export class ServerWorld {
     }
     
     // Fallback to base ground level if nothing found
+    return GROUND_LEVEL;
+  }
+
+  // Returns ground level at or directly beneath currentY, preventing entities from snapping to overhead structures
+  getGroundHeightBelow(x: number, currentY: number, z: number): number {
+    const ix = Math.round(x);
+    const iz = Math.round(z);
+    const startY = Math.min(GROUND_LEVEL + MAX_BUILD_UP + 10, Math.max(0, Math.floor(currentY + 1.25)));
+    for (let y = startY; y >= 0; y--) {
+      if (this.isSolid(ix, y, iz)) {
+        return y + 1;
+      }
+    }
     return GROUND_LEVEL;
   }
 

@@ -166,9 +166,22 @@ export class VoxelWorld {
   }
 
   getGroundHeight(x: number, z: number): number {
-    const ix = Math.floor(x);
-    const iz = Math.floor(z);
+    const ix = Math.round(x);
+    const iz = Math.round(z);
     for (let y = GROUND_LEVEL + MAX_BUILD_UP + 5; y >= 0; y--) {
+      if (this.isSolid(ix, y, iz)) {
+        return y + 0.5;
+      }
+    }
+    return 0;
+  }
+
+  // Returns solid ground level directly at or below currentY, preventing entities from snapping to overhead structures or ceilings
+  getGroundHeightBelow(x: number, currentY: number, z: number): number {
+    const ix = Math.round(x);
+    const iz = Math.round(z);
+    const startY = Math.min(GROUND_LEVEL + MAX_BUILD_UP + 5, Math.max(0, Math.floor(currentY + 1.25)));
+    for (let y = startY; y >= 0; y--) {
       if (this.isSolid(ix, y, iz)) {
         return y + 0.5;
       }

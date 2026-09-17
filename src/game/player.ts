@@ -95,6 +95,12 @@ export class Player {
     return this.keys.has(code.toLowerCase());
   }
 
+  clearKeys(): void {
+    this.keys.clear();
+    this.isSprinting = false;
+    this.crouchKeyPressed = false;
+  }
+
   handleMouseMove(dx: number, dy: number): void {
     if (this.isDead) return;
     this.yaw -= dx * this.sensitivity;

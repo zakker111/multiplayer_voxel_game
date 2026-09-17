@@ -493,12 +493,18 @@ function App() {
               )}
 
               {gameState.spectatorMode === 'free' && (
-                <div className="bg-black/80 border border-gray-700 backdrop-blur-md px-4 py-1.5 rounded-xl text-[11px] text-gray-300 flex items-center gap-3 shadow-lg">
-                  <span>🎮 <b>WASD:</b> Fly</span>
-                  <span className="text-gray-500">•</span>
-                  <span><b>Space / Shift:</b> Up / Down</span>
-                  <span className="text-gray-500">•</span>
-                  <span><b>Mouse:</b> Pan</span>
+                <div className="bg-black/85 border border-indigo-500/40 backdrop-blur-md px-4 py-1.5 rounded-xl text-[11px] text-gray-200 flex flex-wrap items-center justify-center gap-2.5 shadow-xl">
+                  <span>🎮 <b>WASD / Arrows:</b> Fly & Pan</span>
+                  <span className="text-gray-600">•</span>
+                  <span><b>Space / E:</b> Up</span>
+                  <span className="text-gray-600">•</span>
+                  <span><b>Q / Shift:</b> Down</span>
+                  <span className="text-gray-600">•</span>
+                  <span><b>Shift:</b> Turbo</span>
+                  <span className="text-gray-600">•</span>
+                  <span><b>Drag / Lock:</b> Look</span>
+                  <span className="text-gray-600">•</span>
+                  <span><b>Wheel:</b> Speed</span>
                 </div>
               )}
             </div>

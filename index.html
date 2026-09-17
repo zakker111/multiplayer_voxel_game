@@ -11,6 +11,19 @@
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
     />
+    <script>
+      // Single Page Apps for GitHub Pages URL decode handler
+      (function(l) {
+        if (l.search[1] === '/') {
+          var decoded = l.search.slice(1).split('&').map(function(s) { 
+            return s.replace(/~and~/g, '&');
+          }).join('?');
+          window.history.replaceState(null, null,
+            l.pathname.slice(0, -1) + decoded + l.hash
+          );
+        }
+      }(window.location));
+    </script>
     <style>
       /* 内联样式确保主题色立即生效，避免闪烁 */
       html,
@@ -60,11 +73,34 @@
     </script>
       <script>
       (function () {
+        // Prevent benign Vite HMR and WebSocket disconnection errors from bubbling as unhandled rejections
+        window.addEventListener("unhandledrejection", function (event) {
+          var reason = event && event.reason;
+          var reasonStr = String((reason && (reason.message || reason)) || "");
+          if (
+            reasonStr.includes("WebSocket") ||
+            reasonStr.includes("websocket") ||
+            reasonStr.includes("vite") ||
+            reasonStr.includes("[vite]")
+          ) {
+            event.preventDefault();
+          }
+        });
+
         if (window.self === window.top) return;
         var reported = {};
         window.addEventListener("error", function (event) {
-          // 资源加载失败的 error 事件没有 message，此处仅上报 JS 运行时错误
           if (!event || !event.message) return;
+          var msg = String(event.message);
+          // Benign WebSocket and Vite HMR connection warnings are expected in containerized previews
+          if (
+            msg.includes("WebSocket") ||
+            msg.includes("websocket") ||
+            msg.includes("[vite]") ||
+            msg.includes("vite")
+          ) {
+            return;
+          }
           var key =
             event.message + "|" + (event.filename || "") + "|" + (event.lineno || 0);
           if (reported[key]) return; // 相同错误只上报一次，避免渲染循环刷屏
