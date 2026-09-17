@@ -1,22 +1,34 @@
-import { ServerToClientMessage, ClientToServerMessage, GameState } from '../shared/types';
+import { 
+  ServerMessage, 
+  ClientMessage, 
+  GameState, 
+  PlayerState, 
+  PlayerInput 
+} from '../shared/types';
 
 export class NetworkClient {
   private ws: WebSocket | null = null;
   private connected: boolean = false;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
-  private messageQueue: ClientToServerMessage[] = [];
+  private messageQueue: ClientMessage[] = [];
   
   public isSinglePlayer: boolean = false;
   public gameState: GameState | null = null;
   
+  private onConnectCallback: (() => void) | null = null;
+  private onDisconnectCallback: (() => void) | null = null;
+  private onMessageCallback: ((msg: ServerMessage) => void) | null = null;
   private onGameStateCallback: ((state: GameState) => void) | null = null;
   private onErrorCallback: ((error: string) => void) | null = null;
-  private onPlayerJoinedCallback: ((player: any) => void) | null = null;
+  private onPlayerJoinedCallback: ((player: PlayerState) => void) | null = null;
   private onPlayerLeftCallback: ((id: string) => void) | null = null;
   private onFlagCapturedCallback: ((team: 'red' | 'blue', scorer: string) => void) | null = null;
 
-  constructor() {
+  constructor(serverUrl?: string) {
+    // Store server URL for later use
+    this.serverUrl = serverUrl;
+    
     // Detect if running on GitHub Pages
     const isGitHubPages = window.location.hostname.includes('github.io');
     if (isGitHubPages) {
@@ -24,6 +36,12 @@ export class NetworkClient {
       this.isSinglePlayer = true;
       this.initSinglePlayer();
     }
+  }
+
+  private serverUrl?: string;
+
+  public get isConnected(): boolean {
+    return this.connected || this.isSinglePlayer;
   }
 
   private initSinglePlayer() {
@@ -43,6 +61,7 @@ export class NetworkClient {
 
   connect(serverUrl?: string): Promise<boolean> {
     if (this.isSinglePlayer) {
+      if (this.onConnectCallback) this.onConnectCallback();
       return Promise.resolve(true);
     }
 
@@ -57,6 +76,8 @@ export class NetworkClient {
           this.connected = true;
           this.reconnectAttempts = 0;
           
+          if (this.onConnectCallback) this.onConnectCallback();
+          
           // Send queued messages
           this.messageQueue.forEach(msg => this.send(msg));
           this.messageQueue = [];
@@ -66,7 +87,7 @@ export class NetworkClient {
 
         this.ws.onmessage = (event) => {
           try {
-            const message: ServerToClientMessage = JSON.parse(event.data);
+            const message: ServerMessage = JSON.parse(event.data);
             this.handleMessage(message);
           } catch (e) {
             console.error('[Network] Failed to parse message:', e);
@@ -76,6 +97,8 @@ export class NetworkClient {
         this.ws.onclose = () => {
           console.log('[Network] Disconnected from server');
           this.connected = false;
+          
+          if (this.onDisconnectCallback) this.onDisconnectCallback();
           
           if (this.reconnectAttempts < this.maxReconnectAttempts) {
             this.reconnectAttempts++;
@@ -106,7 +129,12 @@ export class NetworkClient {
     });
   }
 
-  private handleMessage(message: ServerToClientMessage) {
+  private handleMessage(message: ServerMessage) {
+    // Call general message callback
+    if (this.onMessageCallback) {
+      this.onMessageCallback(message);
+    }
+
     switch (message.type) {
       case 'gameState':
         this.gameState = message.state;
@@ -137,7 +165,7 @@ export class NetworkClient {
     }
   }
 
-  send(message: ClientToServerMessage) {
+  send(message: ClientMessage) {
     if (this.isSinglePlayer) {
       // Handle single player logic locally
       this.handleSinglePlayerMessage(message);
@@ -151,21 +179,57 @@ export class NetworkClient {
     }
   }
 
-  private handleSinglePlayerMessage(message: ClientToServerMessage) {
+  private handleSinglePlayerMessage(message: ClientMessage) {
     if (!this.gameState) return;
 
     switch (message.type) {
-      case 'move':
+      case 'playerInput':
         // Update local player position (handled by game loop)
         break;
       case 'shoot':
         // Handle shooting locally (add bot hits etc.)
         break;
-      case 'destroyBlock':
-      case 'placeBlock':
+      case 'useTool':
+      case 'build':
         // Handle world modifications locally
         break;
+      case 'reload':
+      case 'toggleSpectator':
+      case 'captureFlag':
+      case 'join':
+      case 'heartbeat':
+        // Handled locally or ignored in single player
+        break;
     }
+  }
+
+  sendJoin(team: 'red' | 'blue', position: { x: number; y: number; z: number }, name?: string) {
+    // Legacy API with 3 args - adapt to new format
+    this.send({ type: 'join', name: name || 'Player', team });
+  }
+
+  sendPlayerInput(input: PlayerInput) {
+    this.send({ type: 'playerInput', input });
+  }
+
+  sendShoot(x: number, y: number, z: number, dx: number, dy: number, dz: number) {
+    this.send({ type: 'shoot', x, y, z, dx, dy, dz });
+  }
+
+  sendUseTool(action: 'destroy' | 'build', x: number, y: number, z: number, blockType?: number) {
+    this.send({ type: 'useTool', action, x, y, z, blockType });
+  }
+
+  sendBuild(x: number, y: number, z: number, blockType: number) {
+    this.send({ type: 'build', x, y, z, blockType });
+  }
+
+  sendReload() {
+    this.send({ type: 'reload' });
+  }
+
+  sendToggleSpectator() {
+    this.send({ type: 'toggleSpectator' });
   }
 
   disconnect() {
@@ -174,13 +238,39 @@ export class NetworkClient {
       this.ws = null;
     }
     this.connected = false;
+    if (this.onDisconnectCallback) this.onDisconnectCallback();
+  }
+
+  // Event callbacks - support both new and legacy API
+  onConnect(callback: () => void) {
+    this.onConnectCallback = callback;
+  }
+
+  onDisconnect(callback: () => void) {
+    this.onDisconnectCallback = callback;
+  }
+
+  onMessage(eventTypeOrCallback: string | ((msg: ServerMessage) => void), callback?: (msg: any) => void) {
+    // Support legacy API: onMessage('eventType', callback)
+    if (typeof eventTypeOrCallback === 'string' && callback) {
+      const eventType = eventTypeOrCallback;
+      // Wrap the callback to filter by event type
+      this.onMessageCallback = (msg: ServerMessage) => {
+        if (msg.type === eventType) {
+          callback(msg);
+        }
+      };
+    } else if (typeof eventTypeOrCallback === 'function') {
+      // New API: onMessage(callback)
+      this.onMessageCallback = eventTypeOrCallback;
+    }
   }
 
   onGameState(callback: (state: GameState) => void) {
     this.onGameStateCallback = callback;
   }
 
-  onPlayerJoined(callback: (player: any) => void) {
+  onPlayerJoined(callback: (player: PlayerState) => void) {
     this.onPlayerJoinedCallback = callback;
   }
 
