@@ -236,16 +236,26 @@ npm install -g netlify-cli
 netlify deploy --prod
 ```
 
-### GitHub Pages
-```bash
-# Build
-npm run build
+### GitHub Pages (Automated with GitHub Actions - Zero Config)
 
-# Deploy to gh-pages branch
-git subtree push --prefix dist origin gh-pages
-```
+This repository includes an automated GitHub Actions deployment workflow (`.github/workflows/deploy-pages.yml`):
 
-Your client URL: `https://YOUR_USERNAME.github.io/voxel-fps`
+1. **Push your code to GitHub**:
+   ```bash
+   git add .
+   git commit -m "Configure GitHub Pages deployment"
+   git push origin main
+   ```
+2. **Enable GitHub Actions for Pages in GitHub Settings**:
+   - Go to your repository on GitHub.
+   - Click **Settings** → **Pages** (in the left sidebar).
+   - Under **Build and deployment** → **Source**, change from *Deploy from a branch* to **GitHub Actions**.
+3. **Automatic Deployment**:
+   - Every push to `main` (or `master`) automatically builds and publishes the game.
+   - You can also manually trigger the build under the **Actions** tab → **Deploy to GitHub Pages** → **Run workflow**.
+4. **Visit your game**:
+   - Your game is live at `https://YOUR_USERNAME.github.io/YOUR_REPO_NAME/`!
+   - Relative asset paths (`base: './'`), single-page fallbacks, and `.nojekyll` are all pre-configured.
 
 ---
 

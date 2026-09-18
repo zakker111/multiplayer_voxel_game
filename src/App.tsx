@@ -22,8 +22,9 @@ function App() {
   const [isPointerLocked, setIsPointerLocked] = useState(false);
 
   // Multiplayer Server & Team Selection state
+  const isGitHubPages = typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
   const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
-  const [serverType, setServerType] = useState<'default' | 'custom'>('default');
+  const [serverType, setServerType] = useState<'default' | 'custom'>(() => (typeof window !== 'undefined' && window.location.hostname.endsWith('github.io') ? 'custom' : 'default'));
   const [customServerUrl, setCustomServerUrl] = useState('');
   const [playerName, setPlayerName] = useState(() => 'Soldier_' + Math.floor(100 + Math.random() * 900));
   const [modalTeam, setModalTeam] = useState<'blue' | 'red'>('blue');
@@ -118,8 +119,9 @@ function App() {
   const copyInviteLink = (targetTeam?: 'red' | 'blue') => {
     try {
       const origin = window.location.origin;
+      const pathname = window.location.pathname.replace(/\/$/, '');
       const team = targetTeam || (modalTeam === 'blue' ? 'red' : 'blue');
-      let url = `${origin}/?mode=online&team=${team}`;
+      let url = `${origin}${pathname}/?mode=online&team=${team}`;
       if (serverType === 'custom' && customServerUrl.trim()) {
         url += `&server=${encodeURIComponent(customServerUrl.trim())}`;
       }
@@ -251,6 +253,14 @@ function App() {
 
             {/* 1. Server Choice */}
             <div className="mb-5">
+              {isGitHubPages && (
+                <div className="mb-3 p-3 bg-amber-950/40 border border-amber-800/40 rounded-xl text-xs text-amber-300 flex items-start gap-2">
+                  <span className="text-base leading-none">ℹ️</span>
+                  <span>
+                    <strong>GitHub Pages Client:</strong> You are playing on static GitHub Pages. To play online multiplayer across the internet, enter your remote server URL (e.g., from Railway, Render, or VPS) below, or play <strong>Bot Match</strong> locally!
+                  </span>
+                </div>
+              )}
               <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
                 1. Choose Server
               </label>
