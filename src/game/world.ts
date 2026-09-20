@@ -525,36 +525,43 @@ export class VoxelWorld {
     const dy = Math.abs(direction.y) < EPSILON ? (direction.y >= 0 ? EPSILON : -EPSILON) : direction.y;
     const dz = Math.abs(direction.z) < EPSILON ? (direction.z >= 0 ? EPSILON : -EPSILON) : direction.z;
 
+    // Voxels are centered at integer coordinates [x - 0.5, x + 0.5], [y - 0.5, y + 0.5], [z - 0.5, z + 0.5]
+    // Shifting origin by +0.5 aligns voxel boundaries to standard integer grid [x, x + 1]
+    const sx = origin.x + 0.5;
+    const sy = origin.y + 0.5;
+    const sz = origin.z + 0.5;
+
+    let voxelX = Math.floor(sx);
+    let voxelY = Math.floor(sy);
+    let voxelZ = Math.floor(sz);
+
+    // If starting point is already inside a solid block
+    if (this.isSolid(voxelX, voxelY, voxelZ)) {
+      return {
+        hit: true,
+        position: origin.clone(),
+        normal: new THREE.Vector3(-Math.sign(dx), -Math.sign(dy), 0).normalize(),
+        voxelPos: { x: voxelX, y: voxelY, z: voxelZ },
+        distance: 0,
+      };
+    }
+
     const stepX = dx > 0 ? 1 : -1;
     const stepY = dy > 0 ? 1 : -1;
     const stepZ = dz > 0 ? 1 : -1;
-
-    let voxelX = Math.floor(origin.x);
-    let voxelY = Math.floor(origin.y);
-    let voxelZ = Math.floor(origin.z);
 
     const tDeltaX = Math.abs(1 / dx);
     const tDeltaY = Math.abs(1 / dy);
     const tDeltaZ = Math.abs(1 / dz);
 
-    let tMaxX = dx > 0 ? (voxelX + 1 - origin.x) * tDeltaX : (origin.x - voxelX) * tDeltaX;
-    let tMaxY = dy > 0 ? (voxelY + 1 - origin.y) * tDeltaY : (origin.y - voxelY) * tDeltaY;
-    let tMaxZ = dz > 0 ? (voxelZ + 1 - origin.z) * tDeltaZ : (origin.z - voxelZ) * tDeltaZ;
+    let tMaxX = dx > 0 ? (voxelX + 1 - sx) * tDeltaX : (sx - voxelX) * tDeltaX;
+    let tMaxY = dy > 0 ? (voxelY + 1 - sy) * tDeltaY : (sy - voxelY) * tDeltaY;
+    let tMaxZ = dz > 0 ? (voxelZ + 1 - sz) * tDeltaZ : (sz - voxelZ) * tDeltaZ;
 
     let normal = new THREE.Vector3();
     let dist = 0;
 
     for (let i = 0; i < maxDist * 3; i++) {
-      if (this.isSolid(voxelX, voxelY, voxelZ)) {
-        return {
-          hit: true,
-          position: new THREE.Vector3(voxelX, voxelY, voxelZ),
-          normal: normal.clone(),
-          voxelPos: { x: voxelX, y: voxelY, z: voxelZ },
-          distance: dist,
-        };
-      }
-
       if (tMaxX < tMaxY) {
         if (tMaxX < tMaxZ) {
           voxelX += stepX;
@@ -582,6 +589,17 @@ export class VoxelWorld {
       }
 
       if (dist > maxDist) break;
+
+      if (this.isSolid(voxelX, voxelY, voxelZ)) {
+        const hitPos = origin.clone().add(direction.clone().multiplyScalar(dist));
+        return {
+          hit: true,
+          position: hitPos,
+          normal: normal.clone(),
+          voxelPos: { x: voxelX, y: voxelY, z: voxelZ },
+          distance: dist,
+        };
+      }
     }
 
     return null;

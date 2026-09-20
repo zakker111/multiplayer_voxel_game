@@ -192,32 +192,37 @@ export class ServerWorld {
     const dy = Math.abs(direction.y) < EPSILON ? (direction.y >= 0 ? EPSILON : -EPSILON) : direction.y;
     const dz = Math.abs(direction.z) < EPSILON ? (direction.z >= 0 ? EPSILON : -EPSILON) : direction.z;
 
+    // Shift origin by +0.5 to align centered voxels [-0.5, +0.5] with integer grid boundaries [0, 1]
+    const sx = origin.x + 0.5;
+    const sy = origin.y + 0.5;
+    const sz = origin.z + 0.5;
+
+    let voxelX = Math.floor(sx);
+    let voxelY = Math.floor(sy);
+    let voxelZ = Math.floor(sz);
+
+    if (this.isSolid(voxelX, voxelY, voxelZ)) {
+      return {
+        voxelPos: { x: voxelX, y: voxelY, z: voxelZ },
+        distance: 0,
+      };
+    }
+
     const stepX = dx > 0 ? 1 : -1;
     const stepY = dy > 0 ? 1 : -1;
     const stepZ = dz > 0 ? 1 : -1;
-
-    let voxelX = Math.floor(origin.x);
-    let voxelY = Math.floor(origin.y);
-    let voxelZ = Math.floor(origin.z);
 
     const tDeltaX = Math.abs(1 / dx);
     const tDeltaY = Math.abs(1 / dy);
     const tDeltaZ = Math.abs(1 / dz);
 
-    let tMaxX = dx > 0 ? (voxelX + 1 - origin.x) * tDeltaX : (origin.x - voxelX) * tDeltaX;
-    let tMaxY = dy > 0 ? (voxelY + 1 - origin.y) * tDeltaY : (origin.y - voxelY) * tDeltaY;
-    let tMaxZ = dz > 0 ? (voxelZ + 1 - origin.z) * tDeltaZ : (origin.z - voxelZ) * tDeltaZ;
+    let tMaxX = dx > 0 ? (voxelX + 1 - sx) * tDeltaX : (sx - voxelX) * tDeltaX;
+    let tMaxY = dy > 0 ? (voxelY + 1 - sy) * tDeltaY : (sy - voxelY) * tDeltaY;
+    let tMaxZ = dz > 0 ? (voxelZ + 1 - sz) * tDeltaZ : (sz - voxelZ) * tDeltaZ;
 
     let distance = 0;
 
     for (let i = 0; i < maxDist * 3; i++) {
-      if (this.isSolid(voxelX, voxelY, voxelZ)) {
-        return {
-          voxelPos: { x: voxelX, y: voxelY, z: voxelZ },
-          distance,
-        };
-      }
-
       if (tMaxX < tMaxY) {
         if (tMaxX < tMaxZ) {
           voxelX += stepX;
@@ -241,6 +246,13 @@ export class ServerWorld {
       }
 
       if (distance > maxDist) break;
+
+      if (this.isSolid(voxelX, voxelY, voxelZ)) {
+        return {
+          voxelPos: { x: voxelX, y: voxelY, z: voxelZ },
+          distance,
+        };
+      }
     }
 
     return null;

@@ -70,7 +70,7 @@ You do **not** need to edit any code or configure separate client hosting:
    - **Name:** voxel-fps-server
    - **Environment:** Node
    - **Build Command:** `npm install && npm run build`
-   - **Start Command:** `npm run server`
+   - **Start Command:** `npm start`
 6. Add environment variable:
    - Key: `PORT`
    - Value: `3000`
@@ -78,12 +78,32 @@ You do **not** need to edit any code or configure separate client hosting:
 
 Get URL: `wss://voxel-fps-server.onrender.com`
 
-#### Deploy Client
-Same as Railway Option - use Vercel or Netlify.
+---
+
+### Option 3: GitHub Pages (Free Client Hosting with Zero Configuration)
+
+The repository already comes pre-configured with a continuous deployment workflow in `.github/workflows/deploy-pages.yml`.
+
+#### Step 1: Enable GitHub Pages in Repository Settings
+1. Go to your repository on GitHub.
+2. Click **Settings** → **Pages** (in the left sidebar).
+3. Under **Build and deployment** → **Source**, select **GitHub Actions**.
+
+#### Step 2: Push Your Code
+Whenever you push to the `main` or `master` branch:
+- GitHub Actions automatically runs the build.
+- Generates the `.nojekyll` and `404.html` fallbacks.
+- Publishes the static client to `https://<YOUR_USERNAME>.github.io/<REPO_NAME>/`.
+
+#### Step 3: Connect to a Live Multiplayer Server
+Because GitHub Pages is a static host, you can:
+1. Play singleplayer sandbox or bot CTF matches offline directly in the browser.
+2. For multiplayer, click **Multiplayer** → **Custom Server** in-game and paste your remote WebSocket server URL (e.g. from Railway or Render: `wss://voxel-fps.up.railway.app`).
+3. You can also append `?mode=online&server=wss://voxel-fps.up.railway.app` to your GitHub Pages URL to connect automatically!
 
 ---
 
-### Option 3: VPS (DigitalOcean, AWS, Linode)
+### Option 4: VPS (DigitalOcean, AWS, Linode)
 
 **Time:** 30 minutes  
 **Cost:** $4-6/month  

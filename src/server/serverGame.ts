@@ -18,10 +18,16 @@ import {
   RED_FLAG_POS,
 } from '../shared/types';
 
+export interface GameConnection {
+  send(data: string): void;
+  isOpen?: () => boolean;
+  readyState?: number;
+}
+
 export class ServerGame {
   private players: Map<string, ServerPlayer> = new Map();
   private world: ServerWorld;
-  private connections: Map<string, WebSocket> = new Map();
+  private connections: Map<string, WebSocket | GameConnection> = new Map();
   private scores = { red: 0, blue: 0 };
   private captures = { red: 0, blue: 0 };
   private lastShootTime: Map<string, number> = new Map();
@@ -47,7 +53,7 @@ export class ServerGame {
     console.log('Server game initialized');
   }
 
-  addPlayer(ws: WebSocket): string {
+  addPlayer(ws: WebSocket | GameConnection): string {
     const playerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const spawnPos = this.getSpawnPosition('blue');
     
@@ -150,6 +156,10 @@ export class ServerGame {
         this.handleFlagPickup(playerId);
         break;
 
+      case 'captureFlag':
+        this.handleFlagCapture(playerId);
+        break;
+
       case 'toggleSpectator':
         player.isSpectating = !player.isSpectating;
         this.broadcast({
@@ -215,9 +225,9 @@ export class ServerGame {
       weapon: player.equipment,
     });
 
-    // Raycast to find terrain hit distance
-    const hit = this.world.raycast(origin, direction, 100);
-    const maxDist = hit ? hit.distance : 100;
+    // Raycast to find terrain hit distance (extended battlefield bullet range)
+    const hit = this.world.raycast(origin, direction, 350);
+    const maxDist = hit ? hit.distance : 350;
 
     let confirmedTarget: { id: string; player: ServerPlayer; isHeadshot: boolean } | null = null;
 
@@ -230,7 +240,7 @@ export class ServerGame {
           target.position.y - origin.y,
           target.position.z - origin.z
         );
-        if (dist <= 100) {
+        if (dist <= 350) {
           // Line of sight check
           const toTargetDir = {
             x: (target.position.x - origin.x) / dist,
@@ -587,6 +597,31 @@ export class ServerGame {
     }
   }
 
+  private handleFlagCapture(playerId: string): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead) return;
+
+    if (player.team === 'blue') {
+      this.captures.blue++;
+      this.redFlagAtBase = false; // Disappears!
+      this.redFlagCarrier = null;
+      this.redFlagRespawnTimer = 8.0;
+    } else {
+      this.captures.red++;
+      this.blueFlagAtBase = false; // Disappears!
+      this.blueFlagCarrier = null;
+      this.blueFlagRespawnTimer = 8.0;
+    }
+    player.carryingFlag = false;
+
+    this.broadcast({
+      type: 'flagCaptured',
+      team: player.team,
+      playerId: playerId,
+      captures: this.captures,
+    });
+  }
+
   private handlePlayerDeath(playerId: string): void {
     const player = this.players.get(playerId);
     if (!player) return;
@@ -815,27 +850,34 @@ export class ServerGame {
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
+  private isConnOpen(conn: WebSocket | GameConnection): boolean {
+    if ('isOpen' in conn && typeof conn.isOpen === 'function') {
+      return conn.isOpen();
+    }
+    return (conn as WebSocket).readyState === WebSocket.OPEN;
+  }
+
   private sendToPlayer(playerId: string, message: ServerMessage): void {
-    const ws = this.connections.get(playerId);
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
+    const conn = this.connections.get(playerId);
+    if (conn && this.isConnOpen(conn)) {
+      conn.send(JSON.stringify(message));
     }
   }
 
   private broadcast(message: ServerMessage): void {
     const data = JSON.stringify(message);
-    for (const ws of this.connections.values()) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
+    for (const conn of this.connections.values()) {
+      if (this.isConnOpen(conn)) {
+        conn.send(data);
       }
     }
   }
 
   private broadcastExcept(exceptPlayerId: string, message: ServerMessage): void {
     const data = JSON.stringify(message);
-    for (const [playerId, ws] of this.connections) {
-      if (playerId !== exceptPlayerId && ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
+    for (const [playerId, conn] of this.connections) {
+      if (playerId !== exceptPlayerId && this.isConnOpen(conn)) {
+        conn.send(data);
       }
     }
   }

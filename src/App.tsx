@@ -170,6 +170,19 @@ function App() {
                 <Globe className="w-5 h-5" /> <span>Multiplayer (Choose Server & Team)</span>
               </button>
               <button
+                onClick={() => {
+                  handleStart('online', 'blue');
+                  setTimeout(() => {
+                    const opposite = 'red';
+                    window.open(window.location.origin + window.location.pathname + `?mode=online&team=${opposite}`, '_blank');
+                  }, 400);
+                }}
+                className="px-5 py-3.5 bg-purple-600 hover:bg-purple-500 text-white font-bold text-base rounded-xl transition-all shadow-lg shadow-purple-600/30 cursor-pointer flex items-center gap-2"
+                title="Launches this tab as Blue and opens a 2nd tab as Red to test 2-player multiplayer instantly!"
+              >
+                <Users className="w-5 h-5" /> <span>👥 Test 2-Player Match</span>
+              </button>
+              <button
                 onClick={() => handleStart('multiplayer', 'blue')}
                 className="px-6 py-3.5 bg-[#00ff88] text-black font-bold text-lg rounded-xl hover:bg-[#00cc66] transition-colors shadow-lg cursor-pointer"
               >
@@ -381,9 +394,9 @@ function App() {
               </div>
             </div>
 
-            {/* 4. Play Over Internet Invite Link */}
-            <div className="mb-6 p-3 bg-gray-950/80 border border-gray-800 rounded-xl">
-              <div className="flex items-center justify-between mb-1">
+            {/* 4. Play Over Internet Invite Link & Multi-Tab Test */}
+            <div className="mb-6 p-3 bg-gray-950/80 border border-gray-800 rounded-xl space-y-2.5">
+              <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-xs text-gray-300 font-semibold">
                   <Link2 className="w-4 h-4 text-indigo-400" />
                   <span>Play over Internet with a friend</span>
@@ -397,8 +410,27 @@ function App() {
                   <span>{copiedInvite ? 'Copied Link!' : `Copy Link (Join as ${modalTeam === 'blue' ? 'RED' : 'BLUE'})`}</span>
                 </button>
               </div>
+
+              <div className="flex items-center justify-between pt-2 border-t border-gray-800/80">
+                <div className="flex items-center gap-2 text-xs text-emerald-300 font-semibold">
+                  <Users className="w-4 h-4 text-emerald-400" />
+                  <span>Test on this device (Instant 2-Player)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const otherTeam = modalTeam === 'blue' ? 'red' : 'blue';
+                    window.open(window.location.origin + window.location.pathname + `?mode=online&team=${otherTeam}`, '_blank');
+                  }}
+                  className="px-3 py-1.5 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-200 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Open 2nd Player Tab ({modalTeam === 'blue' ? 'RED' : 'BLUE'})</span>
+                </button>
+              </div>
+
               <p className="text-[11px] text-gray-400">
-                Copies a direct match join URL to your clipboard. Send it to a friend anywhere on the internet to join your live game!
+                Supports real-time WebSocket, HTTP SSE fallback, and browser mesh sync. Open two tabs side-by-side to watch players shoot, build, and capture flags in real-time!
               </p>
             </div>
 
@@ -522,21 +554,33 @@ function App() {
 
           {/* Online Multiplayer Live Status */}
           {gameMode === 'online' && (
-            <div className="absolute top-4 right-4 z-30 flex flex-col items-end gap-1.5">
+            <div className="absolute top-4 right-4 z-30 flex flex-col items-end gap-2 pointer-events-auto">
               <div className="bg-gray-900/90 backdrop-blur-md px-3.5 py-2 rounded-xl border border-purple-500/50 shadow-xl flex items-center gap-2.5 text-xs text-white">
                 <span className={`w-2.5 h-2.5 rounded-full ${gameState.isNetworkConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
                 <span className="font-semibold">
-                  {gameState.isNetworkConnected ? `Live Server: ${gameState.connectedPlayersCount || 1} Player${(gameState.connectedPlayersCount || 1) > 1 ? 's' : ''}` : 'Connecting to Server...'}
+                  {gameState.isNetworkConnected ? `Live: ${gameState.connectedPlayersCount || 1} Player${(gameState.connectedPlayersCount || 1) > 1 ? 's' : ''}` : 'Connecting...'}
                 </span>
+                {gameState.transportName && (
+                  <span className="text-[10px] px-1.5 py-0.5 bg-gray-800 text-purple-300 rounded font-mono font-bold">
+                    {gameState.transportName}
+                  </span>
+                )}
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${selectedTeam === 'blue' ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-red-950 text-red-300 border border-red-800'}`}>
                   {selectedTeam} Team
                 </span>
               </div>
-              {(gameState.connectedPlayersCount || 1) <= 1 && (
-                <div className="bg-black/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-gray-700 text-[11px] text-gray-300 max-w-xs text-right">
-                  💡 Open in a 2nd tab/window to test 1v1 PvP & flags!
-                </div>
-              )}
+              <button
+                type="button"
+                onClick={() => {
+                  const opposite = selectedTeam === 'blue' ? 'red' : 'blue';
+                  window.open(window.location.origin + window.location.pathname + `?mode=online&team=${opposite}`, '_blank');
+                }}
+                className="px-3 py-1.5 bg-indigo-600/90 hover:bg-indigo-600 text-white rounded-lg border border-indigo-400/50 text-xs font-semibold shadow-lg transition-all flex items-center gap-1.5 cursor-pointer"
+                title="Launch a 2nd player tab on this device to test Red vs Blue live multiplayer"
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>👥 Open 2nd Player Tab ({selectedTeam === 'blue' ? 'RED' : 'BLUE'})</span>
+              </button>
             </div>
           )}
           {/* Scoreboard - only in multiplayer */}
@@ -572,6 +616,38 @@ function App() {
                     </div>
                   </div>
                 </div>
+
+                {/* Tactical Flag Status Badges */}
+                <div className="flex items-center gap-2">
+                  <div className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 border shadow-sm ${
+                    gameState.blueFlagStatus === 'captured' ? 'bg-purple-950/80 text-purple-300 border-purple-500 animate-pulse' :
+                    gameState.blueFlagStatus === 'carried' ? 'bg-amber-950/80 text-amber-300 border-amber-500' :
+                    gameState.blueFlagStatus === 'dropped' ? 'bg-red-950/80 text-red-300 border-red-500 animate-pulse' :
+                    'bg-blue-950/70 text-blue-300 border-blue-600/50'
+                  }`}>
+                    <span>🔵 Blue Flag:</span>
+                    <span>
+                      {gameState.blueFlagStatus === 'captured' ? `✨ Captured! (Respawn in ${Math.ceil(gameState.blueFlagTimer || 0)}s)` :
+                       gameState.blueFlagStatus === 'carried' ? '🏃 Taken by Enemy!' :
+                       gameState.blueFlagStatus === 'dropped' ? `⚠️ Dropped (${Math.ceil(gameState.blueFlagTimer || 0)}s)` :
+                       '🛡️ At Base'}
+                    </span>
+                  </div>
+                  <div className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 border shadow-sm ${
+                    gameState.redFlagStatus === 'captured' ? 'bg-purple-950/80 text-purple-300 border-purple-500 animate-pulse' :
+                    gameState.redFlagStatus === 'carried' ? 'bg-amber-950/80 text-amber-300 border-amber-500' :
+                    gameState.redFlagStatus === 'dropped' ? 'bg-red-950/80 text-red-300 border-red-500 animate-pulse' :
+                    'bg-red-950/70 text-red-300 border-red-600/50'
+                  }`}>
+                    <span>🔴 Red Flag:</span>
+                    <span>
+                      {gameState.redFlagStatus === 'captured' ? `✨ Captured! (Respawn in ${Math.ceil(gameState.redFlagTimer || 0)}s)` :
+                       gameState.redFlagStatus === 'carried' ? '🏃 Taken by Enemy!' :
+                       gameState.redFlagStatus === 'dropped' ? `⚠️ Dropped (${Math.ceil(gameState.redFlagTimer || 0)}s)` :
+                       '🛡️ At Base'}
+                    </span>
+                  </div>
+                </div>
                 
                 {/* Flag carrier indicator */}
                 {gameState.flagCarrierName && (
@@ -582,6 +658,33 @@ function App() {
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Tactical Radio Comms Feed */}
+          {gameState.radioLog && gameState.radioLog.length > 0 && (
+            <div className="absolute top-20 left-8 z-10 max-w-xs pointer-events-none flex flex-col gap-1.5">
+              <div className="text-[10px] uppercase font-mono tracking-wider text-gray-400 font-bold flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>TACTICAL RADIO COMMS</span>
+              </div>
+              {gameState.radioLog.slice(-4).map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`px-2.5 py-1 rounded-lg text-xs backdrop-blur-md border flex flex-col transition-all ${
+                    msg.team === 'blue'
+                      ? 'bg-blue-950/80 text-blue-100 border-blue-600/40 shadow-sm'
+                      : 'bg-red-950/80 text-red-100 border-red-600/40 shadow-sm'
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-[10px] font-bold opacity-90">
+                    <span className={msg.team === 'blue' ? 'text-blue-300' : 'text-red-300'}>
+                      [{msg.team.toUpperCase()}] {msg.sender}
+                    </span>
+                  </div>
+                  <span className="text-gray-200 text-[11px] font-medium leading-snug">{msg.text}</span>
+                </div>
+              ))}
             </div>
           )}
           
@@ -666,23 +769,42 @@ function App() {
                 </div>
               </div>
 
-              {/* Crosshair */}
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-10">
-                <div className="relative w-8 h-8">
-                  {gameState.isAiming && <div className="absolute inset-0 rounded-full border-2 border-white/30"></div>}
-                  <div className="absolute top-1/2 left-0 w-3 h-0.5 bg-white -translate-y-1/2"></div>
-                  <div className="absolute top-1/2 right-0 w-3 h-0.5 bg-white -translate-y-1/2"></div>
-                  <div className="absolute left-1/2 top-0 w-0.5 h-3 bg-white -translate-x-1/2"></div>
-                  <div className="absolute left-1/2 bottom-0 w-0.5 h-3 bg-white -translate-x-1/2"></div>
-                  <div className="absolute top-1/2 left-1/2 w-1 h-1 bg-white rounded-full -translate-x-1/2 -translate-y-1/2"></div>
-                </div>
+              {/* Dynamic Tactical Crosshair & Iron Sight Reticle */}
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20">
+                {gameState.isAiming ? (
+                  /* High-precision ADS reticle */
+                  <div className="relative w-12 h-12">
+                    <div className="absolute inset-0 rounded-full border border-white/40"></div>
+                    <div className="absolute inset-2 rounded-full border border-dashed border-white/20"></div>
+                    <div className={`absolute top-1/2 left-0 w-4 h-0.5 -translate-y-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-emerald-400'}`}></div>
+                    <div className={`absolute top-1/2 right-0 w-4 h-0.5 -translate-y-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-emerald-400'}`}></div>
+                    <div className={`absolute left-1/2 top-0 w-0.5 h-4 -translate-x-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-emerald-400'}`}></div>
+                    <div className={`absolute left-1/2 bottom-0 w-0.5 h-4 -translate-x-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-emerald-400'}`}></div>
+                    <div className={`absolute top-1/2 left-1/2 w-1.5 h-1.5 rounded-full -translate-x-1/2 -translate-y-1/2 shadow-sm ${
+                      gameState.targetInfo ? 'bg-red-500 shadow-red-500/80 scale-125' : 'bg-emerald-400 shadow-emerald-400/80'
+                    }`}></div>
+                  </div>
+                ) : (
+                  /* Hipfire crosshair */
+                  <div className="relative w-8 h-8">
+                    <div className={`absolute top-1/2 left-0 w-3 h-0.5 -translate-y-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-white'}`}></div>
+                    <div className={`absolute top-1/2 right-0 w-3 h-0.5 -translate-y-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-white'}`}></div>
+                    <div className={`absolute left-1/2 top-0 w-0.5 h-3 -translate-x-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-white'}`}></div>
+                    <div className={`absolute left-1/2 bottom-0 w-0.5 h-3 -translate-x-1/2 ${gameState.targetInfo ? 'bg-red-400' : 'bg-white'}`}></div>
+                    <div className={`absolute top-1/2 left-1/2 w-1 h-1 rounded-full -translate-x-1/2 -translate-y-1/2 ${
+                      gameState.targetInfo ? 'bg-red-500 ring-2 ring-red-400/50' : 'bg-white'
+                    }`}></div>
+                  </div>
+                )}
               </div>
 
-              {/* Target info */}
+              {/* Dynamic Target Range & Headshot HUD Info */}
               {gameState.targetInfo && (
-                <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-10">
-                  <div className="bg-gray-900/60 rounded-lg px-3 py-1">
-                    <p className="text-gray-300 text-xs">{gameState.targetInfo}</p>
+                <div className="absolute top-[56%] left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+                  <div className="bg-black/85 backdrop-blur-md rounded-full px-3.5 py-1 border border-red-500/60 shadow-xl flex items-center gap-1.5 animate-pulse">
+                    <span className="text-[11px] font-mono font-semibold tracking-wide text-red-200">
+                      {gameState.targetInfo}
+                    </span>
                   </div>
                 </div>
               )}

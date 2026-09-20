@@ -55,6 +55,7 @@ export type ClientMessage =
   | { type: 'build'; position: Position }
   | { type: 'reload' }
   | { type: 'pickupFlag' }
+  | { type: 'captureFlag'; team: 'red' | 'blue' }
   | { type: 'toggleSpectator' }
   | { type: 'footstep'; volume: number; pitch: number }
   | { type: 'disconnect' };

@@ -3,7 +3,7 @@ import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
-import { ServerGame } from './src/server/serverGame';
+import { ServerGame, GameConnection } from './src/server/serverGame';
 
 interface AliveWebSocket extends WebSocket {
   isAlive: boolean;
@@ -13,6 +13,8 @@ interface AliveWebSocket extends WebSocket {
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  app.use(express.json());
 
   const server = http.createServer(app);
 
@@ -33,6 +35,45 @@ async function startServer() {
       tickRate: 20,
       version: '1.0.0',
     });
+  });
+
+  // SSE Game stream fallback (guarantees connectivity behind HTTP proxies, iframes, and restrictive firewalls)
+  app.get('/api/game/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.flushHeaders?.();
+
+    // Send initial keepalive comment to open the stream
+    res.write(': sse-connected\n\n');
+
+    const conn: GameConnection = {
+      send: (data: string) => {
+        if (!res.writableEnded) {
+          res.write(`data: ${data}\n\n`);
+        }
+      },
+      isOpen: () => !res.writableEnded,
+    };
+
+    const playerId = game.addPlayer(conn);
+    console.log(`📡 SSE Client connected (${playerId})`);
+
+    req.on('close', () => {
+      console.log(`📡 SSE Client closed (${playerId})`);
+      game.removePlayer(playerId);
+    });
+  });
+
+  app.post('/api/game/message', (req, res) => {
+    const { playerId, message } = req.body || {};
+    if (playerId && message) {
+      game.handleMessage(playerId, message);
+      res.json({ ok: true });
+    } else {
+      res.status(400).json({ error: 'Missing playerId or message' });
+    }
   });
 
   // Keep-alive heartbeat to prevent reverse proxies (Cloud Run, Nginx, Cloudflare) from dropping idle connections

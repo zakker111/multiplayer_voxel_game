@@ -39,6 +39,7 @@ export class Player {
   weaponSwayY: number = 0;
   cameraShake: number = 0;
   landingImpact: number = 0;
+  isAiming: boolean = false;
   private lastVelocityY: number = 0;
 
   private keys: Set<string> = new Set();
@@ -50,7 +51,7 @@ export class Player {
     const groundY = world.getGroundHeight(0, 0);
     this.position = new THREE.Vector3(0, groundY, 0);
     this.velocity = new THREE.Vector3(0, 0, 0);
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 200);
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 700);
     this.updateCamera();
   }
 
@@ -103,12 +104,15 @@ export class Player {
 
   handleMouseMove(dx: number, dy: number): void {
     if (this.isDead) return;
-    this.yaw -= dx * this.sensitivity;
-    this.pitch -= dy * this.sensitivity;
+    // Scale sensitivity dynamically during ADS zoom for steady long-range precision
+    const sensMultiplier = this.isAiming ? (this.camera.fov / 75) * 0.75 : 1.0;
+    const effectiveSens = this.sensitivity * sensMultiplier;
+    this.yaw -= dx * effectiveSens;
+    this.pitch -= dy * effectiveSens;
     this.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, this.pitch));
     
-    // Add weapon sway based on mouse movement
-    this.addWeaponSway(dx, dy);
+    // Add weapon sway based on mouse movement (reduced during ADS)
+    this.addWeaponSway(dx * (this.isAiming ? 0.3 : 1.0), dy * (this.isAiming ? 0.3 : 1.0));
   }
 
   jump(): void {
@@ -312,14 +316,15 @@ export class Player {
     }
 
     // Arrow keys for camera rotation (accessibility & preview without pointer lock)
-    if (this.keys.has('arrowleft')) this.yaw += 2.2 * dt;
-    if (this.keys.has('arrowright')) this.yaw -= 2.2 * dt;
+    const turnRate = (this.isAiming ? 1.3 : 2.2) * dt;
+    if (this.keys.has('arrowleft')) this.yaw += turnRate;
+    if (this.keys.has('arrowright')) this.yaw -= turnRate;
     if (this.keys.has('arrowup')) {
-      this.pitch += 1.6 * dt;
+      this.pitch += turnRate * 0.75;
       this.pitch = Math.min(Math.PI / 2 - 0.01, this.pitch);
     }
     if (this.keys.has('arrowdown')) {
-      this.pitch -= 1.6 * dt;
+      this.pitch -= turnRate * 0.75;
       this.pitch = Math.max(-Math.PI / 2 + 0.01, this.pitch);
     }
 

@@ -130,6 +130,20 @@ export class SoundManager {
     setTimeout(() => this.playTone(659, 0.15, 0.3, 'sine'), 150); // E5
     setTimeout(() => this.playTone(784, 0.15, 0.3, 'sine'), 300); // G5
     setTimeout(() => this.playTone(1047, 0.3, 0.4, 'sine'), 450); // C6
+    // Celebratory firework bursts
+    setTimeout(() => this.captureFirework(), 500);
+    setTimeout(() => this.captureFirework(), 800);
+  }
+
+  captureFirework() {
+    this.playNoise(0.25, 0.35);
+    this.playTone(450, 0.2, 0.25, 'triangle');
+    setTimeout(() => this.playTone(900, 0.15, 0.2, 'sine'), 80);
+  }
+
+  radioBeep() {
+    this.playTone(1760, 0.035, 0.12, 'sine');
+    setTimeout(() => this.playTone(2200, 0.04, 0.10, 'sine'), 40);
   }
 
   weaponSwitch() {

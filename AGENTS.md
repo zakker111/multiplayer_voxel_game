@@ -113,6 +113,7 @@ Because browser iframe sandboxes often restrict the HTML5 Pointer Lock API:
 - Voxel bounding box: `[x - 0.5, x + 0.5] × [y - 0.5, y + 0.5] × [z - 0.5, z + 0.5]`.
 - Voxel size is `VOXEL_SIZE = 1.0` meter.
 - Types: `0 = AIR`, `1 = GRASS`, `2 = DIRT`, `3 = STONE`, `4 = BUILT`.
+- **Raycasting Coordinate Alignment**: Because voxels are centered at `(x, y, z)` with boundaries at `(x ± 0.5, y ± 0.5, z ± 0.5)`, voxel raycasting algorithms (`world.raycast` and `serverWorld.raycast`) offset the ray origin by `+0.5` (`sx = origin.x + 0.5`, etc.). This maps the voxel cubes cleanly onto the standard integer grid cells `[voxel, voxel + 1]`, guaranteeing that bullets and tools hit the exact voxel and surface boundary without offset drift.
 
 ### Entity Clearance Check (`doesVoxelIntersectAnyEntity` & `canPlaceBlock`)
 Located in `src/game/game.ts` and `src/server/serverGame.ts`:

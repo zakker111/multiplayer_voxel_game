@@ -27,6 +27,14 @@ export type EquipmentType = 'rifle' | 'smg' | 'spade' | 'pickaxe';
 type Team = 'red' | 'blue';
 type GameMode = 'multiplayer' | 'singleplayer' | 'online';
 
+export interface RadioMessage {
+  id: string;
+  sender: string;
+  text: string;
+  team: Team;
+  time: number;
+}
+
 export interface GameState {
   hp: number;
   maxHp: number;
@@ -56,7 +64,13 @@ export interface GameState {
   isOnline?: boolean;
   connectedPlayersCount?: number;
   isNetworkConnected?: boolean;
+  transportName?: string;
   localPlayerId?: string | null;
+  blueFlagStatus?: 'at_base' | 'carried' | 'dropped' | 'captured';
+  redFlagStatus?: 'at_base' | 'carried' | 'dropped' | 'captured';
+  blueFlagTimer?: number;
+  redFlagTimer?: number;
+  radioLog?: RadioMessage[];
 }
 
 interface Bot {
@@ -149,6 +163,16 @@ interface Bot {
   nameTagCanvas?: HTMLCanvasElement;
   nameTagTexture?: THREE.CanvasTexture;
   lastDrawnState?: string;
+  // Bot archetype, voice radio & breaching capabilities
+  archetype: 'assault' | 'marksman' | 'breacher' | 'engineer';
+  speechText?: string;
+  speechTimer: number;
+  combatJumpCooldown: number;
+  flinchTimer: number;
+  isBreaching: boolean;
+  breachTimer: number;
+  breachTarget: { x: number; y: number; z: number } | null;
+  lastRadioCallTime: number;
   // Human combat & aiming characteristics
   reactionDelay: number;
   currentTargetKey: string | null;
@@ -251,8 +275,8 @@ export class Game {
   isAiming: boolean = false;
   aimTransition: number = 0;
 
-  hipPosition: THREE.Vector3 = new THREE.Vector3(0.3, -0.3, -0.6);
-  adsPosition: THREE.Vector3 = new THREE.Vector3(0, -0.2, -0.45);
+  hipPosition: THREE.Vector3 = new THREE.Vector3(0.28, -0.28, -0.55);
+  adsPosition: THREE.Vector3 = new THREE.Vector3(0, -0.165, -0.42);
 
   pickaxeAnimationTime: number = 0;
   isPickaxeAnimating: boolean = false;
@@ -267,6 +291,8 @@ export class Game {
     maxLife: number;
     hasWhizzed: boolean;
     hasImpacted: boolean;
+    targetDistance?: number;
+    startPos?: THREE.Vector3;
   }> = [];
 
   collapseAnimations: Array<{
@@ -287,14 +313,26 @@ export class Game {
     rotationSpeed: THREE.Vector3;
     life: number;
     maxLife: number;
+    groundBounces?: number;
   }> = [];
 
   muzzleFlashes: Array<{
     light: THREE.PointLight;
-    mesh: THREE.Mesh;
+    group: THREE.Group;
+    sparks?: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3 }>;
     life: number;
     maxLife: number;
   }> = [];
+
+  captureFireworks: Array<{
+    mesh: THREE.Mesh;
+    velocity: THREE.Vector3;
+    life: number;
+    maxLife: number;
+    color: number;
+  }> = [];
+
+  radioLog: RadioMessage[] = [];
 
   blueFlag!: Flag;
   redFlag!: Flag;
@@ -434,6 +472,9 @@ export class Game {
     }
 
     if (this.gameMode === 'online') {
+      console.log('Populating arena with tactical squad bots...');
+      this.spawnTeamBots('blue', 5);
+      this.spawnTeamBots('red', 5);
       this.initializeNetwork();
     }
     
@@ -527,6 +568,20 @@ export class Game {
     );
     rifleBody.position.set(0, 0, -0.15);
     rifle.add(rifleBody);
+
+    // Rifle receiver ejection port locator (right side of receiver)
+    const rifleEjection = new THREE.Object3D();
+    rifleEjection.name = 'ejectionPort';
+    rifleEjection.position.set(0.046, 0.025, -0.15);
+    rifle.add(rifleEjection);
+
+    // Visible ejection port recess
+    const riflePortDetail = new THREE.Mesh(
+      new THREE.BoxGeometry(0.006, 0.028, 0.08),
+      new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.9, roughness: 0.2 })
+    );
+    riflePortDetail.position.set(0.041, 0.025, -0.15);
+    rifle.add(riflePortDetail);
     
     const rifleBarrel = new THREE.Mesh(
       new THREE.CylinderGeometry(0.025, 0.025, 0.6, 8),
@@ -535,6 +590,20 @@ export class Game {
     rifleBarrel.rotation.x = Math.PI / 2;
     rifleBarrel.position.set(0, 0.01, -0.65);
     rifle.add(rifleBarrel);
+
+    // Rifle barrel muzzle locator (right at the physical tip of the barrel)
+    const rifleMuzzle = new THREE.Object3D();
+    rifleMuzzle.name = 'barrelMuzzle';
+    rifleMuzzle.position.set(0, 0.01, -0.96);
+    rifle.add(rifleMuzzle);
+
+    // Front iron sight post for precision ADS alignment
+    const rifleSight = new THREE.Mesh(
+      new THREE.BoxGeometry(0.008, 0.032, 0.015),
+      new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.9, roughness: 0.1 })
+    );
+    rifleSight.position.set(0, 0.042, -0.9);
+    rifle.add(rifleSight);
     
     const rifleStock = new THREE.Mesh(
       new THREE.BoxGeometry(0.08, 0.12, 0.3),
@@ -554,6 +623,20 @@ export class Game {
     );
     smgBody.position.set(0, 0, -0.1);
     smg.add(smgBody);
+
+    // SMG receiver ejection port locator (right side of receiver)
+    const smgEjection = new THREE.Object3D();
+    smgEjection.name = 'ejectionPort';
+    smgEjection.position.set(0.05, 0.025, -0.1);
+    smg.add(smgEjection);
+
+    // Visible ejection port recess
+    const smgPortDetail = new THREE.Mesh(
+      new THREE.BoxGeometry(0.006, 0.026, 0.06),
+      new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.9, roughness: 0.2 })
+    );
+    smgPortDetail.position.set(0.046, 0.025, -0.1);
+    smg.add(smgPortDetail);
     
     const smgBarrel = new THREE.Mesh(
       new THREE.CylinderGeometry(0.025, 0.025, 0.35, 8),
@@ -562,6 +645,20 @@ export class Game {
     smgBarrel.rotation.x = Math.PI / 2;
     smgBarrel.position.set(0, 0.01, -0.4);
     smg.add(smgBarrel);
+
+    // SMG barrel muzzle locator (right at the physical tip of the barrel)
+    const smgMuzzle = new THREE.Object3D();
+    smgMuzzle.name = 'barrelMuzzle';
+    smgMuzzle.position.set(0, 0.01, -0.58);
+    smg.add(smgMuzzle);
+
+    // Front sight post for SMG
+    const smgSight = new THREE.Mesh(
+      new THREE.BoxGeometry(0.008, 0.028, 0.015),
+      new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.9, roughness: 0.1 })
+    );
+    smgSight.position.set(0, 0.038, -0.55);
+    smg.add(smgSight);
     
     const smgStock = new THREE.Mesh(
       new THREE.BoxGeometry(0.07, 0.1, 0.18),
@@ -802,6 +899,17 @@ export class Game {
             }
 
             this.sounds.capture();
+            this.sounds.captureFirework();
+            this.createCaptureFireworks(new THREE.Vector3(homeBase.x, baseGroundY + 1.5, homeBase.z), carrierTeam!);
+            this.addRadioMessage(carrier.name, `🚩 Enemy flag secured and scored at base! Respawning in 8s.`, carrierTeam!);
+
+            if (this.networkClient && this.networkClient.isConnected()) {
+              this.networkClient.send({
+                type: 'captureFlag',
+                team: carrierTeam!,
+              });
+            }
+
             if (carrier.isPlayer) this.player.carryingFlag = false;
             if (carrier.bot) {
               carrier.bot.carryingFlag = false;
@@ -900,20 +1008,30 @@ export class Game {
 
       // Aggressive CTF roles: 75% attackers pushing for the flag, 15% flankers, 10% base defender
       let role: 'attacker' | 'defender' | 'flanker' | 'support';
+      let archetype: Bot['archetype'];
+
       if (i === 0) {
-        role = 'defender'; // 1 dedicated base defender
+        role = 'defender';
+        archetype = 'engineer'; // Base fortifier
       } else if (i === 1) {
         role = 'flanker';
+        archetype = 'marksman'; // Long-distance cover fire
+      } else if (i === 2) {
+        role = 'attacker';
+        archetype = 'breacher'; // Barricade demolisher & trench spade
       } else {
-        role = 'attacker'; // All others are aggressive flag rushers!
+        role = 'attacker';
+        archetype = (i % 2 === 0) ? 'assault' : 'breacher';
       }
 
-      // Weapons: Flankers prefer SMGs for close ambush; defenders prefer rifles for long range
+      // Weapons tailored to archetype
       let weapon: 'rifle' | 'smg';
-      if (role === 'flanker') {
-        weapon = Math.random() < 0.8 ? 'smg' : 'rifle';
-      } else if (role === 'defender') {
-        weapon = Math.random() < 0.8 ? 'rifle' : 'smg';
+      if (archetype === 'marksman') {
+        weapon = 'rifle';
+      } else if (archetype === 'assault') {
+        weapon = 'smg';
+      } else if (archetype === 'engineer') {
+        weapon = 'rifle';
       } else {
         weapon = Math.random() < 0.5 ? 'rifle' : 'smg';
       }
@@ -970,8 +1088,8 @@ export class Game {
         behaviorTimer: 2 + Math.random() * 3,
         strafeDirection: Math.random() > 0.5 ? 1 : -1,
         stuckTimer: 0, lastPos: pos.clone(),
-        jumpCooldown: 0, skill: 0.65 + Math.random() * 0.35,
-        aggression: 0.6 + Math.random() * 0.4,
+        jumpCooldown: 0, skill: archetype === 'marksman' ? 0.9 : (0.65 + Math.random() * 0.3),
+        aggression: archetype === 'assault' ? 0.95 : (0.6 + Math.random() * 0.4),
         lastDamageTime: 0, dodgeTimer: 1.5 + Math.random(), coverTimer: 0,
         weapon,
         weaponMesh: parts.weaponGroup,
@@ -988,7 +1106,7 @@ export class Game {
         // Equipment loadout
         hasSpade: true, // All combatants carry entrenching tools
         hasBlocks: true, // All combatants have building resources
-        inventoryBlocks: 14 + Math.floor(Math.random() * 10),
+        inventoryBlocks: archetype === 'engineer' ? 26 : (archetype === 'breacher' ? 20 : 14),
         isDigging: false,
         digTimer: 0,
         digTarget: null,
@@ -1015,6 +1133,15 @@ export class Game {
         nameTagCanvas,
         nameTagTexture,
         lastDrawnState: '',
+        archetype,
+        speechText: undefined,
+        speechTimer: 0,
+        combatJumpCooldown: 1.0 + Math.random() * 2,
+        flinchTimer: 0,
+        isBreaching: false,
+        breachTimer: 0,
+        breachTarget: null,
+        lastRadioCallTime: 0,
         reactionDelay: 0,
         currentTargetKey: null,
         consecutiveShots: 0,
@@ -1140,6 +1267,18 @@ export class Game {
       );
       sight.position.set(0, 0.06, -0.65);
       weaponGroup.add(sight);
+
+      // Bot rifle barrel muzzle locator
+      const botMuzzle = new THREE.Object3D();
+      botMuzzle.name = 'barrelMuzzle';
+      botMuzzle.position.set(0, 0.03, -0.72);
+      weaponGroup.add(botMuzzle);
+
+      // Bot rifle receiver ejection port locator
+      const botEjection = new THREE.Object3D();
+      botEjection.name = 'ejectionPort';
+      botEjection.position.set(0.045, 0.03, -0.15);
+      weaponGroup.add(botEjection);
     } else {
       // SMG: Compact receiver
       const bodySmg = new THREE.Mesh(
@@ -1173,6 +1312,18 @@ export class Game {
       barrel.rotation.x = Math.PI / 2;
       barrel.position.set(0, 0.02, -0.32);
       weaponGroup.add(barrel);
+
+      // Bot SMG barrel muzzle locator
+      const botMuzzle = new THREE.Object3D();
+      botMuzzle.name = 'barrelMuzzle';
+      botMuzzle.position.set(0, 0.02, -0.44);
+      weaponGroup.add(botMuzzle);
+
+      // Bot SMG receiver ejection port locator
+      const botEjection = new THREE.Object3D();
+      botEjection.name = 'ejectionPort';
+      botEjection.position.set(0.048, 0.02, -0.08);
+      weaponGroup.add(botEjection);
     }
 
     weaponGroup.position.set(0.38, 1.1, -0.25);
@@ -1241,42 +1392,145 @@ export class Game {
     return sprite;
   }
 
+  private createCaptureFireworks(pos: THREE.Vector3, team: Team): void {
+    const colors = team === 'blue' ? [0x4488ff, 0x00e5ff, 0xffffff, 0xffd700] : [0xff4444, 0xff9100, 0xffffff, 0xffd700];
+    for (let i = 0; i < 32; i++) {
+      const color = colors[i % colors.length];
+      const geo = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(pos);
+      this.scene.add(mesh);
+
+      const angle = (i / 32) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+      const speed = 5 + Math.random() * 7;
+      const vy = 9 + Math.random() * 7;
+      const velocity = new THREE.Vector3(Math.cos(angle) * speed, vy, Math.sin(angle) * speed);
+
+      this.captureFireworks.push({
+        mesh,
+        velocity,
+        life: 0,
+        maxLife: 1.8 + Math.random() * 0.5,
+        color,
+      });
+    }
+  }
+
+  addRadioMessage(sender: string, text: string, team: Team, bot?: Bot): void {
+    const msg: RadioMessage = {
+      id: Math.random().toString(36).substring(2, 9),
+      sender,
+      text,
+      team,
+      time: performance.now(),
+    };
+    this.radioLog.push(msg);
+    if (this.radioLog.length > 8) {
+      this.radioLog.shift();
+    }
+    this.sounds.radioBeep();
+    if (bot) {
+      bot.speechText = text;
+      bot.speechTimer = 3.5;
+      this.updateBotNameTag(bot, bot.tacticalState, bot.team === 'blue' ? '#60a5fa' : '#f87171');
+    }
+  }
+
   private createBotNameTag(team: Team, name: string): { sprite: THREE.Sprite; canvas: HTMLCanvasElement; texture: THREE.CanvasTexture } {
     const canvas = document.createElement('canvas');
     canvas.width = 256;
-    canvas.height = 96;
+    canvas.height = 128;
     const texture = new THREE.CanvasTexture(canvas);
     const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(2.4, 0.9, 1);
+    sprite.scale.set(2.6, 1.3, 1);
     return { sprite, canvas, texture };
   }
 
   private updateBotNameTag(bot: Bot, actionText: string, actionColor: string): void {
     if (!bot.nameTagCanvas || !bot.nameTagTexture) return;
-    if (bot.lastDrawnState === actionText) return;
-    bot.lastDrawnState = actionText;
+    const stateKey = `${actionText}_${Math.round(bot.hp)}_${bot.speechText || ''}`;
+    if (bot.lastDrawnState === stateKey) return;
+    bot.lastDrawnState = stateKey;
 
     const ctx = bot.nameTagCanvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.clearRect(0, 0, 256, 96);
+    ctx.clearRect(0, 0, 256, 128);
 
-    // Bot name in bold with dark halo
-    ctx.font = 'bold 22px Arial, sans-serif';
+    // 1. Speech balloon if bot has an active radio speech callout
+    if (bot.speechText) {
+      ctx.font = 'bold 12px Arial, sans-serif';
+      const textMetrics = ctx.measureText(bot.speechText);
+      const speechWidth = Math.min(244, Math.max(120, textMetrics.width + 18));
+      const speechX = 128 - speechWidth / 2;
+      ctx.fillStyle = 'rgba(10, 15, 26, 0.94)';
+      ctx.beginPath();
+      if (typeof (ctx as any).roundRect === 'function') {
+        (ctx as any).roundRect(speechX, 4, speechWidth, 22, 6);
+      } else {
+        ctx.rect(speechX, 4, speechWidth, 22);
+      }
+      ctx.fill();
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.fillText(bot.speechText, 128, 19);
+    }
+
+    // 2. Bot name + archetype tag
+    const archetypeLabel = bot.archetype ? `[${bot.archetype.toUpperCase()}]` : '';
+    ctx.font = 'bold 18px Arial, sans-serif';
     ctx.textAlign = 'center';
     ctx.shadowColor = 'rgba(0, 0, 0, 0.95)';
     ctx.shadowBlur = 5;
-    ctx.fillStyle = bot.team === 'blue' ? '#55aaff' : '#ff5555';
-    ctx.fillText(bot.name, 128, 28);
+    ctx.fillStyle = bot.team === 'blue' ? '#60a5fa' : '#f87171';
+    ctx.fillText(`${bot.name} ${archetypeLabel}`, 128, bot.speechText ? 52 : 36);
 
-    // Status action pill
+    // 3. Dynamic Health Bar (140px wide)
     ctx.shadowBlur = 0;
-    const badgeY = 44;
-    const badgeHeight = 32;
-    ctx.font = 'bold 15px Arial, sans-serif';
+    const barY = bot.speechText ? 60 : 44;
+    const barWidth = 140;
+    const barHeight = 8;
+    const barX = 128 - barWidth / 2;
+
+    // Bar background
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+    ctx.beginPath();
+    if (typeof (ctx as any).roundRect === 'function') {
+      (ctx as any).roundRect(barX, barY, barWidth, barHeight, 4);
+    } else {
+      ctx.rect(barX, barY, barWidth, barHeight);
+    }
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Bar fill
+    const hpRatio = Math.max(0, Math.min(1, bot.hp / bot.maxHp));
+    if (hpRatio > 0) {
+      const fillWidth = Math.max(4, barWidth * hpRatio);
+      ctx.fillStyle = hpRatio > 0.6 ? '#10b981' : (hpRatio > 0.3 ? '#f59e0b' : '#ef4444');
+      ctx.beginPath();
+      if (typeof (ctx as any).roundRect === 'function') {
+        (ctx as any).roundRect(barX, barY, fillWidth, barHeight, 4);
+      } else {
+        ctx.rect(barX, barY, fillWidth, barHeight);
+      }
+      ctx.fill();
+    }
+
+    // 4. Status action pill
+    const badgeY = bot.speechText ? 76 : 60;
+    const badgeHeight = 28;
+    ctx.font = 'bold 14px Arial, sans-serif';
     const textWidth = ctx.measureText(actionText).width;
-    const badgeWidth = Math.min(240, Math.max(130, textWidth + 24));
+    const badgeWidth = Math.min(240, Math.max(120, textWidth + 24));
     const badgeX = 128 - badgeWidth / 2;
 
     // Dark rounded rect pill
@@ -1297,7 +1551,7 @@ export class Game {
     // Action text in action color
     ctx.fillStyle = actionColor;
     ctx.textAlign = 'center';
-    ctx.fillText(actionText, 128, badgeY + 22);
+    ctx.fillText(actionText, 128, badgeY + 19);
 
     bot.nameTagTexture.needsUpdate = true;
   }
@@ -1602,9 +1856,30 @@ export class Game {
   private renderRemotePlayerShot(playerId: string, origin: Position, direction: Position, weaponType: string): void {
     const o = new THREE.Vector3(origin.x, origin.y, origin.z);
     const d = new THREE.Vector3(direction.x, direction.y, direction.z);
-    this.createMuzzleFlash(o, d);
-    this.createBulletTracer(o, d);
-    this.createBulletShell(o, d);
+    const speed = weaponType === 'rifle' ? 300 : 230;
+    const terrainHit = this.world.raycast(o, d, 350);
+    const maxDist = terrainHit ? terrainHit.distance : 350;
+
+    const remote = this.remotePlayers.get(playerId);
+    let muzzlePos = o;
+    let receiverPos = o;
+    if (remote) {
+      remote.mesh.updateMatrixWorld(true);
+      const muzzleObj = remote.mesh.getObjectByName('barrelMuzzle');
+      const ejectionObj = remote.mesh.getObjectByName('ejectionPort');
+      if (muzzleObj) {
+        muzzlePos = new THREE.Vector3();
+        muzzleObj.getWorldPosition(muzzlePos);
+      }
+      if (ejectionObj) {
+        receiverPos = new THREE.Vector3();
+        ejectionObj.getWorldPosition(receiverPos);
+      }
+    }
+
+    this.createMuzzleFlash(muzzlePos, d);
+    this.createBulletTracer(muzzlePos, d, maxDist, speed);
+    this.createBulletShell(receiverPos, d, true);
     if (weaponType === 'smg') {
       this.sounds.smgShot();
     } else {
@@ -1630,8 +1905,10 @@ export class Game {
       this.isMouseDown = true;
       this.performAction();
     } else if (e.button === 2) {
+      this.isMouseDown = true;
       if (this.equipment === 'rifle' || this.equipment === 'smg') {
         this.isAiming = !this.isAiming;
+        this.player.isAiming = this.isAiming;
       } else {
         // Instant snappy block placement like Minecraft
         this.tryBuild();
@@ -1655,6 +1932,7 @@ export class Game {
     this.equipment = e.deltaY > 0 ? items[(idx + 1) % 4] : items[(idx - 1 + 4) % 4];
     this.switchWeaponModel(this.equipment);
     this.isAiming = false;
+    this.player.isAiming = false;
   }
 
   private onKeyDown(e: KeyboardEvent): void {
@@ -1715,10 +1993,10 @@ export class Game {
     }
 
     // Normal player mode controls:
-    if (e.code === 'Digit1') { this.equipment = 'rifle'; this.switchWeaponModel('rifle'); }
-    if (e.code === 'Digit2') { this.equipment = 'smg'; this.switchWeaponModel('smg'); }
-    if (e.code === 'Digit3') { this.equipment = 'spade'; this.switchWeaponModel('spade'); }
-    if (e.code === 'Digit4') { this.equipment = 'pickaxe'; this.switchWeaponModel('pickaxe'); }
+    if (e.code === 'Digit1') { this.equipment = 'rifle'; this.switchWeaponModel('rifle'); this.isAiming = false; this.player.isAiming = false; }
+    if (e.code === 'Digit2') { this.equipment = 'smg'; this.switchWeaponModel('smg'); this.isAiming = false; this.player.isAiming = false; }
+    if (e.code === 'Digit3') { this.equipment = 'spade'; this.switchWeaponModel('spade'); this.isAiming = false; this.player.isAiming = false; }
+    if (e.code === 'Digit4') { this.equipment = 'pickaxe'; this.switchWeaponModel('pickaxe'); this.isAiming = false; this.player.isAiming = false; }
     if (e.code === 'KeyR') this.startReload();
 
     this.player.handleKeyDown(e.code);
@@ -1897,12 +2175,27 @@ export class Game {
     weapon.lastFired = now;
     weapon.currentAmmo--;
 
-    const dir = this.player.getAimDirection();
-    const muzzlePos = this.player.camera.position.clone().add(dir.clone().multiplyScalar(0.5));
-    
-    this.createMuzzleFlash(muzzlePos, dir.clone());
-    this.createBulletTracer(muzzlePos, dir.clone());
-    this.createBulletShell(muzzlePos, dir.clone());
+    // High accuracy aiming direction (pinpoint when ADS, virtually zero rifle hip spread)
+    let dir = this.player.getAimDirection();
+    if (!this.isAiming) {
+      // Pinpoint accurate rifle (near-zero spread), tighter and controlled SMG spread
+      const spreadAmount = this.equipment === 'rifle' ? 0.0006 : 0.0075;
+      const spreadX = (Math.random() - 0.5) * spreadAmount;
+      const spreadY = (Math.random() - 0.5) * spreadAmount;
+      const right = this.player.getRight();
+      const up = new THREE.Vector3(0, 1, 0);
+      dir.addScaledVector(right, spreadX).addScaledVector(up, spreadY).normalize();
+    } else if (this.equipment === 'smg') {
+      // ADS SMG gets a tiny precision spread; Rifle ADS has 0 spread (laser pinpoint)
+      const spreadAmount = 0.002;
+      const spreadX = (Math.random() - 0.5) * spreadAmount;
+      const spreadY = (Math.random() - 0.5) * spreadAmount;
+      const right = this.player.getRight();
+      const up = new THREE.Vector3(0, 1, 0);
+      dir.addScaledVector(right, spreadX).addScaledVector(up, spreadY).normalize();
+    }
+
+    const cameraPos = this.player.camera.position.clone();
     
     // Play appropriate sound based on weapon
     if (this.equipment === 'rifle') {
@@ -1911,99 +2204,172 @@ export class Game {
       this.sounds.smgShot();
     }
 
-    const hit = this.world.raycast(muzzlePos, dir, 100);
-    const voxelDist = hit ? hit.distance : 100;
-    if (hit) {
-      const voxel = this.world.getVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z);
-      if (voxel) {
-        const destroyed = this.world.damageVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 1);
-        if (destroyed) {
-          this.world.updateVoxelColor(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 0, 0);
+    // Extended 350m battlefield raycast starting directly from camera view
+    const maxBulletDistance = 350;
+    const hit = this.world.raycast(cameraPos, dir, maxBulletDistance);
+    const voxelDist = hit ? hit.distance : maxBulletDistance;
+
+    // Check hit on enemy remote players
+    let hitRemoteId: string | null = null;
+    let hitRemoteHeadshot = false;
+    let closestTargetDist = voxelDist;
+    let actualImpactPoint = hit ? hit.position.clone() : cameraPos.clone().add(dir.clone().multiplyScalar(maxBulletDistance));
+
+    for (const [id, remote] of this.remotePlayers) {
+      if (remote.state.isDead || remote.state.team === this.playerTeam) continue;
+      const targetPos = remote.mesh.position;
+      const dx = targetPos.x - cameraPos.x;
+      const dz = targetPos.z - cameraPos.z;
+      const horizDirSq = dir.x * dir.x + dir.z * dir.z;
+
+      if (horizDirSq > 0.0001) {
+        const t = (dx * dir.x + dz * dir.z) / horizDirSq;
+        if (t > 0.3 && t < closestTargetDist) {
+          const rayX = cameraPos.x + dir.x * t;
+          const rayZ = cameraPos.z + dir.z * t;
+          const rayY = cameraPos.y + dir.y * t;
+          const horizontalDist = Math.hypot(rayX - targetPos.x, rayZ - targetPos.z);
+          const verticalDist = rayY - targetPos.y;
+
+          if (horizontalDist < 0.65 && verticalDist >= -0.1 && verticalDist <= 2.15) {
+            hitRemoteId = id;
+            hitRemoteHeadshot = verticalDist >= 1.45;
+            closestTargetDist = t;
+            actualImpactPoint = new THREE.Vector3(rayX, rayY, rayZ);
+          }
         }
       }
     }
 
-    // Check hit on enemy remote players
-    let hitRemoteId: string | null = null;
-    let hitIsHeadshot = false;
-
-    for (const [id, remote] of this.remotePlayers) {
-      if (remote.state.isDead || remote.state.team === this.playerTeam) continue;
-      const toRemote = remote.mesh.position.clone().sub(this.player.position);
-      const dot = toRemote.dot(dir);
-      if (dot > 0 && dot < 100 && dot < voxelDist) {
-        const closestPoint = this.player.position.clone().add(dir.clone().multiplyScalar(dot));
-        const horizontalDist = Math.hypot(closestPoint.x - remote.mesh.position.x, closestPoint.z - remote.mesh.position.z);
-        const verticalDist = closestPoint.y - remote.mesh.position.y;
-        if (horizontalDist < 0.75 && verticalDist >= -0.2 && verticalDist <= 2.3) {
-          hitRemoteId = id;
-          hitIsHeadshot = verticalDist >= 1.45;
-          this.hitMarkerTimer = 0.25;
-          this.sounds.hitMarker();
-          if (hitIsHeadshot) this.sounds.headshot();
-          break;
-        }
-      }
+    if (hitRemoteId) {
+      this.hitMarkerTimer = 0.25;
+      this.sounds.hitMarker();
+      if (hitRemoteHeadshot) this.sounds.headshot();
+      this.createImpactSparks(actualImpactPoint);
     }
 
     // Send shoot event to network server with hit candidate
     if (this.networkClient && this.networkClient.isConnected()) {
       this.networkClient.sendShoot(
-        { x: muzzlePos.x, y: muzzlePos.y, z: muzzlePos.z },
+        { x: cameraPos.x, y: cameraPos.y, z: cameraPos.z },
         { x: dir.x, y: dir.y, z: dir.z },
-        hitRemoteId ? { targetId: hitRemoteId, isHeadshot: hitIsHeadshot } : undefined
+        hitRemoteId ? { targetId: hitRemoteId, isHeadshot: hitRemoteHeadshot } : undefined
       );
     }
 
-    // Check hit on enemy bots with realistic hitbox (head and body)
+    // Check hit on enemy bots with precision 3D ray-cylinder intersection
+    let hitBot: Bot | null = null;
+    let hitBotHeadshot = false;
+
     for (const bot of this.bots) {
       if (bot.isDead || bot.team === this.playerTeam) continue;
-      const toBot = bot.position.clone().sub(this.player.position);
-      const dot = toBot.dot(dir);
-      if (dot > 0 && dot < 60 && dot < voxelDist) {
-        const closestPoint = this.player.position.clone().add(dir.clone().multiplyScalar(dot));
-        const horizontalDist = Math.hypot(closestPoint.x - bot.position.x, closestPoint.z - bot.position.z);
-        const verticalDist = closestPoint.y - bot.position.y;
+      const dx = bot.position.x - cameraPos.x;
+      const dz = bot.position.z - cameraPos.z;
+      const horizDirSq = dir.x * dir.x + dir.z * dir.z;
 
-        // Bot hitbox: horizontal radius 0.65m, vertical height 0 to 2.1m
-        if (horizontalDist < 0.65 && verticalDist >= 0 && verticalDist <= 2.1) {
-          const isHeadshot = verticalDist >= 1.5;
-          const damage = isHeadshot ? weapon.damage.head : weapon.damage.body;
+      if (horizDirSq > 0.0001) {
+        const t = (dx * dir.x + dz * dir.z) / horizDirSq;
+        if (t > 0.3 && t < closestTargetDist) {
+          const rayX = cameraPos.x + dir.x * t;
+          const rayZ = cameraPos.z + dir.z * t;
+          const rayY = cameraPos.y + dir.y * t;
+          const horizontalDist = Math.hypot(rayX - bot.position.x, rayZ - bot.position.z);
+          const verticalDist = rayY - bot.position.y;
 
-          bot.hp -= damage;
-          bot.lastDamageTime = Date.now();
-          this.hitMarkerTimer = 0.2;
-          this.sounds.hitMarker();
-
-          if (bot.hp <= 0) {
-            bot.isDead = true;
-            bot.mesh.visible = false;
-            bot.respawnTimer = 4;
-
-            // Drop flag if bot was carrying it so it reappears on the ground
-            if (bot.carryingFlag) {
-              const carriedFlag = bot.team === 'blue' ? this.redFlag : this.blueFlag;
-              if (carriedFlag) {
-                carriedFlag.carrier = null;
-                carriedFlag.isDropped = true;
-                carriedFlag.dropTimer = 30;
-                const dropY = this.world.getGroundHeight(bot.position.x, bot.position.z);
-                carriedFlag.currentPos.set(bot.position.x, dropY, bot.position.z);
-                carriedFlag.mesh.position.copy(carriedFlag.currentPos);
-                carriedFlag.mesh.visible = true; // Dropped flag appears on ground!
-                this.showMessage(`🚩 ${carriedFlag.team.toUpperCase()} flag was dropped by ${bot.name}!`);
-              }
-              bot.carryingFlag = false;
-            }
-
-            if (this.playerTeam === 'blue') this.blueKills++; else this.redKills++;
-            this.sounds.killSound();
-            this.showMessage(`🎯 You killed ${bot.name} ${isHeadshot ? '(HEADSHOT!)' : ''}`);
+          // Realistic bot hitbox: horizontal radius 0.65m, vertical height 0 to 2.15m
+          if (horizontalDist < 0.65 && verticalDist >= -0.1 && verticalDist <= 2.15) {
+            hitBot = bot;
+            hitBotHeadshot = verticalDist >= 1.45;
+            closestTargetDist = t;
+            actualImpactPoint = new THREE.Vector3(rayX, rayY, rayZ);
           }
-          break; // Bullet hit target
         }
       }
     }
+
+    if (hitBot) {
+      const damage = hitBotHeadshot ? weapon.damage.head : weapon.damage.body;
+      hitBot.hp -= damage;
+      hitBot.lastDamageTime = Date.now();
+      hitBot.flinchTimer = 0.22;
+      this.hitMarkerTimer = 0.25;
+      this.sounds.hitMarker();
+      if (hitBotHeadshot) this.sounds.headshot();
+      this.createImpactSparks(actualImpactPoint);
+
+      if (hitBot.hp > 0) {
+        const hitCallout = hitBot.hp < 30 ? '🔥 HEAVY DAMAGE! FALLING BACK!' : '⚡ UNDER HOSTILE ATTACK!';
+        this.addRadioMessage(hitBot.name, hitCallout, hitBot.team, hitBot);
+        this.updateBotNameTag(hitBot, hitBot.hp < 30 ? '🏃 TACTICAL RETREAT' : '🎯 ENGAGING PLAYER', '#ff4444');
+      }
+
+      if (hitBot.hp <= 0) {
+        hitBot.isDead = true;
+        hitBot.mesh.visible = false;
+        hitBot.respawnTimer = 4;
+
+        // Drop flag if bot was carrying it so it reappears on the ground
+        if (hitBot.carryingFlag) {
+          const carriedFlag = hitBot.team === 'blue' ? this.redFlag : this.blueFlag;
+          if (carriedFlag) {
+            carriedFlag.carrier = null;
+            carriedFlag.isDropped = true;
+            carriedFlag.dropTimer = 30;
+            const dropY = this.world.getGroundHeight(hitBot.position.x, hitBot.position.z);
+            carriedFlag.currentPos.set(hitBot.position.x, dropY, hitBot.position.z);
+            carriedFlag.mesh.position.copy(carriedFlag.currentPos);
+            carriedFlag.mesh.visible = true; // Dropped flag appears on ground!
+            this.showMessage(`🚩 ${carriedFlag.team.toUpperCase()} flag was dropped by ${hitBot.name}!`);
+          }
+          hitBot.carryingFlag = false;
+        }
+
+        if (this.playerTeam === 'blue') this.blueKills++; else this.redKills++;
+        this.sounds.killSound();
+        this.showMessage(`🎯 You killed ${hitBot.name} ${hitBotHeadshot ? '(HEADSHOT!)' : ''}`);
+      }
+    } else if (hit && closestTargetDist >= voxelDist - 0.2) {
+      // Hit a voxel in the world
+      const voxel = this.world.getVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z);
+      if (voxel) {
+        const result = this.world.damageVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 1);
+        if (result.destroyed) {
+          this.sounds.pickaxeHit();
+        }
+      }
+      this.createImpactSparks(actualImpactPoint, hit.normal);
+    }
+
+    // Update camera and weapon model world matrices to ensure pinpoint locator accuracy
+    this.player.camera.updateMatrixWorld(true);
+    if (this.currentWeaponModel) this.currentWeaponModel.updateMatrixWorld(true);
+
+    let barrelMuzzlePos = new THREE.Vector3();
+    let receiverPos = new THREE.Vector3();
+    const muzzleObj = this.currentWeaponModel?.getObjectByName('barrelMuzzle');
+    const ejectionObj = this.currentWeaponModel?.getObjectByName('ejectionPort');
+
+    if (muzzleObj) {
+      muzzleObj.getWorldPosition(barrelMuzzlePos);
+    } else {
+      barrelMuzzlePos.copy(cameraPos).addScaledVector(dir, 0.4);
+    }
+
+    if (ejectionObj) {
+      ejectionObj.getWorldPosition(receiverPos);
+    } else {
+      const right = this.player.getRight();
+      receiverPos.copy(this.player.camera.position).addScaledVector(right, 0.25).addScaledVector(dir, 0.15);
+    }
+
+    // Long-distance luminous tracer & muzzle visuals
+    const bulletSpeed = this.equipment === 'rifle' ? 300 : 230;
+    const tracerDir = actualImpactPoint.clone().sub(barrelMuzzlePos).normalize();
+    const tracerDist = barrelMuzzlePos.distanceTo(actualImpactPoint);
+
+    this.createMuzzleFlash(barrelMuzzlePos, dir.clone());
+    this.createBulletTracer(barrelMuzzlePos, tracerDir, tracerDist, bulletSpeed);
+    this.createBulletShell(receiverPos, dir.clone());
   }
 
   private usePickaxe(now: number): void {
@@ -2011,7 +2377,7 @@ export class Game {
     this.lastActionTime = now;
     
     const dir = this.player.getAimDirection();
-    const origin = this.player.camera.position.clone().add(dir.clone().multiplyScalar(0.5));
+    const origin = this.player.camera.position.clone();
     const hit = this.world.raycast(origin, dir, 5);
     
     if (hit) {
@@ -2031,7 +2397,7 @@ export class Game {
     this.lastActionTime = now;
     
     const dir = this.player.getAimDirection();
-    const origin = this.player.camera.position.clone().add(dir.clone().multiplyScalar(0.5));
+    const origin = this.player.camera.position.clone();
     const hit = this.world.raycast(origin, dir, 5);
     
     if (hit) {
@@ -2214,7 +2580,7 @@ export class Game {
     if (this.inventory <= 0) return;
     
     const dir = this.player.getAimDirection();
-    const origin = this.player.camera.position.clone().add(dir.clone().multiplyScalar(0.5));
+    const origin = this.player.camera.position.clone();
     const hit = this.world.raycast(origin, dir, 6);
     
     if (hit) {
@@ -2237,11 +2603,11 @@ export class Game {
   }
 
   private createBlockPlacementEffect(x: number, y: number, z: number): void {
-    // Create a quick flash effect at the placement location
-    const flashGeo = new THREE.BoxGeometry(VOXEL_SIZE * 1.1, VOXEL_SIZE * 1.1, VOXEL_SIZE * 1.1);
+    // Create a quick flash effect at the placement location (voxels centered at x, y, z)
+    const flashGeo = new THREE.BoxGeometry(VOXEL_SIZE * 1.05, VOXEL_SIZE * 1.05, VOXEL_SIZE * 1.05);
     const flashMat = new THREE.MeshBasicMaterial({ color: 0x88ff88, transparent: true, opacity: 0.7 });
     const flashMesh = new THREE.Mesh(flashGeo, flashMat);
-    flashMesh.position.set(x + 0.5, y + 0.5, z + 0.5);
+    flashMesh.position.set(x, y, z);
     this.scene.add(flashMesh);
     
     // Animate the flash fading out
@@ -2295,52 +2661,158 @@ export class Game {
   }
 
   private createMuzzleFlash(position: THREE.Vector3, direction: THREE.Vector3): void {
-    const light = new THREE.PointLight(0xffaa00, 5, 8);
+    const light = new THREE.PointLight(0xffb703, 5, 8);
     light.position.copy(position);
     this.scene.add(light);
 
-    const flashGeo = new THREE.SphereGeometry(0.15, 8, 8);
-    const flashMat = new THREE.MeshBasicMaterial({ color: 0xffcc00, transparent: true, opacity: 0.9 });
-    const flashMesh = new THREE.Mesh(flashGeo, flashMat);
-    flashMesh.position.copy(position);
-    this.scene.add(flashMesh);
+    const flashGroup = new THREE.Group();
+    flashGroup.position.copy(position);
+    flashGroup.lookAt(position.clone().add(direction));
 
-    this.muzzleFlashes.push({ light, mesh: flashMesh, life: 0, maxLife: 0.08 });
+    // Hot bright white-yellow inner core spark
+    const coreGeo = new THREE.SphereGeometry(0.045, 8, 8);
+    const coreMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+    coreMesh.position.set(0, 0, 0.04);
+    flashGroup.add(coreMesh);
+
+    // Forward flame burst cone projecting from the barrel
+    const flameGeo = new THREE.ConeGeometry(0.09, 0.24, 6);
+    const flameMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.85 });
+    const flameMesh = new THREE.Mesh(flameGeo, flameMat);
+    flameMesh.rotation.x = -Math.PI / 2;
+    flameMesh.position.set(0, 0, 0.12);
+    flashGroup.add(flameMesh);
+
+    // Star-burst spark blades
+    const starH = new THREE.Mesh(
+      new THREE.BoxGeometry(0.24, 0.015, 0.015),
+      new THREE.MeshBasicMaterial({ color: 0xffea00, transparent: true, opacity: 0.9 })
+    );
+    starH.position.set(0, 0, 0.06);
+    flashGroup.add(starH);
+
+    const starV = new THREE.Mesh(
+      new THREE.BoxGeometry(0.015, 0.24, 0.015),
+      new THREE.MeshBasicMaterial({ color: 0xffea00, transparent: true, opacity: 0.9 })
+    );
+    starV.position.set(0, 0, 0.06);
+    flashGroup.add(starV);
+
+    this.scene.add(flashGroup);
+
+    // Flying incandescent sparks spraying from the barrel opening
+    const sparks: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3 }> = [];
+    const sparkCount = 4 + Math.floor(Math.random() * 3);
+    for (let s = 0; s < sparkCount; s++) {
+      const spGeo = new THREE.BoxGeometry(0.02, 0.02, 0.02);
+      const spMat = new THREE.MeshBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.95 });
+      const spMesh = new THREE.Mesh(spGeo, spMat);
+      spMesh.position.copy(position);
+      this.scene.add(spMesh);
+
+      // Spray velocity forward and outwards
+      const spVel = direction.clone().multiplyScalar(9 + Math.random() * 9).add(new THREE.Vector3(
+        (Math.random() - 0.5) * 6,
+        (Math.random() - 0.5) * 6,
+        (Math.random() - 0.5) * 6
+      ));
+      sparks.push({ mesh: spMesh, velocity: spVel });
+    }
+
+    this.muzzleFlashes.push({
+      light,
+      group: flashGroup,
+      sparks,
+      life: 0,
+      maxLife: 0.07,
+    });
   }
 
-  private createBulletTracer(origin: THREE.Vector3, direction: THREE.Vector3): void {
-    const tracerGeo = new THREE.BoxGeometry(0.03, 0.03, 0.6);
-    const tracerMat = new THREE.MeshBasicMaterial({ color: 0xffea00, transparent: true, opacity: 0.85 });
+  private createBulletTracer(origin: THREE.Vector3, direction: THREE.Vector3, maxDistance: number = 350, speed: number = 280): void {
+    // High-visibility luminous tracer projectile
+    const tracerGeo = new THREE.BoxGeometry(0.04, 0.04, 1.4);
+    const tracerMat = new THREE.MeshBasicMaterial({ color: 0xffea00, transparent: true, opacity: 0.95 });
     const mesh = new THREE.Mesh(tracerGeo, tracerMat);
     mesh.position.copy(origin);
     mesh.lookAt(origin.clone().add(direction));
     this.scene.add(mesh);
 
-    const velocity = direction.clone().multiplyScalar(220);
-    this.bulletTracers.push({ mesh, velocity, life: 0, maxLife: 0.5, hasWhizzed: false, hasImpacted: false });
+    const clampedDist = Math.max(8, Math.min(350, maxDistance));
+    const velocity = direction.clone().multiplyScalar(speed);
+    const maxLife = clampedDist / speed;
+
+    this.bulletTracers.push({
+      mesh,
+      velocity,
+      life: 0,
+      maxLife,
+      hasWhizzed: false,
+      hasImpacted: false,
+      targetDistance: maxDistance,
+      startPos: origin.clone()
+    });
   }
 
-  private createBulletShell(origin: THREE.Vector3, direction: THREE.Vector3): void {
-    const shellGeo = new THREE.CylinderGeometry(0.01, 0.01, 0.03, 8);
-    const shellMat = new THREE.MeshStandardMaterial({ color: 0xDAA520, metalness: 0.8, roughness: 0.2 });
+  private createBulletShell(origin: THREE.Vector3, direction: THREE.Vector3, isBot: boolean = false, botRight?: THREE.Vector3): void {
+    const shellGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.042, 8);
+    const shellMat = new THREE.MeshStandardMaterial({
+      color: 0xdfa020,
+      metalness: 0.85,
+      roughness: 0.18,
+      transparent: true,
+      opacity: 1.0,
+    });
     const mesh = new THREE.Mesh(shellGeo, shellMat);
     mesh.position.copy(origin);
     
-    // Rotate shell to be horizontal
-    mesh.rotation.z = Math.PI / 2;
-    
+    // Initial random tumble
+    mesh.rotation.set(
+      Math.random() * Math.PI,
+      Math.random() * Math.PI,
+      Math.random() * Math.PI
+    );
     this.scene.add(mesh);
 
-    // Eject shell to the right and slightly up
-    const right = new THREE.Vector3(-direction.z, 0, direction.x).normalize();
-    const velocity = right.multiplyScalar(3).add(new THREE.Vector3(0, 2, 0));
+    // Compute ejection vector: pops to the right (+X) and up (+Y) and slightly back (-Z) from receiver
+    let right: THREE.Vector3;
+    let up: THREE.Vector3;
+    let forward: THREE.Vector3;
+
+    if (isBot && botRight) {
+      right = botRight.clone().normalize();
+      up = new THREE.Vector3(0, 1, 0);
+      forward = direction.clone().normalize();
+    } else {
+      right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.player.camera.quaternion);
+      up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.player.camera.quaternion);
+      forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.player.camera.quaternion);
+    }
+
+    // Dynamic ejection impulse: kick right, slight upward pop, slight rearward drift
+    const velocity = right.clone().multiplyScalar(2.4 + Math.random() * 0.9)
+      .addScaledVector(up, 1.4 + Math.random() * 0.7)
+      .addScaledVector(forward, -0.3 + (Math.random() - 0.5) * 0.3);
+
+    // Impart slight player momentum if moving
+    if (!isBot && this.player) {
+      velocity.addScaledVector(this.player.velocity, 0.35);
+    }
+
     const rotationSpeed = new THREE.Vector3(
-      (Math.random() - 0.5) * 10,
-      (Math.random() - 0.5) * 10,
-      (Math.random() - 0.5) * 10
+      (Math.random() - 0.5) * 24,
+      (Math.random() - 0.5) * 24,
+      (Math.random() - 0.5) * 24
     );
 
-    this.bulletShells.push({ mesh, velocity, rotationSpeed, life: 0, maxLife: 2 });
+    this.bulletShells.push({
+      mesh,
+      velocity,
+      rotationSpeed,
+      life: 0,
+      maxLife: 2.2,
+      groundBounces: 0,
+    });
   }
 
   private showMessage(msg: string): void {
@@ -2431,9 +2903,32 @@ export class Game {
     for (let i = this.muzzleFlashes.length - 1; i >= 0; i--) {
       const flash = this.muzzleFlashes[i];
       flash.life += dt;
+
+      // Animate flying incandescent sparks
+      if (flash.sparks) {
+        for (const sp of flash.sparks) {
+          sp.mesh.position.addScaledVector(sp.velocity, dt);
+          sp.velocity.multiplyScalar(0.92);
+        }
+      }
+
       if (flash.life >= flash.maxLife) {
         this.scene.remove(flash.light);
-        this.scene.remove(flash.mesh);
+        this.scene.remove(flash.group);
+        if (flash.sparks) {
+          for (const sp of flash.sparks) {
+            this.scene.remove(sp.mesh);
+            sp.mesh.geometry.dispose();
+            (sp.mesh.material as THREE.Material).dispose();
+          }
+        }
+        flash.group.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry.dispose();
+            if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+            else child.material.dispose();
+          }
+        });
         this.muzzleFlashes.splice(i, 1);
       }
     }
@@ -2461,30 +2956,70 @@ export class Game {
       }
 
       if (tracer.life >= tracer.maxLife) {
+        if (tracer.targetDistance && tracer.targetDistance < 340 && !tracer.hasImpacted) {
+          tracer.hasImpacted = true;
+          this.createImpactSparks(tracer.mesh.position);
+        }
         this.scene.remove(tracer.mesh);
         this.bulletTracers.splice(i, 1);
       }
     }
 
-    // Update bullet shells
+    // Update bullet shells with physics, ground bounces and fade-out
     for (let i = this.bulletShells.length - 1; i >= 0; i--) {
       const shell = this.bulletShells[i];
-      shell.velocity.y -= 9.8 * dt; // Gravity
-      shell.mesh.position.add(shell.velocity.clone().multiplyScalar(dt));
+      shell.velocity.y -= 11.5 * dt; // Gravity
+      shell.mesh.position.addScaledVector(shell.velocity, dt);
       shell.mesh.rotation.x += shell.rotationSpeed.x * dt;
       shell.mesh.rotation.y += shell.rotationSpeed.y * dt;
       shell.mesh.rotation.z += shell.rotationSpeed.z * dt;
       shell.life += dt;
+
+      // Voxel terrain collision bounce
+      const sx = Math.round(shell.mesh.position.x);
+      const sy = Math.round(shell.mesh.position.y);
+      const sz = Math.round(shell.mesh.position.z);
+      if (this.world.isSolid(sx, sy, sz) && (shell.groundBounces || 0) < 3) {
+        shell.groundBounces = (shell.groundBounces || 0) + 1;
+        shell.velocity.y = Math.abs(shell.velocity.y) * 0.38;
+        shell.velocity.x *= 0.55;
+        shell.velocity.z *= 0.55;
+        shell.rotationSpeed.multiplyScalar(0.5);
+      }
       
-      // Fade out in last 0.5 seconds
-      if (shell.life > shell.maxLife - 0.5) {
-        const opacity = (shell.maxLife - shell.life) / 0.5;
+      // Fade out in last 0.6 seconds
+      if (shell.life > shell.maxLife - 0.6) {
+        const opacity = Math.max(0, (shell.maxLife - shell.life) / 0.6);
         (shell.mesh.material as THREE.MeshStandardMaterial).opacity = opacity;
       }
       
       if (shell.life >= shell.maxLife) {
         this.scene.remove(shell.mesh);
+        shell.mesh.geometry.dispose();
+        (shell.mesh.material as THREE.Material).dispose();
         this.bulletShells.splice(i, 1);
+      }
+    }
+
+    // Update celebratory capture fireworks
+    for (let i = this.captureFireworks.length - 1; i >= 0; i--) {
+      const fw = this.captureFireworks[i];
+      fw.life += dt;
+      fw.velocity.y -= 14.0 * dt; // Gravity
+      fw.mesh.position.addScaledVector(fw.velocity, dt);
+      fw.mesh.rotation.x += 4 * dt;
+      fw.mesh.rotation.y += 4 * dt;
+
+      if (fw.life > fw.maxLife - 0.5) {
+        const op = Math.max(0, (fw.maxLife - fw.life) / 0.5);
+        (fw.mesh.material as THREE.MeshBasicMaterial).opacity = op;
+      }
+
+      if (fw.life >= fw.maxLife) {
+        this.scene.remove(fw.mesh);
+        fw.mesh.geometry.dispose();
+        (fw.mesh.material as THREE.Material).dispose();
+        this.captureFireworks.splice(i, 1);
       }
     }
 
@@ -2562,6 +3097,65 @@ export class Game {
         this.localPlayerMesh.position.copy(this.player.position);
         this.localPlayerMesh.rotation.y = this.player.yaw;
       }
+    }
+
+    // Update target under crosshair for HUD information
+    if (!this.player.isDead && !this.isSpectating) {
+      const aimDir = this.player.getAimDirection();
+      const eyePos = this.player.getEyePosition();
+      const terrainHit = this.world.raycast(eyePos, aimDir, 350);
+      const maxCheckDist = terrainHit ? terrainHit.distance : 350;
+      let closestTargetName = '';
+      let closestDist = maxCheckDist;
+
+      for (const bot of this.bots) {
+        if (bot.isDead || bot.team === this.playerTeam) continue;
+        const dx = bot.position.x - eyePos.x;
+        const dz = bot.position.z - eyePos.z;
+        const horizDirSq = aimDir.x * aimDir.x + aimDir.z * aimDir.z;
+        if (horizDirSq > 0.0001) {
+          const t = (dx * aimDir.x + dz * aimDir.z) / horizDirSq;
+          if (t > 0.4 && t < closestDist) {
+            const rx = eyePos.x + aimDir.x * t;
+            const rz = eyePos.z + aimDir.z * t;
+            const ry = eyePos.y + aimDir.y * t;
+            const hDist = Math.hypot(rx - bot.position.x, rz - bot.position.z);
+            const vDist = ry - bot.position.y;
+            if (hDist < 0.65 && vDist >= -0.1 && vDist <= 2.15) {
+              closestDist = t;
+              const isHead = vDist >= 1.45;
+              closestTargetName = `🎯 [${bot.team.toUpperCase()}] ${bot.name} • ${Math.round(t)}m ${isHead ? '(HEADSHOT)' : ''}`;
+            }
+          }
+        }
+      }
+
+      for (const [id, remote] of this.remotePlayers) {
+        if (remote.state.isDead || remote.state.team === this.playerTeam) continue;
+        const targetPos = remote.mesh.position;
+        const dx = targetPos.x - eyePos.x;
+        const dz = targetPos.z - eyePos.z;
+        const horizDirSq = aimDir.x * aimDir.x + aimDir.z * aimDir.z;
+        if (horizDirSq > 0.0001) {
+          const t = (dx * aimDir.x + dz * aimDir.z) / horizDirSq;
+          if (t > 0.4 && t < closestDist) {
+            const rx = eyePos.x + aimDir.x * t;
+            const rz = eyePos.z + aimDir.z * t;
+            const ry = eyePos.y + aimDir.y * t;
+            const hDist = Math.hypot(rx - targetPos.x, rz - targetPos.z);
+            const vDist = ry - targetPos.y;
+            if (hDist < 0.72 && vDist >= -0.1 && vDist <= 2.25) {
+              closestDist = t;
+              const isHead = vDist >= 1.45;
+              closestTargetName = `🎯 [${remote.state.team.toUpperCase()}] ${remote.state.name} • ${Math.round(t)}m ${isHead ? '(HEADSHOT)' : ''}`;
+            }
+          }
+        }
+      }
+
+      this.player.targetInfo = closestTargetName;
+    } else {
+      this.player.targetInfo = '';
     }
 
     // Dynamic Spectator camera view with action tracking and free fly controls
@@ -2687,19 +3281,19 @@ export class Game {
     if (friendlyFlag && friendlyFlag.carrier) {
       if (friendlyFlag.carrier.isPlayer && bot.team !== this.playerTeam && !this.player.isDead) {
         const dist = bot.position.distanceTo(this.player.position);
-        if (dist < 85) {
+        if (dist < 160) {
           const toEnemy = this.player.position.clone().sub(bot.position).normalize();
           const dotProduct = botForward.dot(toEnemy);
-          if (dist < 22 || wasRecentlyHit || dotProduct > -0.25) {
+          if (dist < 28 || wasRecentlyHit || dotProduct > -0.25) {
             return { pos: this.player.position.clone(), isPlayer: true };
           }
         }
       } else if (friendlyFlag.carrier.bot && !friendlyFlag.carrier.bot.isDead && friendlyFlag.carrier.bot.team !== bot.team) {
         const dist = bot.position.distanceTo(friendlyFlag.carrier.bot.position);
-        if (dist < 85) {
+        if (dist < 160) {
           const toEnemy = friendlyFlag.carrier.bot.position.clone().sub(bot.position).normalize();
           const dotProduct = botForward.dot(toEnemy);
-          if (dist < 22 || wasRecentlyHit || dotProduct > -0.25) {
+          if (dist < 28 || wasRecentlyHit || dotProduct > -0.25) {
             return { pos: friendlyFlag.carrier.bot.position.clone(), isPlayer: false, bot: friendlyFlag.carrier.bot };
           }
         }
@@ -2709,11 +3303,11 @@ export class Game {
     // Check player
     if (bot.team !== this.playerTeam && !this.player.isDead) {
       const dist = bot.position.distanceTo(this.player.position);
-      if (dist < nearestDist && dist < 70) {
+      if (dist < nearestDist && dist < 140) {
         const toPlayer = this.player.position.clone().sub(bot.position).normalize();
         const dotProduct = botForward.dot(toPlayer);
         // Detect if close (hearing footsteps/spades), if recently took damage, or if in wide FOV
-        if (dist < 18 || wasRecentlyHit || dotProduct > -0.25) {
+        if (dist < 24 || wasRecentlyHit || dotProduct > -0.25) {
           nearestDist = dist;
           nearest = { pos: this.player.position.clone(), isPlayer: true };
         }
@@ -2724,10 +3318,10 @@ export class Game {
     for (const otherBot of this.bots) {
       if (otherBot === bot || otherBot.isDead || otherBot.team === bot.team) continue;
       const dist = bot.position.distanceTo(otherBot.position);
-      if (dist < nearestDist && dist < 70) {
+      if (dist < nearestDist && dist < 140) {
         const toEnemy = otherBot.position.clone().sub(bot.position).normalize();
         const dotProduct = botForward.dot(toEnemy);
-        if (dist < 18 || wasRecentlyHit || dotProduct > -0.25) {
+        if (dist < 24 || wasRecentlyHit || dotProduct > -0.25) {
           nearestDist = dist;
           nearest = { pos: otherBot.position.clone(), isPlayer: false, bot: otherBot };
         }
@@ -2828,17 +3422,53 @@ export class Game {
         }
       }
 
+      // Speech bubble timer & flinch handling
+      if (bot.speechTimer > 0) {
+        bot.speechTimer -= dt;
+        if (bot.speechTimer <= 0) {
+          bot.speechText = undefined;
+          this.updateBotNameTag(bot, bot.tacticalState, bot.team === 'blue' ? '#60a5fa' : '#f87171');
+        }
+      }
+
+      if (bot.flinchTimer > 0) {
+        bot.flinchTimer -= dt;
+        if (bot.bodyParts) {
+          bot.bodyParts.head.rotation.x = Math.sin(bot.flinchTimer * 28) * 0.12;
+        }
+      }
+
+      bot.combatJumpCooldown = Math.max(0, (bot.combatJumpCooldown || 0) - dt);
+
       // Find nearest enemy target with 360° awareness and wide FOV
       const enemyTarget = this.findNearestEnemy(bot);
       const distToEnemy = enemyTarget ? bot.position.distanceTo(enemyTarget.pos) : Infinity;
       const wasRecentlyHit = Date.now() - bot.lastDamageTime < 3200;
       const isUnderAttack = wasRecentlyHit || (enemyTarget && distToEnemy < 40);
 
+      // Contextual radio callouts on enemy visual contact
+      if (enemyTarget && distToEnemy < 38 && Date.now() - (bot.lastRadioCallTime || 0) > 11000) {
+        bot.lastRadioCallTime = Date.now();
+        const callout = enemyTarget.isPlayer
+          ? '🎯 Visual on enemy operative! Fire at will!'
+          : (distToEnemy < 16 ? '⚠️ Close quarters contact!' : '🎯 Hostile in sector! Engaging!');
+        this.addRadioMessage(bot.name, callout, bot.team, bot);
+      }
+
       // Strafe dodging timer (flips direction periodically like human players)
       bot.dodgeTimer -= dt;
       if (bot.dodgeTimer <= 0) {
         bot.strafeDirection = -bot.strafeDirection;
         bot.dodgeTimer = 1.0 + Math.random() * 1.4;
+      }
+
+      // Combat agility: dynamic bunny-hop jumps during firefights
+      if (enemyTarget && distToEnemy < 35 && bot.grounded && bot.combatJumpCooldown <= 0) {
+        if (bot.archetype === 'assault' || Math.random() < 0.35) {
+          bot.velocity.y = 6.8;
+          bot.grounded = false;
+          bot.combatJumpCooldown = 2.2 + Math.random() * 2.5;
+        }
       }
 
       // Human crouch-peek cycle during combat (or crouch behind cover)
@@ -2938,7 +3568,8 @@ export class Game {
       } else {
         // STANDARD COMBAT & OBJECTIVE CYCLE
         // Check combat engagements:
-        if (enemyTarget && distToEnemy < 48) {
+        const maxEngageDist = bot.weapon === 'rifle' ? 120 : 65;
+        if (enemyTarget && distToEnemy < maxEngageDist) {
           // Combat in progress!
           // Attackers and flag carriers only build cover if critically wounded (< 30 HP)
           const isFlagPusher = bot.role === 'attacker' || bot.carryingFlag || bot.tacticalState === 'capturing';
@@ -3312,8 +3943,40 @@ export class Game {
           bot.jumpCooldown = 0.85;
         }
 
-        // Steer around high walls (> 1.25m) using 45-degree ray probes
+        // Steer around high walls (> 1.25m) using 45-degree ray probes, or breach obstacles
         if (stepHeight > 1.25) {
+          // Breacher and assault combatants can actively breach and demolish obstructing blocks
+          if (bot.archetype === 'breacher' || (bot.archetype === 'assault' && Math.random() < 0.4)) {
+            const obstX = Math.round(probeX);
+            const obstZ = Math.round(probeZ);
+            const obstY = Math.round(probeGround);
+            const voxelAhead = this.world.getVoxel(obstX, obstY, obstZ);
+            if (voxelAhead && voxelAhead.type !== 0) {
+              bot.isBreaching = true;
+              bot.breachTimer = (bot.breachTimer || 0) + dt;
+              if (bot.bodyParts) {
+                bot.bodyParts.spadeGroup.visible = true;
+                bot.bodyParts.weaponGroup.visible = false;
+                bot.bodyParts.rightArm.rotation.x = Math.sin(bot.breachTimer * 22) * 0.9;
+              }
+              if (bot.breachTimer > 0.4) {
+                bot.breachTimer = 0;
+                this.sounds.pickaxeHit();
+                const res = this.world.damageVoxel(obstX, obstY, obstZ, 1);
+                if (res.destroyed) {
+                  bot.isBreaching = false;
+                  if (bot.bodyParts) {
+                    bot.bodyParts.spadeGroup.visible = false;
+                    bot.bodyParts.weaponGroup.visible = true;
+                  }
+                  this.updateBotNameTag(bot, '💥 BREACH COMPLETE', '#10b981');
+                } else {
+                  this.updateBotNameTag(bot, '🔨 BREACHING WALL', '#f59e0b');
+                }
+              }
+            }
+          }
+
           const cos45 = 0.7071;
           const sin45 = 0.7071;
           const leftDirX = moveDir.x * cos45 - moveDir.z * sin45;
@@ -3338,6 +4001,12 @@ export class Game {
             const perpZ = moveDir.x * bot.strafeDirection;
             moveDir.x = perpX;
             moveDir.z = perpZ;
+          }
+        } else if (bot.isBreaching) {
+          bot.isBreaching = false;
+          if (bot.bodyParts) {
+            bot.bodyParts.spadeGroup.visible = false;
+            bot.bodyParts.weaponGroup.visible = true;
           }
         }
 
@@ -3517,8 +4186,9 @@ export class Game {
       bot.mesh.position.copy(bot.position);
 
       // Human-like aiming posture: raise weapon with both hands and track enemy vertically
+      const combatDistThreshold = bot.weapon === 'rifle' ? 120 : 65;
       if (bot.bodyParts) {
-        if (enemyTarget && distToEnemy < 50 && !bot.isDigging && !bot.isBuilding) {
+        if (enemyTarget && distToEnemy < combatDistThreshold && !bot.isDigging && !bot.isBuilding) {
           const dy = enemyTarget.pos.y + 1.2 - (bot.position.y + 1.4);
           const horizDist = Math.max(1, Math.hypot(enemyTarget.pos.x - bot.position.x, enemyTarget.pos.z - bot.position.z));
           const aimPitch = Math.atan2(dy, horizDist);
@@ -3546,7 +4216,7 @@ export class Game {
       }
 
       // Combat Shooting Logic (Rifle vs SMG)
-      if (enemyTarget && distToEnemy < 50 && !bot.isDigging && !bot.isBuilding) {
+      if (enemyTarget && distToEnemy < combatDistThreshold && !bot.isDigging && !bot.isBuilding) {
         // Human reaction delay handling when acquiring a new target or switching targets
         const targetKey = enemyTarget.isPlayer ? 'player' : (enemyTarget.bot?.name || 'bot');
         if (bot.currentTargetKey !== targetKey) {
@@ -3604,16 +4274,35 @@ export class Game {
   }
 
   private executeBotShot(bot: Bot, target: { pos: THREE.Vector3; isPlayer: boolean; bot?: Bot }): void {
-    const origin = bot.position.clone().add(new THREE.Vector3(0, 1.4, 0));
+    // Update bot mesh world matrix to ensure pinpoint gun barrel & receiver locators
+    bot.mesh.updateMatrixWorld(true);
+    let muzzlePos = new THREE.Vector3();
+    let receiverPos = new THREE.Vector3();
+
+    const botMuzzleObj = bot.weaponMesh?.getObjectByName('barrelMuzzle');
+    const botEjectionObj = bot.weaponMesh?.getObjectByName('ejectionPort');
+
+    if (botMuzzleObj) {
+      botMuzzleObj.getWorldPosition(muzzlePos);
+    } else {
+      muzzlePos = bot.position.clone().add(new THREE.Vector3(0, 1.4, 0));
+    }
+
+    if (botEjectionObj) {
+      botEjectionObj.getWorldPosition(receiverPos);
+    } else {
+      receiverPos = muzzlePos.clone();
+    }
+
     const targetHeight = target.isPlayer ? 1.1 : 1.15;
     const centerTargetPos = target.pos.clone().add(new THREE.Vector3(0, targetHeight, 0));
-    const toTarget = centerTargetPos.clone().sub(origin);
+    const toTarget = centerTargetPos.clone().sub(muzzlePos);
     const dist = toTarget.length();
     const idealDir = toTarget.clone().normalize();
 
     // Human shot deviation calculation:
-    // 1. Weapon base cone of fire (rifle has tight deliberate aim, SMG has wider cone)
-    let spreadAngle = bot.weapon === 'rifle' ? 0.024 : 0.052;
+    // 1. Weapon base cone of fire (rifle has tight deliberate aim, SMG has controlled spread)
+    let spreadAngle = bot.weapon === 'rifle' ? 0.010 : 0.024;
 
     // 2. Skill scaling: higher skill has tighter aim (spread angle reduces with skill)
     spreadAngle *= (1.5 - bot.skill * 0.7);
@@ -3654,7 +4343,7 @@ export class Game {
     this.sounds.playDistantShot(bot.weapon, distToPlayer, pan);
 
     // Terrain line-of-sight raycast along the actual fired trajectory
-    const terrainHit = this.world.raycast(origin, actualDir, 75);
+    const terrainHit = this.world.raycast(muzzlePos, actualDir, 300);
 
     // Target cylinder intersection test:
     let isHit = false;
@@ -3662,16 +4351,16 @@ export class Game {
     let isHeadshot = false;
 
     // Solve closest approach along 3D ray to target center axis
-    const dx = target.pos.x - origin.x;
-    const dz = target.pos.z - origin.z;
+    const dx = target.pos.x - muzzlePos.x;
+    const dz = target.pos.z - muzzlePos.z;
     const horizDirSq = actualDir.x * actualDir.x + actualDir.z * actualDir.z;
 
     if (horizDirSq > 0.0001) {
       const t = (dx * actualDir.x + dz * actualDir.z) / horizDirSq;
-      if (t > 0.4 && (!terrainHit || terrainHit.distance >= t - 0.2)) {
-        const cx = origin.x + actualDir.x * t;
-        const cz = origin.z + actualDir.z * t;
-        const cy = origin.y + actualDir.y * t;
+      if (t > 0.4 && t < 300 && (!terrainHit || terrainHit.distance >= t - 0.2)) {
+        const cx = muzzlePos.x + actualDir.x * t;
+        const cz = muzzlePos.z + actualDir.z * t;
+        const cy = muzzlePos.y + actualDir.y * t;
         const distXZ = Math.hypot(cx - target.pos.x, cz - target.pos.z);
         const inVerticalRange = cy >= target.pos.y - 0.1 && cy <= target.pos.y + 2.05;
 
@@ -3685,9 +4374,14 @@ export class Game {
       }
     }
 
-    // Visual tracer and muzzle flash along the real trajectory
-    this.createMuzzleFlash(origin, actualDir);
-    this.createBulletTracer(origin, actualDir);
+    // Visual tracer and muzzle flash right from the gun barrel tip!
+    const botTracerDist = isHit ? hitPoint.distanceTo(muzzlePos) : (terrainHit ? terrainHit.distance : 300);
+    const botTracerSpeed = bot.weapon === 'rifle' ? 300 : 230;
+    this.createMuzzleFlash(muzzlePos, actualDir);
+    this.createBulletTracer(muzzlePos, actualDir, botTracerDist, botTracerSpeed);
+
+    // Shell ejected right from the gun receiver!
+    this.createBulletShell(receiverPos, actualDir, true, rightVec);
 
     if (isHit) {
       // IMPACT HIT! Spark flash at impact coordinate
@@ -3757,9 +4451,16 @@ export class Game {
         }
       }
     } else {
-      // MISSED SHOT!
-      // If the bullet struck terrain, spawn ricochet / block impact sparks!
+      // MISSED SHOT / TERRAIN IMPACT!
+      // Bot bullets damage voxels in the world!
       if (terrainHit) {
+        const voxel = this.world.getVoxel(terrainHit.voxelPos.x, terrainHit.voxelPos.y, terrainHit.voxelPos.z);
+        if (voxel) {
+          const result = this.world.damageVoxel(terrainHit.voxelPos.x, terrainHit.voxelPos.y, terrainHit.voxelPos.z, 1);
+          if (result.destroyed) {
+            this.sounds.pickaxeHit();
+          }
+        }
         this.createImpactSparks(terrainHit.position, terrainHit.normal);
       }
     }
@@ -3779,6 +4480,34 @@ export class Game {
         carrierName = `${this.redFlag.carrier.name} (${this.redFlag.carrier.isPlayer ? this.playerTeam.toUpperCase() : this.redFlag.carrier.bot?.team.toUpperCase()})`;
       } else if (this.blueFlag?.carrier) {
         carrierName = `${this.blueFlag.carrier.name} (${this.blueFlag.carrier.isPlayer ? this.playerTeam.toUpperCase() : this.blueFlag.carrier.bot?.team.toUpperCase()})`;
+      }
+
+      let blueFlagStatus: 'at_base' | 'carried' | 'dropped' | 'captured' = 'at_base';
+      let blueFlagTimer = 0;
+      if (this.blueFlag) {
+        if (this.blueFlag.isCaptured) {
+          blueFlagStatus = 'captured';
+          blueFlagTimer = this.blueFlag.capturedTimer;
+        } else if (this.blueFlag.carrier) {
+          blueFlagStatus = 'carried';
+        } else if (this.blueFlag.isDropped) {
+          blueFlagStatus = 'dropped';
+          blueFlagTimer = this.blueFlag.dropTimer;
+        }
+      }
+
+      let redFlagStatus: 'at_base' | 'carried' | 'dropped' | 'captured' = 'at_base';
+      let redFlagTimer = 0;
+      if (this.redFlag) {
+        if (this.redFlag.isCaptured) {
+          redFlagStatus = 'captured';
+          redFlagTimer = this.redFlag.capturedTimer;
+        } else if (this.redFlag.carrier) {
+          redFlagStatus = 'carried';
+        } else if (this.redFlag.isDropped) {
+          redFlagStatus = 'dropped';
+          redFlagTimer = this.redFlag.dropTimer;
+        }
       }
 
       this.onStateChange({
@@ -3810,7 +4539,13 @@ export class Game {
         isOnline: this.gameMode === 'online',
         connectedPlayersCount: this.remotePlayers.size + 1,
         isNetworkConnected: this.networkClient ? this.networkClient.isConnected() : false,
+        transportName: this.networkClient ? this.networkClient.getTransport() : 'Local',
         localPlayerId: this.localPlayerId,
+        blueFlagStatus,
+        redFlagStatus,
+        blueFlagTimer,
+        redFlagTimer,
+        radioLog: this.radioLog,
       });
     }
   }
