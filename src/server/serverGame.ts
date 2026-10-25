@@ -211,11 +211,9 @@ export class ServerGame {
     
     this.lastShootTime.set(playerId, now);
     
-    // Set shooting state for sound effects
+    // Set shooting state for sound effects. The game loop clears this flag
+    // after ~100ms (see update()), so no per-shot timer is needed here.
     player.isShooting = true;
-    setTimeout(() => {
-      player.isShooting = false;
-    }, 100);
     
     // Broadcast updated magazine state
     this.broadcast({
@@ -669,6 +667,16 @@ export class ServerGame {
   update(dt: number): void {
     // Advance authoritative server clock (used for footstep throttling etc.)
     this.world.updateTime(dt);
+
+    // Clear stale shooting flags once the 100ms window has elapsed.
+    // Done in the game loop instead of per-shot setTimeout so state stays
+    // consistent even if a socket closes mid-timeout. (lastShootTime is in seconds)
+    const nowSec = Date.now() / 1000;
+    for (const player of this.players.values()) {
+      if (player.isShooting && nowSec - (this.lastShootTime.get(player.id) || 0) > 0.1) {
+        player.isShooting = false;
+      }
+    }
 
     // Process scheduled respawns for dead networked players
     if (this.respawnTimers.size > 0) {
