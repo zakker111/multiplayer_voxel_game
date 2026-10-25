@@ -126,6 +126,23 @@ export interface GameState {
 // (src/game/world.ts) imports this value — do not re-declare it there.
 export const WORLD_SIZE = 448; // 28 chunks of CHUNK_SIZE(16); keeps half=224 aligned to chunk grid
 export const CHUNK_SIZE = 16;
+
+/** Half-extent of the playable map. Derived from WORLD_SIZE so that resizing
+ *  the map can never again leave the spawn zones outside the "fell out of the
+ *  world" bounds (a hardcoded 124 here made every spawn self-eliminate). */
+export const WORLD_HALF = WORLD_SIZE / 2;
+
+/** Below this Y a player has fallen out of the world. */
+export const VOID_KILL_Y = -8;
+
+/** True when a position is outside the playable map or below the void floor. */
+export function isOutOfWorld(pos: { x: number; y: number; z: number }): boolean {
+  return (
+    pos.y < VOID_KILL_Y ||
+    Math.abs(pos.x) > WORLD_HALF ||
+    Math.abs(pos.z) > WORLD_HALF
+  );
+}
 export const GROUND_LEVEL = 8;
 export const MAX_BUILD_UP = 20;
 export const MAX_DIG_DOWN = 20;
