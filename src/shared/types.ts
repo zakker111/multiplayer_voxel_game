@@ -126,7 +126,7 @@ export const PLAYER_RADIUS = 0.3;
 
 export const WEAPONS = {
   rifle: { fireRate: 0.4, damage: { head: 100, body: 34 }, spread: 0.0005 },
-  smg: { fireRate: 0.1, damage: { head: 100, body: 34 }, spread: 0.04 },
+  smg: { fireRate: 0.1, damage: { head: 34, body: 20 }, spread: 0.04 },
 };
 
 export const TOOLS = {

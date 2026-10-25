@@ -23,7 +23,7 @@ export class NetworkClient {
   private sseConnected = false;
 
   constructor(serverUrl?: string) {
-    this.localPeerId = `peer_${Date.now()}_${Math.random().toString(36).substr(2, 7)}`;
+    this.localPeerId = `peer_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
     if (serverUrl && serverUrl.trim()) {
       let url = serverUrl.trim();

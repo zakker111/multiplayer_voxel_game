@@ -48,13 +48,17 @@ export class ServerGame {
   private redFlagRespawnTimer: number = 0; // Disappears while respawning after capture
   private droppedFlags: Array<{ position: Position; team: 'red' | 'blue'; respawnTimer: number }> = [];
 
+  // Respawn timers for networked players (client is authoritative on movement;
+  // the server schedules respawns itself so dead players don't ghost-update)
+  private respawnTimers: Map<string, number> = new Map();
+
   constructor() {
     this.world = new ServerWorld();
     console.log('Server game initialized');
   }
 
   addPlayer(ws: WebSocket | GameConnection): string {
-    const playerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const playerId = `player_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const spawnPos = this.getSpawnPosition('blue');
     
     const player = new ServerPlayer(playerId, spawnPos, 'blue');
@@ -127,7 +131,11 @@ export class ServerGame {
         break;
 
       case 'playerInput':
-        player.applyInput(message.input);
+        // Reject movement from dead players (prevents ghost position updates
+        // while the respawn timer runs) and spectators (no world presence)
+        if (!player.isDead && !player.isSpectating) {
+          player.applyInput(message.input);
+        }
         break;
 
       case 'shoot':
@@ -188,7 +196,7 @@ export class ServerGame {
 
   private handleShoot(playerId: string, origin: Position, direction: Position, clientTargetId?: string, clientIsHeadshot?: boolean): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead) return;
+    if (!player || player.isDead || player.isSpectating) return;
 
     const now = Date.now() / 1000;
     const weapon = WEAPONS[player.equipment as 'rifle' | 'smg'];
@@ -337,23 +345,9 @@ export class ServerGame {
           killerId: playerId,
         });
 
-        // Respawn after 4s (matching client timer)
-        setTimeout(() => {
-          const spawnPos = this.getSpawnPosition(target.team);
-          target.respawn(spawnPos);
-          // Reset inventory on respawn
-          this.inventories.set(targetId, 0);
-          this.broadcast({
-            type: 'playerRespawned',
-            playerId: targetId,
-            position: spawnPos,
-          });
-          // Send inventory update to the respawned player
-          this.sendToPlayer(targetId, {
-            type: 'inventoryUpdated',
-            inventory: 0,
-          });
-        }, 4000);
+        // Respawn after 4s via the game loop tick (no setTimeout: survives
+        // connection churn and dead players can't ghost-update meanwhile)
+        this.respawnTimers.set(targetId, 4.0);
       }
 
       return;
@@ -517,7 +511,7 @@ export class ServerGame {
 
   private handleFlagPickup(playerId: string): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead) return;
+    if (!player || player.isDead || player.isSpectating) return;
 
     // Check if player is already carrying a flag
     if (this.blueFlagCarrier === playerId || this.redFlagCarrier === playerId) {
@@ -599,7 +593,19 @@ export class ServerGame {
 
   private handleFlagCapture(playerId: string): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead) return;
+    if (!player || player.isDead || player.isSpectating) return;
+
+    // Validation: only a LIVE player who is actually carrying the enemy flag
+    // AND standing at their home base may score. This blocks malicious or
+    // buggy clients from sending fake 'captureFlag' messages for instant wins.
+    const carryingEnemyFlag = player.team === 'blue'
+      ? this.redFlagCarrier === playerId
+      : this.blueFlagCarrier === playerId;
+    if (!carryingEnemyFlag) return;
+
+    const homeBase = player.team === 'blue' ? this.BLUE_FLAG_POS : this.RED_FLAG_POS;
+    const distance = Math.hypot(player.position.x - homeBase.x, player.position.z - homeBase.z);
+    if (distance > 7.0) return; // Match the client's capture radius to avoid desyncs
 
     if (player.team === 'blue') {
       this.captures.blue++;
@@ -661,6 +667,37 @@ export class ServerGame {
   }
 
   update(dt: number): void {
+    // Advance authoritative server clock (used for footstep throttling etc.)
+    this.world.updateTime(dt);
+
+    // Process scheduled respawns for dead networked players
+    if (this.respawnTimers.size > 0) {
+      for (const [playerId, timer] of this.respawnTimers) {
+        const remaining = timer - dt;
+        if (remaining <= 0) {
+          this.respawnTimers.delete(playerId);
+          const player = this.players.get(playerId);
+          if (player && player.isDead) {
+            const spawnPos = this.getSpawnPosition(player.team);
+            player.respawn(spawnPos);
+            // Restore build inventory on respawn (matches join-time value)
+            this.inventories.set(playerId, 20);
+            this.broadcast({
+              type: 'playerRespawned',
+              playerId,
+              position: spawnPos,
+            });
+            this.sendToPlayer(playerId, {
+              type: 'inventoryUpdated',
+              inventory: 20,
+            });
+          }
+        } else {
+          this.respawnTimers.set(playerId, remaining);
+        }
+      }
+    }
+
     // Update all players
     for (const player of this.players.values()) {
       player.update(dt, this.world);
@@ -733,7 +770,7 @@ export class ServerGame {
   
   private checkFlagCaptures(): void {
     for (const [playerId, player] of this.players) {
-      if (player.isDead) continue;
+      if (player.isDead || player.isSpectating) continue;
 
       if (!player.carryingFlag) {
         // Auto-check flag pickup
@@ -824,30 +861,6 @@ export class ServerGame {
       }
     }
     return { x: bestX, y: bestY, z: bestZ };
-  }
-
-  private distanceToRay(point: Position, rayOrigin: Position, rayDir: Position): number {
-    const toPoint = {
-      x: point.x - rayOrigin.x,
-      y: point.y - rayOrigin.y,
-      z: point.z - rayOrigin.z,
-    };
-    
-    const dot = toPoint.x * rayDir.x + toPoint.y * rayDir.y + toPoint.z * rayDir.z;
-    
-    if (dot < 0) return Infinity;
-    
-    const closest = {
-      x: rayOrigin.x + rayDir.x * dot,
-      y: rayOrigin.y + rayDir.y * dot,
-      z: rayOrigin.z + rayDir.z * dot,
-    };
-    
-    const dx = point.x - closest.x;
-    const dy = point.y - closest.y;
-    const dz = point.z - closest.z;
-    
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
 
   private isConnOpen(conn: WebSocket | GameConnection): boolean {

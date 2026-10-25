@@ -1661,14 +1661,18 @@ export class Game {
       }
     });
 
-    // Handle local player damaged
+    // Handle player damaged. The server ALSO broadcasts a full-state sync
+    // (playerUpdated) right after damage, so applying the delta locally too
+    // would double every hit (two shots killing from full HP). Trust the
+    // authoritative state sync for HP; use this event only for feedback.
     this.networkClient.onMessage('playerDamaged', (msg: any) => {
       if (msg.playerId === this.localPlayerId) {
-        this.player.takeDamage(msg.damage);
-        this.sounds.hurt();
+        if (!this.player.isDead) {
+          this.sounds.hurt();
+        }
       } else {
         const remote = this.remotePlayers.get(msg.playerId);
-        if (remote) {
+        if (remote && !remote.state.isDead) {
           remote.state.hp = Math.max(0, remote.state.hp - msg.damage);
         }
       }
@@ -1677,10 +1681,13 @@ export class Game {
     // Handle player died
     this.networkClient.onMessage('playerDied', (msg: any) => {
       if (msg.playerId === this.localPlayerId) {
-        this.player.die();
-        this.player.respawnTimer = 4;
-        this.sounds.deathSound();
-        this.showMessage('☠️ You were eliminated! Respawning in 4s...');
+        // Guard against re-applying death (double respawn timers / sounds)
+        if (!this.player.isDead) {
+          this.player.die();
+          this.player.respawnTimer = 4;
+          this.sounds.deathSound();
+          this.showMessage('☠️ You were eliminated! Respawning in 4s...');
+        }
       } else {
         const remote = this.remotePlayers.get(msg.playerId);
         if (remote) {
@@ -2835,7 +2842,9 @@ export class Game {
         w.isReloading = false;
       }
     }
-    this.inventory = 0;
+    // Restore build blocks on respawn (server also sends inventoryUpdated=20
+    // in online mode; local games have no server so set it here too)
+    this.inventory = Math.max(this.inventory, 20);
     this.player.carryingFlag = false;
     this.isReloadAnimating = false;
     this.reloadAnimationTime = 0;
