@@ -1746,11 +1746,13 @@ export class Game {
 
     this.networkClient.onConnect(() => {
       this.showMessage(`Connected to game server as ${this.playerTeam.toUpperCase()}!`);
-      this.networkClient!.sendJoin(this.playerTeam, {
-        x: this.player.position.x,
-        y: this.player.position.y,
-        z: this.player.position.z,
-      }, this.playerName);
+      // Do NOT send the stale menu-time local position with join — the server
+      // would honor it and the player could materialize inside enemy lines /
+      // terrain / voids and get eliminated on the first tick. Request a
+      // server-authoritative safe spawn immediately instead, before any
+      // playerInput frame can push the old position back to the server.
+      this.networkClient!.sendJoin(this.playerTeam, undefined, this.playerName);
+      this.networkClient!.sendRequestRespawn();
     });
 
     this.networkClient.onDisconnect(() => {
@@ -1761,10 +1763,31 @@ export class Game {
     this.networkClient.onMessage('init', (msg: any) => {
       this.localPlayerId = msg.playerId;
       // Scoreboard: adopt the server's authoritative K/D/capture tallies.
+      // Clear stale singleplayer tallies first so they don't linger in online play.
+      this.statsById.clear();
       if (msg.stats && typeof msg.stats === 'object') {
         for (const [id, s] of Object.entries(msg.stats as Record<string, PlayerStats>)) {
           this.statsById.set(id, { kills: s.kills || 0, deaths: s.deaths || 0, captures: s.captures || 0 });
         }
+      }
+      // Snap the local player to the server-authoritative state. Previously
+      // the client kept its old menu-time position and pushed it back to the
+      // server on the next input frame, which could teleport the server-side
+      // player into danger (instant-elimination-on-join bug).
+      if (msg.state) {
+        const st = msg.state as PlayerState;
+        if (st.position) {
+          this.player.position.set(st.position.x, st.position.y, st.position.z);
+        }
+        this.player.velocity.set(0, 0, 0);
+        if (typeof st.hp === 'number') {
+          this.player.hp = st.hp;
+        }
+        this.player.isDead = !!st.isDead;
+        if (st.team === 'red' || st.team === 'blue') {
+          this.playerTeam = st.team;
+        }
+        this.player.updateCamera();
       }
       if (msg.captures) {
         this.blueCaptures = msg.captures.blue || 0;

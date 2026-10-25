@@ -67,6 +67,7 @@ export type ClientMessage =
   | { type: 'captureFlag'; team: 'red' | 'blue' }
   | { type: 'toggleSpectator' }
   | { type: 'footstep'; volume: number; pitch: number }
+  | { type: 'requestRespawn' }
   | { type: 'disconnect' };
 
 export interface PlayerInput {

@@ -599,6 +599,37 @@ export class ServerGame {
         });
         break;
 
+      case 'requestRespawn':
+        // Server-authoritative safe spawn. The client fires this right after
+        // joining so the player materializes at a terrain-checked team spawn
+        // instead of a stale (or hostile) client-reported position that could
+        // place them inside enemy lines/terrain where hazards kill them on
+        // the very first tick ("instant elimination on join" bug).
+        {
+          const spawnPos = this.getSpawnPosition(player.team);
+          player.respawn(spawnPos);
+          // Clear any pending respawn timer so the scheduled respawn doesn't
+          // fire redundantly on top of this one.
+          this.respawnTimers.delete(playerId);
+          this.inventories.set(playerId, 20);
+          this.broadcast({
+            type: 'playerRespawned',
+            playerId,
+            position: spawnPos,
+          });
+          this.sendToPlayer(playerId, {
+            type: 'inventoryUpdated',
+            inventory: 20,
+          });
+          this.broadcast({
+            type: 'playerUpdated',
+            playerId,
+            state: player.getState(),
+          });
+          log.info(`player ${playerId} requested respawn at safe spawn`);
+        }
+        break;
+
       case 'disconnect':
         this.removePlayer(playerId);
         break;
