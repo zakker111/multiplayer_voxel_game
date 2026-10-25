@@ -68,8 +68,8 @@ export class ServerGame {
 
   // ---------------- AI Bots ----------------
 
-  /** Spawn a balanced set of AI bots (flank / camp / build behaviors). */
-  spawnDefaultBots(countPerTeam: number = 2): void {
+  /** Spawn a balanced set of AI bots (flank / camp / build / trench behaviors). */
+  spawnDefaultBots(countPerTeam: number = Number(process.env.SERVER_BOT_COUNT ?? 2)): void {
     const names = ['Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren'];
     let i = 0;
     for (const team of ['blue', 'red'] as const) {
@@ -220,6 +220,11 @@ export class ServerGame {
     if (!target || target.isDead) return;
 
     target.takeDamage(damage);
+
+    // Threat memory for bot victims: they hunt back toward their attacker
+    if (target instanceof ServerBot && attackerId) {
+      target.noteHitBy(attackerId, this.world.serverTime);
+    }
 
     this.sendToPlayer(targetId, { type: 'hitConfirmed', targetId: attackerId, damage, isHeadshot: false });
 
@@ -621,6 +626,11 @@ export class ServerGame {
       const targetId = confirmedTarget.id;
 
       target.takeDamage(damage);
+
+      // Threat memory: bot victims hunt back toward whoever shot them
+      if (target instanceof ServerBot) {
+        target.noteHitBy(playerId, this.world.serverTime);
+      }
 
       // Notify attacker of confirmed hit
       this.sendToPlayer(playerId, {

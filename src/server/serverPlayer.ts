@@ -23,6 +23,7 @@ export class ServerPlayer {
   rotation: Rotation;
   velocity: Position;
   hp: number = 100;
+  maxHp: number = 100;
   team: 'red' | 'blue';
   isDead: boolean = false;
   equipment: 'rifle' | 'smg' | 'pickaxe' | 'spade' = 'rifle';
@@ -215,7 +216,7 @@ export class ServerPlayer {
   respawn(position: Position): void {
     this.position = { ...position };
     this.velocity = { x: 0, y: 0, z: 0 };
-    this.hp = 100;
+    this.hp = this.maxHp;
     this.isDead = false;
     // Reset magazine on respawn
     this.currentAmmo = ServerPlayer.MAGAZINE_SIZES[this.equipment];
