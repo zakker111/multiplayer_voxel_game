@@ -845,6 +845,7 @@ export class ServerGame {
         this.redFlagAtBase = false;
         this.redFlagCarrier = playerId;
         player.carryingFlag = true;
+        log.info(`RED flag picked up by ${playerId}`);
         
         this.broadcast({
           type: 'flagPickedUp',
@@ -855,6 +856,7 @@ export class ServerGame {
         this.blueFlagAtBase = false;
         this.blueFlagCarrier = playerId;
         player.carryingFlag = true;
+        log.info(`BLUE flag picked up by ${playerId}`);
         
         this.broadcast({
           type: 'flagPickedUp',
@@ -872,7 +874,7 @@ export class ServerGame {
       const dz = player.position.z - droppedFlag.position.z;
       const distance = Math.sqrt(dx * dx + dz * dz);
 
-      if (distance < 4.8) {
+      if (distance < this.CAPTURE_DISTANCE) {
         if (droppedFlag.team === enemyFlagTeam) {
           // Pick up dropped enemy flag
           this.droppedFlags.splice(i, 1);
@@ -934,10 +936,13 @@ export class ServerGame {
       this.blueFlagRespawnTimer = 8.0;
     }
     player.carryingFlag = false;
+    log.info(`FLAG CAPTURED by ${playerId} (${player.team}) — score blue:${this.captures.blue} red:${this.captures.red}`);
 
     this.broadcast({
       type: 'flagCaptured',
       team: player.team,
+      // The captured flag is the ENEMY flag (blue scores by carrying red home)
+      flagTeam: player.team === 'blue' ? 'red' : 'blue',
       playerId: playerId,
       captures: this.captures,
     });
@@ -963,6 +968,7 @@ export class ServerGame {
           type: 'flagDropped',
           position: { ...player.position },
           flagTeam: 'blue',
+          playerId,
         });
       } else if (this.redFlagCarrier === playerId) {
         this.redFlagCarrier = null;
@@ -976,6 +982,7 @@ export class ServerGame {
           type: 'flagDropped',
           position: { ...player.position },
           flagTeam: 'red',
+          playerId,
         });
       }
     }
@@ -1130,11 +1137,15 @@ export class ServerGame {
             this.blueFlagRespawnTimer = 8.0;
           }
           player.carryingFlag = false;
+          log.info(`FLAG CAPTURED by ${playerId} (${player.team}) — score blue:${this.captures.blue} red:${this.captures.red}`);
 
-          // Broadcast capture event (flag disappears across all clients)
+          // Broadcast capture event (flag disappears across all clients).
+          // NOTE: the captured flag is the ENEMY flag. Team 'blue' scores by
+          // carrying the RED flag home, so we must send flagTeam:'red'.
           this.broadcast({
             type: 'flagCaptured',
             team: player.team,
+            flagTeam: player.team === 'blue' ? 'red' : 'blue',
             playerId: playerId,
             captures: this.captures,
           });

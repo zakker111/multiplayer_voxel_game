@@ -95,9 +95,9 @@ export type ServerMessage =
   | { type: 'playerRespawned'; playerId: string; position: Position }
   | { type: 'hitConfirmed'; targetId: string; damage: number; isHeadshot: boolean }
   | { type: 'inventoryUpdated'; inventory: number }
-  | { type: 'flagCaptured'; team: 'red' | 'blue'; playerId: string; captures: { red: number; blue: number } }
+  | { type: 'flagCaptured'; team: 'red' | 'blue'; flagTeam?: 'red' | 'blue'; playerId: string; captures: { red: number; blue: number } }
   | { type: 'flagPickedUp'; playerId: string; flagTeam: 'red' | 'blue' }
-  | { type: 'flagDropped'; position: Position; flagTeam: 'red' | 'blue' }
+  | { type: 'flagDropped'; position: Position; flagTeam: 'red' | 'blue'; playerId?: string }
   | { type: 'flagReturned'; flagTeam: 'red' | 'blue' }
   | { type: 'spectatorToggled'; playerId: string; isSpectating: boolean }
   | { type: 'footstep'; playerId: string; volume: number; pitch: number }

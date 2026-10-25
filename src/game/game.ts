@@ -345,6 +345,11 @@ export class Game {
   serverRedFlagAtBase: boolean = true;
   serverBlueFlagCarrierId: string | null = null;
   serverRedFlagCarrierId: string | null = null;
+  // True while the LOCAL player carries the enemy flag (online mode). The
+  // server does not echo a flagPickedUp event back to the picker, so we set
+  // this optimistically on pickup and clear it on capture/death. It is purely
+  // for HUD display — all scoring logic stays server-authoritative.
+  serverCarryingEnemyFlag: boolean = false;
   captureZoneSize: number = 4;
 
   gameMode: GameMode = 'multiplayer';
@@ -1803,6 +1808,10 @@ export class Game {
         // Guard against re-applying death (double respawn timers / sounds)
         if (!this.player.isDead) {
           this.player.die();
+          // Clear flag-carry state immediately; the server also broadcasts a
+          // flagDropped event which repositions the flag on the ground.
+          this.player.carryingFlag = false;
+          this.serverCarryingEnemyFlag = false;
           this.player.respawnTimer = 4;
           this.sounds.deathSound();
           this.showMessage('☠️ You were eliminated! Respawning in 4s...');
@@ -1884,6 +1893,7 @@ export class Game {
         flag.mesh.visible = false; // Flag disappears when taken until returned
         if (isLocal) {
           this.player.carryingFlag = true;
+          this.serverCarryingEnemyFlag = true;
           this.sounds.flagPickup();
           this.showMessage(`🚩 YOU TOOK THE ${msg.flagTeam.toUpperCase()} FLAG! RUN TO BASE!`);
         } else {
@@ -1899,6 +1909,13 @@ export class Game {
       // Server says the flag is no longer carried, it's on the ground now
       if (msg.flagTeam === 'blue') this.serverBlueFlagCarrierId = null;
       else this.serverRedFlagCarrierId = null;
+      // If we were carrying that flag (server dropped it because we died),
+      // clear our local carry state so the HUD stops telling us to run home
+      if (msg.playerId === this.localPlayerId || flag?.carrier?.isPlayer) {
+        this.player.carryingFlag = false;
+        this.serverCarryingEnemyFlag = false;
+        if (flag) flag.carrier = null;
+      }
       if (flag) {
         flag.currentPos.set(msg.position.x, msg.position.y + 0.5, msg.position.z);
         flag.mesh.position.copy(flag.currentPos);
@@ -1929,8 +1946,14 @@ export class Game {
     this.networkClient.onMessage('flagCaptured', (msg: any) => {
       this.blueCaptures = msg.captures.blue;
       this.redCaptures = msg.captures.red;
-      const capturedFlag = msg.team === 'blue' ? this.redFlag : this.blueFlag;
-      const capturedTeam = msg.team === 'blue' ? 'red' : 'blue';
+      // The server tells us WHICH FLAG was taken (the enemy flag). Prefer the
+      // explicit flagTeam field; fall back to deriving it from the scoring
+      // team for older servers. Blue scores by carrying the RED flag home.
+      const capturedTeam: 'blue' | 'red' =
+        msg.flagTeam === 'blue' || msg.flagTeam === 'red'
+          ? msg.flagTeam
+          : (msg.team === 'blue' ? 'red' : 'blue');
+      const capturedFlag = capturedTeam === 'blue' ? this.blueFlag : this.redFlag;
       // Captured flag disappears and respawns after the server timer; clear
       // our authoritative tracking so visuals don't fight the event state
       if (capturedTeam === 'blue') {
@@ -1952,6 +1975,7 @@ export class Game {
       this.sounds.flagCapture();
       if (msg.playerId === this.localPlayerId) {
         this.player.carryingFlag = false;
+        this.serverCarryingEnemyFlag = false;
         this.showMessage(`🏆 YOU CAPTURED THE ENEMY FLAG! (+1 SCORE) Flag respawns in 8s...`);
       } else {
         this.showMessage(`🏆 ${msg.team.toUpperCase()} TEAM SCORED A FLAG CAPTURE! Flag respawns in 8s...`);
