@@ -6,8 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild scripts/admin.ts --bundle --platform=node --format=cjs --outfile=dist/admin.cjs --log-level=error",
     "build:server": "esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build:admin": "esbuild scripts/admin.ts --bundle --platform=node --format=cjs --outfile=dist/admin.cjs --log-level=error",
+    "admin": "node dist/admin.cjs",
     "start": "node dist/server.cjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",

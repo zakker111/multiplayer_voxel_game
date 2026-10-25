@@ -100,7 +100,8 @@ export type ServerMessage =
   | { type: 'flagDropped'; position: Position; flagTeam: 'red' | 'blue' }
   | { type: 'flagReturned'; flagTeam: 'red' | 'blue' }
   | { type: 'spectatorToggled'; playerId: string; isSpectating: boolean }
-  | { type: 'footstep'; playerId: string; volume: number; pitch: number };
+  | { type: 'footstep'; playerId: string; volume: number; pitch: number }
+  | { type: 'kicked'; reason: string; banned: boolean };
 
 export interface GameState {
   players: Map<string, PlayerState>;

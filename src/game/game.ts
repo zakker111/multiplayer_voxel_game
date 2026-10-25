@@ -230,6 +230,10 @@ export class Game {
   inventory: number = 0;
   lastActionTime: number = 0;
   isMouseDown: boolean = false;
+  // Separate per-button state so right-click (build/aim) never triggers the
+  // left-click auto-fire loop, and vice versa.
+  isLeftDown: boolean = false;
+  isRightDown: boolean = false;
   highlightMesh: THREE.Mesh;
   buildPreviewMesh: THREE.Mesh;
   muzzleFlash: THREE.PointLight;
@@ -433,6 +437,10 @@ export class Game {
     this.player.yaw = team === 'blue' ? Math.PI : 0;
     this.player.updateCamera();
     this.player.onRespawn = () => this.handlePlayerRespawn();
+    // Online mode: the server owns death & respawn timing. Without this flag
+    // the client's local countdown fires onRespawn() right after the server's
+    // playerRespawned message, respawning twice ("die immediately" bug).
+    this.player.serverAuthoritativeRespawn = this.gameMode === 'online';
     console.log('Player created');
 
     const hlGeo = new THREE.BoxGeometry(VOXEL_SIZE + 0.02, VOXEL_SIZE + 0.02, VOXEL_SIZE + 0.02);
@@ -1962,6 +1970,18 @@ export class Game {
       this.sounds.playFootstepRemote(msg.volume, msg.pitch, pan);
     });
 
+    // Server kicked/banned this client — show a clear message and stop reconnecting.
+    this.networkClient.onMessage('kicked', (msg: any) => {
+      const reason = msg.reason || 'no reason given';
+      console.warn(`Kicked from server: ${reason} (banned=${msg.banned})`);
+      this.showMessage(msg.banned ? `⛔ You have been BANNED: ${reason}` : `👢 You have been kicked: ${reason}`);
+      try {
+        this.networkClient?.disconnect();
+      } catch {
+        /* ignore */
+      }
+    });
+
     this.networkClient.connect().catch((err) => {
       console.error('Failed to connect to server:', err);
       this.showMessage('Failed to connect to server');
@@ -2040,17 +2060,23 @@ export class Game {
 
   private onMouseDown(e: MouseEvent): void {
     if (this.isSpectating) {
-      // In spectator mode, clicking/dragging steers the camera
+      // In spectator mode, clicking/dragging steers the camera only —
+      // spectators must never fire or build.
       if (e.button === 0 || e.button === 2) {
         this.isMouseDown = true;
       }
       return;
     }
     if (e.button === 0) {
+      // Left click: shoot / mine (single action; SMG & tools auto-fire via loop)
       this.isMouseDown = true;
+      this.isLeftDown = true;
       this.performAction();
     } else if (e.button === 2) {
+      // Right click: ALWAYS builds voxels — it must never shoot or mine.
+      // For guns, right-click toggles aim down sights instead of firing.
       this.isMouseDown = true;
+      this.isRightDown = true;
       if (this.equipment === 'rifle' || this.equipment === 'smg') {
         this.isAiming = !this.isAiming;
         this.player.isAiming = this.isAiming;
@@ -2062,7 +2088,9 @@ export class Game {
   }
 
   private onMouseUp(e: MouseEvent): void {
-    if (e.button === 0 || e.button === 2) this.isMouseDown = false;
+    if (e.button === 0) this.isLeftDown = false;
+    if (e.button === 2) this.isRightDown = false;
+    if (e.button === 0 || e.button === 2) this.isMouseDown = this.isLeftDown || this.isRightDown;
   }
 
   private onWheel(e: WheelEvent): void {
@@ -2207,6 +2235,8 @@ export class Game {
       this.spectatorPitchDown = false;
       this.spectatorSprint = false;
       this.isMouseDown = false;
+      this.isLeftDown = false;
+      this.isRightDown = false;
       this.spectatorMode = 'action';
       this.isAiming = false;
 
@@ -2248,6 +2278,8 @@ export class Game {
       this.spectatorPitchDown = false;
       this.spectatorSprint = false;
       this.isMouseDown = false;
+      this.isLeftDown = false;
+      this.isRightDown = false;
       this.player.clearKeys();
 
       if (this.weaponContainer) this.weaponContainer.visible = true;
@@ -3016,11 +3048,18 @@ export class Game {
     this.player.update(dt);
     this.world.update();
 
-    // Continuous fire for SMG and tools while holding mouse button
-    if (this.isMouseDown && !this.player.isDead) {
+    // Continuous fire for SMG and tools while holding the LEFT mouse button.
+    // Rifle fires exactly once per click (no burst). Right-click never fires —
+    // it is reserved for building voxels.
+    if (this.isLeftDown && !this.player.isDead) {
       if (this.equipment === 'smg' || this.equipment === 'pickaxe' || this.equipment === 'spade') {
         this.performAction();
       }
+    } else if (this.isRightDown && !this.player.isDead &&
+               (this.equipment === 'spade' || this.equipment === 'pickaxe')) {
+      // Hold right-click with a tool equipped = continuous block placement
+      // (still only builds — never shoots or mines).
+      this.tryBuild();
     }
 
     // ADS camera zoom

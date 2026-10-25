@@ -33,6 +33,8 @@ export class ServerPlayer {
   isShooting: boolean = false;
   carryingFlag: boolean = false;
   isSpectating: boolean = false;
+  /** Client IP (normalized), set by ServerGame.addPlayer for admin/kick/ban tooling */
+  ip?: string;
   
   // Footstep sound tracking
   lastFootstepTime: number = 0;
