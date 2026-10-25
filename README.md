@@ -1,31 +1,26 @@
-# 🎮 Voxel FPS - Capture The Flag
+# 🎮 Voxel FPS — Capture The Flag
 
-A high-performance, full-stack 3D voxel-based first-person shooter featuring Red vs Blue Capture the Flag gameplay, destructible environments, tactical AI bots, and real-time multiplayer. Built with React 18, Three.js, TypeScript, and Vite.
+A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Capture the Flag gameplay, a fully destructible/buildable voxel world, vicious tactical AI bots (server-side), and real-time authoritative multiplayer. Built with React 18, Three.js, TypeScript, Vite, Express, and `ws`.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
-![React](https://img.shields.io/badge/react-18-cyan.svg)
-![Three.js](https://img.shields.io/badge/three.js-0.186-black.svg)
+![Tests](https://img.shields.io/badge/tests-9%2F9%20passing-brightgreen.svg)
 
 ---
 
 ## ✨ Features
 
-- **🚩 Capture The Flag (CTF)**: Full CTF objective loop across an expanded 320-meter arena with designated base flags (±95m), rear spawn zones (±120m to ±145m), pickup, drop, return timers, carrier HUD tracking, and victory scoring.
-- **🌐 Multiplayer Server & Team Lobby**: Choose between the integrated official server (`ws://` on port 3000) or custom external servers (`ws://` / `wss://`), enter custom callsigns, and select your team affiliation (Blue or Red) with real-time state synchronization.
-- **🤖 Tactical AI Bots**: Autonomous bots with decision-making state machines for flag capture, base defense, tactical escort, weapon fire, and anti-clipping voxel barricade building.
-- **🧱 Destructible Voxel World**: Procedural 3D voxel terrain generated in Three.js. Gunfire blasts away blocks (3 hits per voxel), spade digs trenches, and pickaxe harvests blocks.
-- **🏗️ Block Placement / Fortification**: Harvest blocks to build barricades, bridges, and sniper towers in real-time with comprehensive entity intersection and de-penetration protection.
-- **🔫 WW2 Arsenal & Iron Sights**:
-  - **M1 Garand Rifle**: High-precision semi-automatic with 3D iron sight aiming and authentic recoil.
-  - **Thompson SMG**: Fast-firing close-quarters automatic with bullet spread and muzzle flash.
-  - **Trench Spade**: Rapid excavation and close-quarters melee.
-  - **Pickaxe**: Heavy block harvesting.
-- **🎯 Responsive Hit Markers**: Red crosshair hit flashes and audio cues on confirmed enemy hits.
-- **🎥 AI Spectator Mode & Accessibility**: One-click spectator camera (`P`) smoothly orbits dynamic battle action and flag carriers. Drag-to-look and arrow-key steering allow instant previewing in browser iframes and AI evaluation environments without mandatory pointer lock.
-- **🔊 Spatial 3D Web Audio**: Procedural synthesized audio effects (gunshots, distant bullet whizzing, headshot kills, hit markers, and footsteps) using the Web Audio API without heavy external audio assets.
-- **🤖 AI Agent Ready**: Detailed architectural specification in `AGENTS.md` for AI coding agents and automated evaluation harnesses.
+- **🚩 Server-Authoritative Capture The Flag**: Full CTF loop on a 320-meter arena with base flags (±95m), rear spawns (±120–145m), pickup/drop/return timers, carrier HUD tracking, and victory scoring. All flag logic is validated server-side (carrier identity + unified 7.0m capture radius) — clients can no longer fake captures.
+- **🌐 Real-Time Multiplayer**: A single Node.js process serves both the web client and an authoritative WebSocket game server at 20Hz. Join via the in-game lobby (official or custom `wss://` server URL, custom callsign, team pick) or share invite links (`?mode=online&team=red`).
+- **⚖️ Always 10v10**: The server runs a full 10-vs-10 bot battle by default. When a human joins, one bot is retired from *that human's team*; when a human leaves/disconnects/is kicked, a replacement bot respawns on the same team. Matches never go short-sided.
+- **🤖 Vicious FSM Bots**: 20 server-side AI bots (130 HP each, tunable via env) driven by a finite-state machine: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `BUILD`, `TRENCH`, `RETREAT`. They revenge-target killers, prioritize enemy flag carriers, shoot with line-of-sight checks and aim error, harvest blocks, build cover/rush towers, and dig fortified midfield trench walls.
+- **🧱 Destructible & Buildable Voxel World**: Procedural terrain; gunfire blasts voxels (3 hits), spade digs trenches, pickaxe harvests blocks into inventory. Building supports stacking, bridging, and tower play — placement validated by a unified client/server `canBuild()` flood-fill (structural support + adjacency), so what you see is what the server accepts.
+- **🏗️ One Click, One Block**: Right-click places exactly one block per click (no hold-spam). With rifle/SMG equipped, right-click toggles iron sights instead.
+- **🔫 WW2 Arsenal**: M1 Garand rifle (semi-auto — one shot per click, true single-fire), Thompson SMG (hold to auto-fire), Trench Spade, Pickaxe. Iron sights, recoil, muzzle flash, hit markers.
+- **👁️ Spectator Mode & Accessibility**: Press `P` for the cinematic orbiting spectator camera (follows firefights and flag carriers). Drag-to-look and arrow-key steering work without pointer lock (iframe/AI-harness friendly). Spectators are hard-blocked server-side from shooting, building, capturing, and pickups.
+- **📡 Structured Server Logs + Admin CLI**: Timestamped `[INFO]/[WARN]` logs tagged by subsystem. Kick or ban players live from the command line (`npm run admin -- ...`) via a localhost-only (or `ADMIN_TOKEN`-protected) admin API. Bans persist to `bans.json` and are enforced at WebSocket connect time.
+- **✅ Test-Ready**: Automated regression suite (`npm test`) covering voxel place/stack/bridge/mine rules and end-to-end bot trench construction, wired into GitHub Actions CI.
 
 ---
 
@@ -36,228 +31,148 @@ A high-performance, full-stack 3D voxel-based first-person shooter featuring Red
 | **Move** | `W`, `A`, `S`, `D` | Smooth acceleration & ground collision |
 | **Look / Aim** | `Mouse Move` | Click canvas to lock aim; or drag / use Arrow Keys |
 | **Alternative Aim** | `↑`, `↓`, `←`, `→` | Keyboard camera steering (ideal for previewing/AI agents) |
-| **Fire / Mine** | `Left Click` | Shoots active weapon or swings tool |
-| **Iron Sights / Build** | `Right Click` | Toggles ADS iron sights or places voxel block |
+| **Fire / Mine** | `Left Click` | Rifle fires once per click; SMG/tools auto-fire while held |
+| **Build** | `Right Click` | Places exactly ONE block per click (tool equipped); toggles iron sights with rifle/SMG. Never shoots or mines. |
 | **Weapons / Tools** | `1`, `2`, `3`, `4` | 1: Rifle, 2: SMG, 3: Spade, 4: Pickaxe (or Mouse Wheel) |
-| **Reload** | `R` | Reloads magazine with realistic animation |
+| **Reload** | `R` | Reloads magazine with animation |
 | **Jump** | `Space` | Jump over obstacles and climb terrain |
 | **Sprint** | `Shift` | High-speed dash |
-| **Crouch** | `C` or `Ctrl` | Lowers profile and tightens weapon spread |
-| **Spectator View** | `P` | Toggles cinematic AI battle tracking camera |
+| **Crouch** | `C` or `Ctrl` | Lowers profile, tightens spread, speeds up footsteps interval |
+| **Spectate** | `P` | Cinematic battle-tracking camera |
 
 ---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Node.js 18+ and npm installed
+- Node.js 18+ and npm
 
-### 1. Clone & Install
 ```bash
-git clone https://github.com/your-username/voxel-fps.git
-cd voxel-fps
+git clone https://github.com/<your-org>/<your-repo>.git
+cd <your-repo>
 npm install
-```
 
-### 2. Run Development Server
-```bash
+# Development (Vite + tsx live server on PORT, default 3000)
 npm run dev
+
+# Full verification pipeline (used by CI)
+npm run lint      # tsc --noEmit
+npm test          # node --test tests/  (9 regression tests)
+npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
+npm start         # production server (reads process.env.PORT)
 ```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### 3. Build & Verify for Production
-```bash
-# Type check & lint
-npm run lint
-
-# Compile client and server bundles
-npm run build
-
-# Start production server
-npm start
-```
+Open http://localhost:3000 — pick **Multiplayer** to join the live server (a full 10v10 bot battle is already running), or play local Bot Match / Sandbox modes.
 
 ---
 
-## 🌐 Playing and Hosting Over the Internet
+## 🌍 Deploying (Render-first)
 
-The game features an integrated full-stack architecture where **a single Node.js process serves both the web frontend and the authoritative WebSocket game server** on port 3000.
+This project is configured for **Render** auto-deploy from GitHub:
 
-### 1. Instant Play via Cloud or Web Preview
-When hosted on any HTTPS domain (e.g. Google Cloud Run, Render, Railway, or your own domain):
-- The client automatically detects `window.location.protocol` and connects securely using `wss://yourdomain.com`.
-- **Match Invite Links**: Open the **Multiplayer** menu in-game and click **"Copy Link"** (or append `?mode=online&team=red`). Send this link to any friend anywhere in the world on Discord, WhatsApp, or email; clicking it immediately connects them to your live server on the opposite team!
+1. Push this repository to GitHub (branch watched by Render, usually `main`).
+2. Render detects the push → runs `npm install && npm run build` → starts `npm start`.
+3. `server.ts` reads `process.env.PORT` automatically — no port config needed beyond Render's default env var.
+4. Deploys take ~2–4 minutes. Players must **hard-refresh** (Ctrl/Cmd+Shift+R) to get new client bundles.
 
-### 2. Local Network (LAN / Wi-Fi)
-To play with family or friends on the same Wi-Fi network:
-1. Start the server on your computer:
-   ```bash
-   npm run dev
-   ```
-2. Find your local IP address (`ipconfig` on Windows, or `ifconfig` / `ip a` on Mac/Linux, e.g. `192.168.1.50`).
-3. Have your friends visit `http://192.168.1.50:3000` in their browsers.
+Environment variables (see `.env.example`):
 
----
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `PORT` | `3000` | HTTP/WebSocket bind port (Render injects its own) |
+| `NODE_ENV` | `development` | Set `production` on hosted deploys |
+| `SERVER_BOT_COUNT` | `10` | Bots per team at startup (total = 2×) |
+| `SERVER_BOT_HP` | `130` | Bot max health |
+| `ADMIN_TOKEN` | *(empty)* | Required for remote kick/ban CLI access; empty = localhost-only admin API |
 
-## 🖥️ Server Setup & Internet Deployment Guide
-
-Here are 5 proven methods to expose or deploy your Voxel FPS server to the public Internet:
-
-### Method 1: Cloudflare Tunnel (⭐ Easiest Free Internet Exposure - No Port Forwarding)
-You can expose your local server directly to the public internet securely without opening router ports:
-1. Install [Cloudflare Tunnel (`cloudflared`)](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/):
-   ```bash
-   # On macOS
-   brew install cloudflared
-
-   # On Linux
-   sudo apt install cloudflared
-   ```
-2. Start the game server:
-   ```bash
-   npm run build && npm start
-   ```
-3. In a second terminal, launch the quick tunnel:
-   ```bash
-   cloudflared tunnel --url http://localhost:3000
-   ```
-4. Cloudflare will give you a public `https://<random-subdomain>.trycloudflare.com` URL. Share this URL with anyone on the internet to play!
+Alternative deploy targets (Docker, Cloudflare Tunnel, VPS+Nginx+PM2, GitHub Pages static client + external server) are covered in **[DEPLOYMENT.md](DEPLOYMENT.md)**.
 
 ---
 
-### Method 2: Docker & Docker Compose (Container Deployment)
-The repository includes a production multi-stage `Dockerfile` and `docker-compose.yml`:
+## 🛠️ Server Logs & Admin (Kick / Ban)
+
+The server emits structured, timestamped logs: `[INFO] [game] …`, `[WARN] [net] …`, `[ADMIN] …`.
+
+Manage live matches from any shell (works locally or remotely with `ADMIN_TOKEN`):
+
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/voxel-fps.git
-cd voxel-fps
+npm run build                      # builds dist/admin.cjs too
 
-# Build and start in detached mode
-docker compose up -d
+npm run admin -- status            # uptime, connected players, active bans
+npm run admin -- players           # list player ids, names, teams, IPs
+npm run admin -- kick <id|name> "reason"
+npm run admin -- ban <ip|name> "reason"     # persists to bans.json, kills live session
+npm run admin -- unban <ip|name>
+npm run admin -- bans              # list active bans
 
-# Check server logs
-docker compose logs -f
+# Remote against a deployed server:
+npm run admin -- players --url https://your-app.onrender.com --token $ADMIN_TOKEN
 ```
-Your server will be running on port 3000 ready for public access or reverse proxying.
+
+Banned IPs/names are rejected at the WebSocket upgrade stage with a clear message. Kicks send a specific `kicked` message so clients show why they were removed.
 
 ---
 
-### Method 3: 1-Click Cloud Deployment (Render / Railway / Fly.io / Cloud Run)
+## 🧪 Testing & Playtesting
 
-#### Railway:
-1. Fork or push this repository to your GitHub.
-2. Log into [railway.app](https://railway.app) and select **"New Project" → "Deploy from GitHub repo"**.
-3. Railway automatically detects the Node.js project. Under Settings, set `PORT` to `3000` and generate a public domain (`.up.railway.app`).
-4. Done! Both the web client and WebSocket server will run live on the assigned HTTPS domain.
-
-#### Render:
-1. Go to [render.com](https://render.com) and create a **New Web Service**.
-2. Select your repository.
-3. Build Command: `npm install && npm run build`
-4. Start Command: `npm start`
-5. Click **Create Web Service**. Render provides an automatic free `https://<app>.onrender.com` with full WebSocket support.
-
----
-
-### Method 4: Dedicated Linux VPS (Ubuntu 22.04 + Nginx + PM2 + SSL)
-
-For low-latency community servers on DigitalOcean, Linode, AWS EC2, or Hetzner:
-
-#### Step 1: Install Node.js 20 & PM2
-```bash
-sudo apt update && sudo apt install -y curl git nginx
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-sudo npm install -g pm2
-```
-
-#### Step 2: Clone and Build
-```bash
-cd /var/www
-sudo git clone https://github.com/your-username/voxel-fps.git
-cd voxel-fps
-sudo npm ci
-sudo npm run build
-```
-
-#### Step 3: Run with PM2 Process Manager
-```bash
-pm2 start dist/server.cjs --name "voxel-fps"
-pm2 save
-pm2 startup
-```
-
-#### Step 4: Configure Nginx with WebSocket Upgrade
-Create `/etc/nginx/sites-available/voxel-fps`:
-```nginx
-server {
-    server_name your-domain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-    }
-}
-```
-Enable the site and obtain a free Let's Encrypt SSL certificate:
-```bash
-sudo ln -s /etc/nginx/sites-available/voxel-fps /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d your-domain.com
-```
-
----
-
-### Method 5: GitHub Pages Client + External Dedicated Server
-If you prefer hosting the client statically on GitHub Pages (`https://username.github.io/voxel-fps`):
-1. The included `.github/workflows/deploy-pages.yml` automatically builds and publishes the client to GitHub Pages upon pushing to `main`.
-2. When players open your GitHub Pages site, they click **Multiplayer** → **Custom Server** and enter your remote WebSocket server address (e.g. `wss://my-game-server.up.railway.app` or `wss://your-domain.com`).
+- **Automated**: `npm test` runs 9 regression tests — voxel placement rules (ground place, stack, bridge, reject mid-air, reject above height limit, reject occupied cells, mine-to-destruction, collapse check) plus an end-to-end bot TRENCH construction test. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
+- **Manual playtest checklist**:
+  1. Open the site → Multiplayer → join Blue. Verify one blue bot disappears (log: `human joined blue — retiring bot …`).
+  2. Take damage — HP bar updates once (no double-apply flashes).
+  3. Die → wait for respawn → verify you spawn with **20 blocks**, and you do NOT instantly die again.
+  4. Right-click on ground → exactly one block; click again → second block; stack and bridge sideways works; mid-air placement is rejected.
+  5. Left-click with rifle → single shot per click. Hold with SMG → continuous fire.
+  6. Run onto the enemy flag within 7m → server grants pickup; carry home → capture counts. Kill a carrier → flag drops at their body.
+  7. Leave the match (close tab) → log shows backfill bot spawned, roster returns to 10v10.
+  8. Press `P` → spectator cam; try to shoot/build as spectator → blocked.
 
 ---
 
 ## 📁 Project Architecture
 
 ```
-├── .github/
-│   └── workflows/
-│       ├── ci.yml           # Automated GitHub Actions test, lint, and build verification
-│       └── deploy-pages.yml # Automated GitHub Pages client deployment
-├── Dockerfile               # Multi-stage production container build
-├── docker-compose.yml       # 1-command Docker service definition
+├── .github/workflows/
+│   ├── ci.yml                 # lint → build → test on every push/PR
+│   └── deploy-pages.yml       # optional static GitHub Pages client
+├── scripts/admin.ts           # CLI for kick/ban/status against admin API
+├── tests/                     # node:test regression suites (voxel + botTrench)
 ├── src/
-│   ├── game/
-│   │   ├── game.ts          # Client game loop, Three.js scene, hit detection, AI bot state machine & spectator
-│   │   ├── player.ts        # Player physics, 9-point voxel collision, camera controls, weapon sway
-│   │   ├── world.ts         # Procedural voxel world, raycasting, block placement & destruction
-│   │   ├── sounds.ts        # Web Audio API procedural sound synthesizer (3D spatial audio)
-│   │   └── networkClient.ts # WebSocket client with keepalive heartbeat & multi-server support
-│   ├── server/
-│   │   ├── serverGame.ts    # Authoritative server game loop (CTF match state, ticks, broadcasts)
-│   │   ├── serverPlayer.ts  # Server player representation and state
-│   │   └── serverWorld.ts   # Server voxel storage and synchronization
-│   ├── shared/
-│   │   └── types.ts         # Shared network protocols, game states, and event schemas
-│   ├── App.tsx              # React UI HUD, start menu, multiplayer lobby, ammo counters, hitmarker
-│   └── main.tsx             # React entry point
-├── server.ts                # Unified Express + Vite development & WebSocket production server
-├── index.html               # Main HTML entry with responsive meta tags
-├── package.json             # NPM configuration and build scripts
-└── vite.config.ts           # Vite + Tailwind CSS configuration
+│   ├── game/                  # CLIENT
+│   │   ├── game.ts            # Game loop, input handling (one-click build,
+│   │   │                      #   single-shot rifle), network message handlers,
+│   │   │                      #   server-authoritative respawn flag, spectator guards
+│   │   ├── player.ts          # Local player physics, 9-point collision, weapons
+│   │   ├── world.ts           # Client voxel world + canBuild() flood-fill
+│   │   ├── sounds.ts          # Procedural Web Audio synthesis (no assets)
+│   │   └── networkClient.ts   # WebSocket client, keepalive, wss:// autodetect
+│   ├── server/                # AUTHORITATIVE SERVER
+│   │   ├── serverGame.ts      # 20Hz tick loop, CTF state machines, respawn timers,
+│   │   │                      #   ghost-input rejection, join/leave bot rebalancing,
+│   │   │                      #   kick/ban enforcement hooks
+│   │   ├── serverBot.ts       # FSM bots: ENGAGE/FLANK/CAMP/ADVANCE/GRABFLAG/
+│   │   │                      #   RETURN/BUILD/TRENCH/RETREAT (+trench planner)
+│   │   ├── serverPlayer.ts    # Server player state, throttled footsteps, inventories
+│   │   ├── serverWorld.ts     # Server voxel storage, delta sync, unified canBuild()
+│   │   ├── logger.ts          # Structured timestamped logging
+│   │   └── banStore.ts        # Persistent bans.json store (IP/name)
+│   ├── shared/types.ts        # Network protocol & shared game types
+│   ├── App.tsx                # React HUD, menus, scoreboard, lobby
+│   └── main.tsx               # React entry
+├── server.ts                  # Single production entry: Express static + WS + admin API
+├── Dockerfile / docker-compose.yml
+├── index.html, vite.config.ts, tsconfig.json, package.json
+└── README.md / DEPLOYMENT.md / AGENTS.md / .env.example
 ```
+
+**Key invariants** (enforced across client & server):
+- Server is authoritative for damage, deaths, respawns, inventory, voxel edits, and all CTF events. Clients render, never decide.
+- Dead/spectating players' `playerInput` is rejected server-side (no ghost meshes).
+- Respawn always restores 20 blocks (players) / 36-block budget (bots).
+- `canBuild()` uses identical logic client & server: seed the flood-fill from the temporarily-filled target cell, require grounded structural support.
+- Team size is kept at `SERVER_BOT_COUNT` per side at all times via retire-on-join / backfill-on-leave.
 
 ---
 
 ## 📄 License
 
-This project is open source and available under the [MIT License](LICENSE).
-
-
+MIT — see [LICENSE](LICENSE).

@@ -8,7 +8,13 @@
 //   GRABFLAG -> head to the enemy flag and take it
 //   RETURN   -> carry the flag home; build cover when pinned or mid-field
 //   BUILD    -> place blocks for cover / rush towers near the enemy base
+//   TRENCH   -> dig & wall a fighting trench on the midfield approach lane
 //   RETREAT  -> fall back when low HP, out of ammo, or surrounded
+//
+// Difficulty knobs (env):
+//   SERVER_BOT_COUNT  bots per team (default 2)
+//   SERVER_BOT_BLOCKS building budget per bot life (default 36)
+//   SERVER_BOT_HP     max HP for bots (default 130 — beefier than players)
 import { ServerPlayer } from './serverPlayer';
 import type { ServerWorld } from './serverWorld';
 
@@ -30,6 +36,7 @@ export type BotState =
   | 'GRABFLAG'
   | 'RETURN'
   | 'BUILD'
+  | 'TRENCH'
   | 'RETREAT';
 
 export interface BotTargetInfo {
@@ -54,6 +61,10 @@ const EYE_HEIGHT = 1.6;
 const AIM_TOLERANCE_RAD = 0.14; // ~8 degrees
 const VISIBLE_RANGE = 75;
 
+// Difficulty knobs (env-overridable so Render can tune without code changes)
+const BOT_MAX_HP = Number(process.env.SERVER_BOT_HP ?? 130); // beefier than players (100)
+const BOT_BLOCKS = Number(process.env.SERVER_BOT_BLOCKS ?? 36); // building budget per life
+
 export class ServerBot extends ServerPlayer {
   private botState: BotState = 'ADVANCE';
   private stateUntil: number = 0;
@@ -67,6 +78,12 @@ export class ServerBot extends ServerPlayer {
   private wanderUntil: number = 0;
   private strafeSign: number = Math.random() < 0.5 ? -1 : 1;
   private flankSide: number = Math.random() < 0.5 ? -1 : 1;
+  // Threat memory: bots remember who shot them and hunt back briefly
+  private lastAttackerId: string | null = null;
+  private lastAttackedAt: number = -100;
+  // Trench construction plan (list of cells to wall, consumed over ticks)
+  private trenchPlan: Array<{ x: number; y: number; z: number }> | null = null;
+  private lastTrenchCell: number = 0;
 
   // Personality weights (per bot, slightly randomized)
   private aggroBias: number;
@@ -80,13 +97,24 @@ export class ServerBot extends ServerPlayer {
     this.magazineSize = WEAPONS[this.equipment as 'rifle' | 'smg'] ? (this.equipment === 'rifle' ? 10 : 30) : 10;
     this.currentAmmo = this.magazineSize;
     this.reloadTime = this.equipment === 'rifle' ? 2.0 : 1.5;
-    this.aggroBias = 0.3 + Math.random() * 0.4;
+    // Vicious: tougher than players (respawn() also honors maxHp)
+    this.maxHp = BOT_MAX_HP;
+    this.hp = BOT_MAX_HP;
+    this.botBlocks = BOT_BLOCKS;
+    // Smarter default personalities (higher aggression/building than before)
+    this.aggroBias = 0.35 + Math.random() * 0.4;
     this.campBias = 0.15 + Math.random() * 0.25;
-    this.buildBias = 0.15 + Math.random() * 0.35;
+    this.buildBias = 0.3 + Math.random() * 0.35;
   }
 
   get stateName(): BotState {
     return this.botState;
+  }
+
+  /** Called by serverGame when this bot takes damage — enables revenge targeting. */
+  noteHitBy(attackerId: string, now: number): void {
+    this.lastAttackerId = attackerId;
+    this.lastAttackedAt = now;
   }
 
   /**
@@ -101,9 +129,10 @@ export class ServerBot extends ServerPlayer {
     const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
     const homeBase = this.team === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
 
-    // --- Perception: nearest visible enemy ---
+    // --- Perception: nearest visible enemy (with threat/revenge weighting) ---
     let nearest: BotTargetInfo | null = null;
     let nearestDist = Infinity;
+    const revengeActive = t - this.lastAttackedAt < 8;
     for (const cand of ctx.targets) {
       if (cand.id === this.id || cand.isDead || cand.team === this.team) continue;
       const d = Math.hypot(
@@ -111,10 +140,17 @@ export class ServerBot extends ServerPlayer {
         cand.position.y - this.position.y,
         cand.position.z - this.position.z,
       );
-      if (d > VISIBLE_RANGE || d >= nearestDist) continue;
+      if (d > VISIBLE_RANGE) continue;
       if (!ctx.canSee(this.eyePos(), cand.position)) continue;
-      nearest = cand;
-      nearestDist = d;
+      // Smart targeting: flag carriers are priority; recent attackers get a
+      // distance discount so bots "hunt back" toward whoever hurt them.
+      let score = d;
+      if (revengeActive && cand.id === this.lastAttackerId) score *= 0.45;
+      if (cand.carryingFlag) score *= 0.5;
+      if (score < nearestDist) {
+        nearestDist = score;
+        nearest = cand;
+      }
     }
     if (nearest) this.lastSeenEnemy = { ...nearest.position };
 
@@ -152,6 +188,9 @@ export class ServerBot extends ServerPlayer {
       case 'BUILD':
         this.doBuild(ctx, enemyFlag, t);
         break;
+      case 'TRENCH':
+        this.doTrench(ctx, t);
+        break;
       case 'RETREAT':
         this.doRetreat(ctx, homeBase, t);
         break;
@@ -159,13 +198,27 @@ export class ServerBot extends ServerPlayer {
 
     // Keep the synced state honest so clients render reload/stance properly
     this.isSprinting = false;
-    this.isCrouching = this.botState === 'CAMP';
+    this.isCrouching = this.botState === 'CAMP' || this.botState === 'TRENCH';
     this.isGrounded = true;
   }
 
   // ---------------- State transitions ----------------
 
   private transition(state: BotState, now: number, duration: number): void {
+    // Never interrupt a trench mid-dig: the wall is only useful if it gets
+    // finished, so random re-decisions (GRABFLAG coin-flips, BUILD rolls,
+    // wander timers) must not cancel it. Explicit overrides still apply:
+    // carryingFlag -> RETURN and needsRetreat -> RETREAT are checked earlier
+    // in botUpdate() and call transition('RETURN'/'RETREAT'), which is allowed.
+    if (this.botState === 'TRENCH') {
+      if (state !== 'RETURN' && state !== 'RETREAT') {
+        // Still refresh the timer so doTrench()'s "done digging" hold logic
+        // doesn't expire while we're mid-wall and keep us locked in TRENCH.
+        this.stateUntil = now + Math.max(duration, 2);
+        return;
+      }
+      this.trenchPlan = null; // abandoning the dig to flee/return the flag
+    }
     if (this.botState !== state) {
       this.botState = state;
       this.waypoint = null;
@@ -175,9 +228,9 @@ export class ServerBot extends ServerPlayer {
   }
 
   private needsRetreat(nearestDist: number): boolean {
-    const lowHp = this.hp <= 28;
+    const lowHp = this.hp <= 0.25 * this.maxHp;
     const noAmmo = this.currentAmmo <= 0 && !this.isReloading;
-    const closeContact = nearestDist < 9 && this.hp <= 55;
+    const closeContact = nearestDist < 9 && this.hp <= 0.55 * this.maxHp;
     return lowHp || noAmmo || closeContact;
   }
 
@@ -235,14 +288,28 @@ export class ServerBot extends ServerPlayer {
     }
 
     // Priority 3: build pressure near the enemy base (cover/rush wall)
-    if (distToEnemyFlag < 45 && this.remainingBlocks > 3 && Math.random() < this.buildBias) {
+    if (distToEnemyFlag < 45 && this.remainingBlocks > 6 && Math.random() < this.buildBias) {
       this.transition('BUILD', t, 4);
+      return;
+    }
+
+    // Priority 3b: dig a fighting trench on the midfield lane (only when we
+    // still have most of our block budget left)
+    const midZ = (BLUE_FLAG_POS.z + RED_FLAG_POS.z) / 2;
+    const midDist = Math.abs(this.position.z - midZ);
+    if (
+      midDist < 35 &&
+      this.remainingBlocks >= BOT_BLOCKS * 0.5 &&
+      !this.trenchPlan &&
+      Math.random() < this.buildBias * 0.8
+    ) {
+      this.startTrench(ctx);
       return;
     }
 
     // Priority 4: opportunistic camping behind our forward line
     if (Math.random() < this.campBias * 0.6) {
-      const midZ = (this.position.z + enemyFlag.z) / 2;
+      const campMidZ = (this.position.z + enemyFlag.z) / 2;
       const spot = this.findCampSpot(ctx, { x: enemyFlag.x, y: GROUND_LEVEL, z: enemyFlag.z });
       if (spot) {
         this.campSpot = spot;
@@ -250,7 +317,7 @@ export class ServerBot extends ServerPlayer {
         this.transition('CAMP', t, 5 + Math.random() * 5);
         return;
       }
-      void midZ;
+      void campMidZ;
     }
 
     // Default: advance toward the objective
@@ -407,6 +474,100 @@ export class ServerBot extends ServerPlayer {
     if (this.hp > 45 && this.currentAmmo > 0 && t >= this.stateUntil) {
       this.transition('ADVANCE', t, 6);
     }
+  }
+
+  // ---------------- Trench building ----------------
+
+  /**
+   * Lay out a trench plan: a wall line perpendicular to our advance axis,
+   * centered on the bot's current position. Cells are consumed one per tick
+   * in doTrench(), so the trench rises progressively like a real engineer.
+   */
+  private startTrench(ctx: BotContext): void {
+    const enemyFlagZ = (this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS).z;
+    const towardEnemy = enemyFlagZ > this.position.z ? 1 : -1; // blue base is at -z
+    const cx = Math.round(this.position.x);
+    const cz = Math.round(this.position.z);
+    const groundY = ctx.world.getGroundHeight(cx, cz);
+    const cells: Array<{ x: number; y: number; z: number }> = [];
+    // Wall spans 9 blocks left/right along X, 2 high, on the side facing away
+    // from the enemy so it acts as cover for whoever holds the trench.
+    const backOffset = -towardEnemy * 2;
+    for (let dx = -4; dx <= 4; dx++) {
+      for (let h = 0; h < 2; h++) {
+        cells.push({ x: cx + dx, y: groundY + 1 + h, z: cz + backOffset });
+      }
+      // Small firing-step parapet at both ends
+      if (Math.abs(dx) === 4) {
+        cells.push({ x: cx + dx, y: groundY + 3, z: cz + backOffset });
+      }
+    }
+    this.trenchPlan = cells;
+    this.lastTrenchCell = 0;
+    this.transition('TRENCH', ctx.serverTime, 14);
+  }
+
+  private doTrench(ctx: BotContext, t: number): void {
+    const step = dtOf(ctx);
+    if (!this.trenchPlan || this.remainingBlocks <= 0) {
+      this.trenchPlan = null;
+      this.transition('ADVANCE', t, 6);
+      return;
+    }
+    // Build one cell every other tick (10 blocks/sec max), skipping cells we
+    // can't legally build on (occupied / unsupported / out of bounds).
+    let attempts = 0;
+    while (this.lastTrenchCell < this.trenchPlan.length && attempts < 6) {
+      const cell = this.trenchPlan[this.lastTrenchCell];
+      this.lastTrenchCell++;
+      attempts++;
+      if (ctx.world.canBuild(cell.x, cell.y, cell.z)) {
+        // Never bury ourselves or stand-inside cells
+        if (this.cellOverlapsBody(cell)) continue;
+        ctx.buildBlock(this, { x: cell.x, y: cell.y, z: cell.z });
+        this.botBlocks--;
+        break; // pace: one placed block per tick
+      }
+    }
+    // Stand inside the trench center while building (crouch behind the wall)
+    const center: Position = { x: this.position.x, y: GROUND_LEVEL, z: this.position.z };
+    const d = Math.hypot(center.x - this.position.x, center.z - this.position.z);
+    if (d > 1.5) this.moveTo(center, step, ctx, false);
+    else {
+      this.velocity.x = 0;
+      this.velocity.z = 0;
+      this.snapToGround(ctx);
+    }
+    this.isCrouching = true;
+
+    if (this.lastTrenchCell >= this.trenchPlan.length) {
+      // Done digging: hold the trench briefly, scanning toward the enemy lane
+      if (t >= this.stateUntil) {
+        this.trenchPlan = null;
+        this.transition('CAMP', t, 6);
+        const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+        const spot = this.findCampSpot(ctx, { x: enemyFlag.x, y: GROUND_LEVEL, z: enemyFlag.z });
+        if (spot) {
+          this.campSpot = spot;
+          this.waypoint = { ...spot };
+        } else {
+          this.transition('ADVANCE', t, 6);
+        }
+      }
+    }
+  }
+
+  private cellOverlapsBody(cell: { x: number; y: number; z: number }): boolean {
+    const feetY = Math.floor(this.position.y);
+    const headY = Math.floor(this.position.y + 1.8);
+    return (
+      cell.x >= Math.floor(this.position.x - 0.4) &&
+      cell.x <= Math.floor(this.position.x + 0.4) &&
+      cell.z >= Math.floor(this.position.z - 0.4) &&
+      cell.z <= Math.floor(this.position.z + 0.4) &&
+      cell.y >= feetY &&
+      cell.y <= headY
+    );
   }
 
   // ---------------- Movement / aiming primitives ----------------
@@ -638,7 +799,8 @@ export class ServerBot extends ServerPlayer {
   }
 
   refillBlocks(): void {
-    this.botBlocks = 12;
+    this.botBlocks = BOT_BLOCKS;
+    this.trenchPlan = null; // drop any half-built trench on death/respawn
   }
 }
 

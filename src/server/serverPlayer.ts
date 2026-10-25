@@ -23,6 +23,7 @@ export class ServerPlayer {
   rotation: Rotation;
   velocity: Position;
   hp: number = 100;
+  maxHp: number = 100;
   team: 'red' | 'blue';
   isDead: boolean = false;
   equipment: 'rifle' | 'smg' | 'pickaxe' | 'spade' = 'rifle';
@@ -81,11 +82,22 @@ export class ServerPlayer {
   }
 
   applyInput(input: PlayerInput): void {
-    this.input = input;
-    this.rotation.yaw = input.yaw;
-    this.rotation.pitch = input.pitch;
-    this.isCrouching = input.crouch;
-    this.isSprinting = input.sprint;
+    // Malformed/partial inputs (e.g. a build-only payload missing movement
+    // fields) must never replace the stored input wholesale — that would
+    // leave moveX/moveZ/yaw undefined and crash the tick loop in
+    // shouldPlayFootstep(). Merge defensively instead.
+    this.input = {
+      ...this.input,
+      ...input,
+      moveX: Number.isFinite(input.moveX) ? input.moveX : this.input.moveX,
+      moveZ: Number.isFinite(input.moveZ) ? input.moveZ : this.input.moveZ,
+      yaw: Number.isFinite(input.yaw) ? input.yaw : this.input.yaw,
+      pitch: Number.isFinite(input.pitch) ? input.pitch : this.input.pitch,
+    };
+    this.rotation.yaw = this.input.yaw;
+    this.rotation.pitch = this.input.pitch;
+    this.isCrouching = !!this.input.crouch;
+    this.isSprinting = !!this.input.sprint;
     if (input.equipment && input.equipment !== this.equipment) {
       this.changeEquipment(input.equipment);
     }
@@ -215,7 +227,7 @@ export class ServerPlayer {
   respawn(position: Position): void {
     this.position = { ...position };
     this.velocity = { x: 0, y: 0, z: 0 };
-    this.hp = 100;
+    this.hp = this.maxHp;
     this.isDead = false;
     // Reset magazine on respawn
     this.currentAmmo = ServerPlayer.MAGAZINE_SIZES[this.equipment];

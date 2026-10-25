@@ -68,9 +68,14 @@ export class ServerGame {
 
   // ---------------- AI Bots ----------------
 
-  /** Spawn a balanced set of AI bots (flank / camp / build behaviors). */
-  spawnDefaultBots(countPerTeam: number = 2): void {
-    const names = ['Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren'];
+  /** Spawn a balanced set of AI bots (flank / camp / build / trench behaviors).
+   *  Default fills the match to 10v10; humans replacing bots via makeRoomForHuman(). */
+  spawnDefaultBots(countPerTeam: number = Number(process.env.SERVER_BOT_COUNT ?? 10)): void {
+    const names = [
+      'Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren',
+      'Bishop', 'Kite', 'Onyx', 'Pike', 'Quill', 'Riven', 'Sable', 'Talon',
+      'Umbra', 'Volt', 'Wisp', 'Zephyr', 'Ash', 'Bramble', 'Cobalt', 'Dusk',
+    ];
     let i = 0;
     for (const team of ['blue', 'red'] as const) {
       for (let n = 0; n < countPerTeam; n++) {
@@ -78,6 +83,20 @@ export class ServerGame {
         i++;
       }
     }
+  }
+
+  /** Kick one bot off the human's newly chosen team so teams stay balanced
+   *  and total roster size stays constant (e.g. 10 per side in a 10v10). */
+  private makeRoomForHuman(team: 'red' | 'blue'): void {
+    if (!team) return;
+    const bots = [...this.players.values()].filter(
+      (p): p is ServerBot => p instanceof ServerBot && p.team === team,
+    );
+    if (bots.length === 0) return; // no bots left on this team — allow overflow
+    // Remove the most recently added bot (last spawned) for a stable feel.
+    const victim = bots[bots.length - 1];
+    log.info(`human joined ${team} — retiring bot "${victim.name}" (${victim.id}) to keep balance`);
+    this.removeBot(victim.id);
   }
 
   addBot(team: 'red' | 'blue', name: string): string {
@@ -221,6 +240,11 @@ export class ServerGame {
 
     target.takeDamage(damage);
 
+    // Threat memory for bot victims: they hunt back toward their attacker
+    if (target instanceof ServerBot && attackerId) {
+      target.noteHitBy(attackerId, this.world.serverTime);
+    }
+
     this.sendToPlayer(targetId, { type: 'hitConfirmed', targetId: attackerId, damage, isHeadshot: false });
 
     this.broadcast({ type: 'playerDamaged', playerId: targetId, damage, attackerId });
@@ -320,6 +344,9 @@ export class ServerGame {
     this.inventories.delete(playerId);
     this.lastShootTime.delete(playerId);
     this.lastToolTime.delete(playerId);
+    this.respawnTimers.delete(playerId);
+    
+    this.handlePlayerDeath(playerId); // drop any carried flag cleanly
     
     this.broadcast({
       type: 'playerLeft',
@@ -327,6 +354,21 @@ export class ServerGame {
     });
     
     log.info(`player left id=${playerId} ip=${player?.ip ?? '?'} name=${player?.name ?? 'unnamed'} total=${this.players.size}`);
+
+    // Maintain the 10v10 roster: when a human vacates a slot, backfill it
+    // with a fresh bot on the SAME team so teams never fall short.
+    const team = player?.team;
+    const wasHuman = !!player && !(player instanceof ServerBot);
+    if (wasHuman && team) {
+      const countOnTeam = [...this.players.values()].filter((p) => p.team === team).length;
+      const target = Number(process.env.SERVER_BOT_COUNT ?? 10);
+      if (countOnTeam < target) {
+        const names = ['Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren',
+          'Bishop', 'Kite', 'Onyx', 'Pike', 'Quill', 'Riven', 'Sable', 'Talon'];
+        this.addBot(team, `🤖 ${names[Math.floor(Math.random() * names.length)]}`);
+        log.info(`backfill bot spawned for team=${team} to keep ${target}v${target}`);
+      }
+    }
   }
 
   /**
@@ -418,6 +460,9 @@ export class ServerGame {
       case 'join':
         // Handle team selection and initial spawn position
         player.team = message.team;
+        // Keep teams balanced: retire one bot from this team so the human
+        // takes their slot (e.g. stays 10v10 with bots filling the roster).
+        this.makeRoomForHuman(message.team);
         if (message.name) {
           player.name = message.name;
           // Name-based ban check: kick + extend to an IP ban for this session.
@@ -621,6 +666,11 @@ export class ServerGame {
       const targetId = confirmedTarget.id;
 
       target.takeDamage(damage);
+
+      // Threat memory: bot victims hunt back toward whoever shot them
+      if (target instanceof ServerBot) {
+        target.noteHitBy(playerId, this.world.serverTime);
+      }
 
       // Notify attacker of confirmed hit
       this.sendToPlayer(playerId, {
@@ -845,6 +895,7 @@ export class ServerGame {
         this.redFlagAtBase = false;
         this.redFlagCarrier = playerId;
         player.carryingFlag = true;
+        log.info(`RED flag picked up by ${playerId}`);
         
         this.broadcast({
           type: 'flagPickedUp',
@@ -855,6 +906,7 @@ export class ServerGame {
         this.blueFlagAtBase = false;
         this.blueFlagCarrier = playerId;
         player.carryingFlag = true;
+        log.info(`BLUE flag picked up by ${playerId}`);
         
         this.broadcast({
           type: 'flagPickedUp',
@@ -872,7 +924,7 @@ export class ServerGame {
       const dz = player.position.z - droppedFlag.position.z;
       const distance = Math.sqrt(dx * dx + dz * dz);
 
-      if (distance < 4.8) {
+      if (distance < this.CAPTURE_DISTANCE) {
         if (droppedFlag.team === enemyFlagTeam) {
           // Pick up dropped enemy flag
           this.droppedFlags.splice(i, 1);
@@ -934,10 +986,13 @@ export class ServerGame {
       this.blueFlagRespawnTimer = 8.0;
     }
     player.carryingFlag = false;
+    log.info(`FLAG CAPTURED by ${playerId} (${player.team}) — score blue:${this.captures.blue} red:${this.captures.red}`);
 
     this.broadcast({
       type: 'flagCaptured',
       team: player.team,
+      // The captured flag is the ENEMY flag (blue scores by carrying red home)
+      flagTeam: player.team === 'blue' ? 'red' : 'blue',
       playerId: playerId,
       captures: this.captures,
     });
@@ -963,6 +1018,7 @@ export class ServerGame {
           type: 'flagDropped',
           position: { ...player.position },
           flagTeam: 'blue',
+          playerId,
         });
       } else if (this.redFlagCarrier === playerId) {
         this.redFlagCarrier = null;
@@ -976,6 +1032,7 @@ export class ServerGame {
           type: 'flagDropped',
           position: { ...player.position },
           flagTeam: 'red',
+          playerId,
         });
       }
     }
@@ -1130,11 +1187,15 @@ export class ServerGame {
             this.blueFlagRespawnTimer = 8.0;
           }
           player.carryingFlag = false;
+          log.info(`FLAG CAPTURED by ${playerId} (${player.team}) — score blue:${this.captures.blue} red:${this.captures.red}`);
 
-          // Broadcast capture event (flag disappears across all clients)
+          // Broadcast capture event (flag disappears across all clients).
+          // NOTE: the captured flag is the ENEMY flag. Team 'blue' scores by
+          // carrying the RED flag home, so we must send flagTeam:'red'.
           this.broadcast({
             type: 'flagCaptured',
             team: player.team,
+            flagTeam: player.team === 'blue' ? 'red' : 'blue',
             playerId: playerId,
             captures: this.captures,
           });
