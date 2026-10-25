@@ -515,6 +515,10 @@ export class NetworkClient {
     this.send({ type: 'toggleSpectator' });
   }
 
+  sendRequestRespawn(): void {
+    this.send({ type: 'requestRespawn' });
+  }
+
   sendFootstep(volume: number, pitch: number): void {
     this.send({ type: 'footstep', volume, pitch });
   }
