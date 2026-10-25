@@ -2075,13 +2075,15 @@ export class Game {
     } else if (e.button === 2) {
       // Right click: ALWAYS builds voxels — it must never shoot or mine.
       // For guns, right-click toggles aim down sights instead of firing.
+      const wasRightDown = this.isRightDown;
       this.isMouseDown = true;
       this.isRightDown = true;
       if (this.equipment === 'rifle' || this.equipment === 'smg') {
         this.isAiming = !this.isAiming;
         this.player.isAiming = this.isAiming;
-      } else {
-        // Instant snappy block placement like Minecraft
+      } else if (!wasRightDown) {
+        // One click = one block. Guard against repeated mousedown events
+        // while the button is held so holding never places multiple blocks.
         this.tryBuild();
       }
     }
@@ -3055,12 +3057,10 @@ export class Game {
       if (this.equipment === 'smg' || this.equipment === 'pickaxe' || this.equipment === 'spade') {
         this.performAction();
       }
-    } else if (this.isRightDown && !this.player.isDead &&
-               (this.equipment === 'spade' || this.equipment === 'pickaxe')) {
-      // Hold right-click with a tool equipped = continuous block placement
-      // (still only builds — never shoots or mines).
-      this.tryBuild();
     }
+    // NOTE: Right-click is intentionally NOT auto-repeated in the loop.
+    // One click places exactly one block; holding the button does nothing
+    // extra. This prevents accidentally placing multiple blocks per click.
 
     // ADS camera zoom
     const targetFov = this.isAiming ? (this.equipment === 'rifle' ? 45 : 55) : 75;
