@@ -70,6 +70,10 @@ const VISIBLE_RANGE = 75;
 // How many ticks a single placed block "costs" in trench pace. Lowering this
 // makes bots wall their trench faster (one block every other tick by default).
 const TRENCH_BUILD_INTERVAL = 2;
+// Withdrawal: how long a bot falls back before rejoining the fight, and how
+// long it waits before it is willing to fall back again.
+const RETREAT_MAX_SECONDS = 6;
+const RETREAT_COOLDOWN_SECONDS = 10;
 
 // Difficulty knobs (env-overridable so Render can tune without code changes)
 const BOT_MAX_HP = Number(process.env.SERVER_BOT_HP ?? 130); // beefier than players (100)
@@ -98,8 +102,10 @@ export class ServerBot extends ServerPlayer {
   private lastTrenchCell: number = 0;
   private trenchPaceTick: number = 0;
   private trenchCenter: Position | null = null;
+  private trenchDoneAt: number | null = null; // when the plan drained (hold deadline)
   private lastTrenchAt: number = -100;
   private pinnedDownUntil: number = -100; // recently shot at -> dig/roof cover
+  private retreatCooldownUntil: number = -100; // don't withdraw again immediately
   // Engineer blueprint: ordered list of remaining build cells (bastion/ramp)
   private buildPlan: TrenchCell[] | null = null;
 
@@ -183,7 +189,11 @@ export class ServerBot extends ServerPlayer {
 
     // --- Reactive overrides (checked every tick) ---
     if (this.needsRetreat(nearestDist)) {
-      this.transition('RETREAT', t, 3.0);
+      // Only START a withdrawal; re-transitioning every tick kept resetting
+      // the retreat deadline, so the bot never finished falling back.
+      if (this.botState !== 'RETREAT' && t >= this.retreatCooldownUntil) {
+        this.transition('RETREAT', t, RETREAT_MAX_SECONDS);
+      }
     } else if (this.carryingFlag) {
       if (this.botState !== 'RETURN') this.transition('RETURN', t, 10);
     } else if (nearest && this.botState !== 'RETREAT') {
@@ -239,13 +249,20 @@ export class ServerBot extends ServerPlayer {
     // checked earlier in botUpdate() and call transition('RETURN'/'RETREAT'),
     // which is allowed.
     if (this.botState === 'TRENCH' || this.botState === 'BUILD') {
-      if (state !== 'RETURN' && state !== 'RETREAT') {
+      // The lock only holds while a plan is actually pending. Finishing (or
+      // abandoning) the work clears the plan and then asks to leave
+      // TRENCH/BUILD itself; blocking that trapped the bot in the state with
+      // no plan left to execute, so it stood frozen for the rest of the round.
+      const planPending = this.botState === 'TRENCH' ? this.trenchPlan !== null : this.buildPlan !== null;
+      if (planPending && state !== 'RETURN' && state !== 'RETREAT') {
         // Still refresh the timer so doTrench()/doBuild()'s "done" hold logic
         // doesn't expire while we're mid-wall and keep us locked in state.
         this.stateUntil = now + Math.max(duration, 2);
         return;
       }
       this.trenchPlan = null; // abandoning the dig to flee/return the flag
+      this.trenchCenter = null;
+      this.trenchDoneAt = null;
       this.buildPlan = null;
     }
     if (this.botState !== state) {
@@ -590,7 +607,12 @@ export class ServerBot extends ServerPlayer {
     const step = dtOf(ctx);
     const wp: Position = { x: homeBase.x, y: GROUND_LEVEL, z: homeBase.z + (this.team === 'blue' ? -18 : 18) };
     this.moveTo(wp, step, ctx, true);
-    if (this.hp > 45 && this.currentAmmo > 0 && t >= this.stateUntil) {
+    // The withdrawal is time-boxed. Bots never regenerate HP, so the old
+    // "leave once hp > 45" gate could never be met and low-HP bots sat at the
+    // rear for the rest of the round. Rejoin when the retreat window expires,
+    // then only fall back again after a cooldown so they don't ping-pong.
+    if (t >= this.stateUntil) {
+      this.retreatCooldownUntil = t + RETREAT_COOLDOWN_SECONDS;
       this.transition('ADVANCE', t, 6);
     }
   }
@@ -650,6 +672,7 @@ export class ServerBot extends ServerPlayer {
     this.trenchPlan = cells;
     this.lastTrenchCell = 0;
     this.trenchPaceTick = 0;
+    this.trenchDoneAt = null;
     this.trenchCenter = { x: this.position.x, y: GROUND_LEVEL, z: this.position.z };
     this.lastTrenchAt = ctx.serverTime;
     this.transition('TRENCH', ctx.serverTime, 14);
@@ -695,8 +718,11 @@ export class ServerBot extends ServerPlayer {
     this.isCrouching = true;
 
     if (this.lastTrenchCell >= this.trenchPlan.length) {
-      // Done digging: hold the trench briefly, scanning toward the enemy lane
-      if (t >= this.stateUntil) {
+      // Done digging: hold the trench briefly, scanning toward the enemy lane.
+      // The hold has its own deadline: combat re-decisions refresh stateUntil,
+      // so waiting on that timer could postpone the exit forever.
+      if (this.trenchDoneAt === null) this.trenchDoneAt = t;
+      if (t - this.trenchDoneAt >= 2) {
         this.finishTrench(ctx, t);
       }
     }
@@ -966,6 +992,7 @@ export class ServerBot extends ServerPlayer {
     this.trenchPlan = null; // drop any half-built trench on death/respawn
     this.buildPlan = null; // ...and any unfinished bastion blueprint
     this.trenchCenter = null;
+    this.trenchDoneAt = null;
   }
 }
 

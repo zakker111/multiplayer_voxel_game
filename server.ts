@@ -273,10 +273,19 @@ async function startServer() {
 
   // Vite middleware in dev / static in prod
   if (process.env.NODE_ENV !== 'production') {
+    // When the dev server is reached through a proxy (hosted preview, tunnel),
+    // Vite rejects the proxied Host header with 403 Forbidden and nothing
+    // renders. Allow exactly the hosts listed in VITE_ALLOWED_HOSTS
+    // (comma-separated) — never a blanket allowlist.
+    const allowedHosts = (process.env.VITE_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((h) => h.trim())
+      .filter(Boolean);
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
         hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
+        ...(allowedHosts.length > 0 ? { allowedHosts } : {}),
       },
       appType: 'spa',
     });
