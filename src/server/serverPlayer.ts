@@ -19,6 +19,9 @@ import { ServerWorld } from './serverWorld';
 export class ServerPlayer {
   id: string;
   name?: string;
+  /** True for AI combatants; surfaced in getState() so clients can show them
+   *  on the Tab scoreboard with a "BOT" tag. */
+  isBotFlag = false;
   position: Position;
   rotation: Rotation;
   velocity: Position;
@@ -296,6 +299,7 @@ export class ServerPlayer {
       isReloading: this.isReloading,
       aimTransition: this.isAiming ? 1 : 0, // Sync aiming state
       carryingFlag: this.carryingFlag,
+      isBot: this.isBotFlag || undefined, // scoreboard "BOT" tag for AI combatants
     };
   }
 }

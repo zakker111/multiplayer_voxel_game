@@ -11,7 +11,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 
 ## ✨ Features
 
-- **🚩 Server-Authoritative Capture The Flag**: Full CTF loop on a 320-meter arena with base flags (±95m), rear spawns (±120–145m), pickup/drop/return timers, carrier HUD tracking, and victory scoring. All flag logic is validated server-side (carrier identity + unified 7.0m capture radius) — clients can no longer fake captures.
+- **🚩 Server-Authoritative Capture The Flag**: Full CTF loop on a 448-meter arena with base flags (±160m), rear spawns (±200–220m), pickup/drop/return timers, carrier HUD tracking, and victory scoring. All flag logic is validated server-side (carrier identity + unified 7.0m capture radius) — clients can no longer fake captures.
 - **🌐 Real-Time Multiplayer**: A single Node.js process serves both the web client and an authoritative WebSocket game server at 20Hz. Join via the in-game lobby (official or custom `wss://` server URL, custom callsign, team pick) or share invite links (`?mode=online&team=red`).
 - **⚖️ Always 10v10**: The server runs a full 10-vs-10 bot battle by default. When a human joins, one bot is retired from *that human's team*; when a human leaves/disconnects/is kicked, a replacement bot respawns on the same team. Matches never go short-sided.
 - **🤖 Vicious FSM Bots**: 20 server-side AI bots (130 HP each, tunable via env) driven by a finite-state machine: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `BUILD`, `TRENCH`, `RETREAT`. They revenge-target killers, prioritize enemy flag carriers, shoot with line-of-sight checks and aim error, harvest blocks, build cover/rush towers, and dig fortified midfield trench walls.
