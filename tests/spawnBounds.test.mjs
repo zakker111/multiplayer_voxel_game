@@ -1,4 +1,4 @@
-// Spawn/void-bound regression test (run: node --test tests/*.test.mjs)
+// Spawn/void-bound regression test (run: node --test tests/)
 //
 // Every team spawn must be INSIDE the "fell out of the world" bounds, otherwise
 // the client eliminates a player on the very first frame after spawning
