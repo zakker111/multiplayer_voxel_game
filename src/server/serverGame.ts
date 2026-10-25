@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import { ServerPlayer } from './serverPlayer';
 import { ServerWorld } from './serverWorld';
+import { ServerBot, BotContext, BotTargetInfo } from './serverBot';
 import {
   ClientMessage,
   ServerMessage,
@@ -55,7 +56,207 @@ export class ServerGame {
   constructor() {
     this.world = new ServerWorld();
     console.log('Server game initialized');
+    this.spawnDefaultBots();
   }
+
+  // ---------------- AI Bots ----------------
+
+  /** Spawn a balanced set of AI bots (flank / camp / build behaviors). */
+  spawnDefaultBots(countPerTeam: number = 2): void {
+    const names = ['Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren'];
+    let i = 0;
+    for (const team of ['blue', 'red'] as const) {
+      for (let n = 0; n < countPerTeam; n++) {
+        this.addBot(team, `🤖 ${names[i % names.length]}`);
+        i++;
+      }
+    }
+  }
+
+  addBot(team: 'red' | 'blue', name: string): string {
+    const botId = `bot_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const spawnPos = this.getSpawnPosition(team);
+    const bot = new ServerBot(botId, spawnPos, team, name);
+    this.players.set(botId, bot);
+    // No connection entry: broadcasts/sendToPlayer naturally skip bots,
+    // and their state flows to clients via playerUpdated/broadcastState.
+    this.broadcast({
+      type: 'playerJoined',
+      playerId: botId,
+      state: bot.getState(),
+    });
+    console.log(`Bot ${name} (${botId}) joined team ${team}`);
+    return botId;
+  }
+
+  removeBot(botId: string): void {
+    if (!this.players.has(botId)) return;
+    this.handlePlayerDeath(botId); // drops any carried flag properly
+    this.players.delete(botId);
+    this.respawnTimers.delete(botId);
+    this.lastShootTime.delete(botId);
+    this.lastToolTime.delete(botId);
+    this.inventories.delete(botId);
+    this.broadcast({ type: 'playerLeft', playerId: botId });
+  }
+
+  private getBotContext(): BotContext {
+    const targets: BotTargetInfo[] = [];
+    for (const [id, p] of this.players) {
+      targets.push({
+        id,
+        position: { ...p.position },
+        team: p.team,
+        isDead: p.isDead || p.isSpectating,
+        carryingFlag: p.carryingFlag,
+      });
+    }
+    const ctx: BotContext = {
+      world: this.world,
+      serverTime: this.world.serverTime,
+      targets,
+      friendlyDroppedFlagPos: null, // filled per-bot below via closure default
+      canSee: (from, to) => this.hasLineOfSight(from, to),
+      fireWeapon: (bot, target, aimDir, eyeY) => {
+        const origin = { x: bot.position.x, y: bot.position.y + eyeY, z: bot.position.z };
+        // Small inaccuracy jitter so tracers look human
+        const spread = bot.equipment === 'smg' ? 0.03 : 0.004;
+        const dir = {
+          x: aimDir.x + (Math.random() - 0.5) * spread,
+          y: aimDir.y + (Math.random() - 0.5) * spread,
+          z: aimDir.z + (Math.random() - 0.5) * spread,
+        };
+        this.botShoot(bot.id, origin, dir, target.id);
+      },
+      buildBlock: (bot, pos) => {
+        this.botBuild(bot.id, pos);
+      },
+    };
+    return ctx;
+  }
+
+  private hasLineOfSight(from: Position, to: Position): boolean {
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dz = to.z - from.z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist < 0.5) return true;
+    const dir = { x: dx / dist, y: dy / dist, z: dz / dist };
+    const hit = this.world.raycast(from, dir, dist);
+    return !hit || hit.distance >= dist - 1.0;
+  }
+
+  /** Bot fired at a validated target: apply weapon damage through the same
+   *  authoritative pipeline used for humans (no client-reported hits). */
+  private botShoot(botId: string, origin: Position, direction: Position, targetId: string): void {
+    const bot = this.players.get(botId);
+    const target = this.players.get(targetId);
+    if (!bot || !target || bot.isDead || target.isDead) return;
+    if (target.team === bot.team) return;
+
+    const weapon = WEAPONS[bot.equipment as 'rifle' | 'smg'];
+    if (!weapon) return;
+
+    // Broadcast the shot so other clients render tracer/flash/sound
+    this.broadcastExcept(botId, {
+      type: 'playerShot',
+      playerId: botId,
+      origin,
+      direction,
+      weapon: bot.equipment,
+    });
+    this.broadcast({ type: 'playerUpdated', playerId: botId, state: bot.getState() });
+
+    // Terrain must not block the bullet
+    if (!this.hasLineOfSight(origin, { x: target.position.x, y: target.position.y + 1.1, z: target.position.z })) {
+      // Hit wall instead — damage voxel along the ray
+      const hit = this.world.raycast(origin, direction, 350);
+      if (hit && hit.voxelPos) {
+        this.damageAndBroadcastVoxel(hit.voxelPos);
+      }
+      return;
+    }
+
+    const dist = Math.hypot(
+      target.position.x - origin.x,
+      target.position.y + 1.1 - origin.y,
+      target.position.z - origin.z,
+    );
+    // Headshot chance scales with accuracy distance
+    const isHeadshot = dist < 25 && Math.random() < 0.18;
+    const damage = isHeadshot ? weapon.damage.head : weapon.damage.body;
+
+    this.applyDamage(targetId, damage, botId);
+  }
+
+  private damageAndBroadcastVoxel(pos: Position): void {
+    const { x, y, z } = pos;
+    const destroyed = this.world.damageVoxel(x, y, z, 1);
+    const voxel = this.world.getVoxel(x, y, z);
+    this.broadcast({
+      type: 'voxelChanged',
+      change: { x, y, z, type: voxel ? voxel.type : VOXEL_AIR, durability: voxel ? voxel.durability : 0 },
+    });
+    if (destroyed) {
+      const collapsed = this.world.collapseDisconnected(x, y, z);
+      for (const change of collapsed) {
+        this.broadcast({ type: 'voxelChanged', change });
+      }
+    }
+  }
+
+  /** Centralized damage application (used by bot shots). Human shots keep
+   *  their own path but respect the same death/respawn bookkeeping. */
+  private applyDamage(targetId: string, damage: number, attackerId: string): void {
+    const target = this.players.get(targetId);
+    const attacker = this.players.get(attackerId);
+    if (!target || target.isDead) return;
+
+    target.takeDamage(damage);
+
+    this.sendToPlayer(targetId, { type: 'hitConfirmed', targetId: attackerId, damage, isHeadshot: false });
+
+    this.broadcast({ type: 'playerDamaged', playerId: targetId, damage, attackerId });
+    this.broadcast({ type: 'playerUpdated', playerId: targetId, state: target.getState() });
+
+    if (target.isDead) {
+      this.handlePlayerDeath(targetId);
+      if (attacker) {
+        if (attacker.team === 'red') this.scores.red++;
+        else this.scores.blue++;
+      }
+      this.broadcast({ type: 'playerDied', playerId: targetId, killerId: attackerId });
+      this.respawnTimers.set(targetId, 4.0);
+    }
+  }
+
+  /** Bot places a building block (validated like human builds). */
+  private botBuild(botId: string, position: Position): void {
+    const bot = this.players.get(botId);
+    if (!bot || !(bot instanceof ServerBot) || bot.isDead) return;
+    const { x, y, z } = position;
+    if (!this.canBuildAt(x, y, z)) return;
+    this.world.setVoxel(x, y, z, 4, 3); // VOXEL_BUILT
+    this.broadcast({
+      type: 'voxelChanged',
+      change: { x, y, z, type: 4, durability: 3 },
+    });
+  }
+
+  private updateBots(ctx: BotContext): void {
+    for (const [id, player] of this.players) {
+      if (!(player instanceof ServerBot)) continue;
+      if (player.isDead) continue;
+      // Per-bot view of dropped flags belonging to its own team
+      const own = ctx.friendlyDroppedFlagPos;
+      const drop = this.droppedFlags.find((f) => f.team === player.team);
+      ctx.friendlyDroppedFlagPos = drop ? drop.position : own;
+      player.botUpdate(this.tickDt, ctx);
+      ctx.friendlyDroppedFlagPos = null;
+    }
+  }
+
+  private readonly tickDt: number = 1 / 20;
 
   addPlayer(ws: WebSocket | GameConnection): string {
     const playerId = `player_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
@@ -81,6 +282,23 @@ export class ServerGame {
       captures: this.captures,
       inventory: this.inventories.get(playerId) || 20,
       voxelChanges: this.world.getModifiedVoxels(),
+      // Full authoritative flag snapshot so late joiners see flags that were
+      // picked up / dropped / captured BEFORE they connected (events alone
+      // would leave their visuals desynced).
+      flags: {
+        blue: {
+          atBase: this.blueFlagAtBase,
+          carrierId: this.blueFlagCarrier,
+          respawnTimer: this.blueFlagRespawnTimer,
+          droppedPosition: this.droppedFlags.find(f => f.team === 'blue')?.position ?? null,
+        },
+        red: {
+          atBase: this.redFlagAtBase,
+          carrierId: this.redFlagCarrier,
+          respawnTimer: this.redFlagRespawnTimer,
+          droppedPosition: this.droppedFlags.find(f => f.team === 'red')?.position ?? null,
+        },
+      },
     });
     
     console.log(`Player ${playerId} connected (total: ${this.players.size})`);
@@ -673,6 +891,7 @@ export class ServerGame {
     // consistent even if a socket closes mid-timeout. (lastShootTime is in seconds)
     const nowSec = Date.now() / 1000;
     for (const player of this.players.values()) {
+      if (player instanceof ServerBot) continue; // bots manage their own shoot flag via botUpdate
       if (player.isShooting && nowSec - (this.lastShootTime.get(player.id) || 0) > 0.1) {
         player.isShooting = false;
       }
@@ -690,6 +909,9 @@ export class ServerGame {
             player.respawn(spawnPos);
             // Restore build inventory on respawn (matches join-time value)
             this.inventories.set(playerId, 20);
+            if (player instanceof ServerBot) {
+              player.refillBlocks();
+            }
             this.broadcast({
               type: 'playerRespawned',
               playerId,
@@ -706,8 +928,10 @@ export class ServerGame {
       }
     }
 
-    // Update all players
+    // Update all players (humans use client-authoritative input; bots run AI)
+    const botCtx = this.getBotContext();
     for (const player of this.players.values()) {
+      if (player instanceof ServerBot) continue; // handled below via botUpdate
       player.update(dt, this.world);
       
       // Check and broadcast footstep sounds
@@ -721,6 +945,9 @@ export class ServerGame {
         });
       }
     }
+
+    // Run bot AI (movement, aiming, flanking, camping, building)
+    this.updateBots(botCtx);
     
     // Update dropped flag timers
     this.updateDroppedFlags(dt);

@@ -12,7 +12,8 @@ interface AliveWebSocket extends WebSocket {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Respect hosting platforms (Render, Railway, Fly.io) that inject PORT
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json());
 
