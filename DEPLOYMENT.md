@@ -495,3 +495,22 @@ They open it, click "Online Multiplayer", and play together!
 **Good luck with your deployment!** 🎮
 
 If you encounter any issues, check the troubleshooting section or open an issue on GitHub.
+
+## Server Logs & Admin (Kick/Ban)
+
+The server emits structured timestamped logs (`[INFO]/[WARN]/[ERROR]` with subsystem tags like `[game]`, `[net]`, `[admin]`) covering joins/leaves, deaths/captures, bot spawns, and admin actions. View live on Render via the **Logs** tab.
+
+### Kick/ban from the command line
+
+```bash
+npm run build            # also builds dist/admin.cjs
+npm run admin -- status                      # uptime, players, bans
+npm run admin -- players                     # list connected players (id/name/team/ip)
+npm run admin -- kick <playerId|name> [reason]
+npm run admin -- ban  <ip|name> [reason]     # persists to bans.json + kicks live session
+npm run admin -- unban <ip|name>
+npm run admin -- bans
+# Remote server: add  --url https://your-app.onrender.com --token SECRET
+```
+
+Security: the `/api/admin/*` HTTP API accepts requests without a token only from localhost. Set `ADMIN_TOKEN` in your environment (Render → Environment) to enable remote access; banned IPs are rejected at WebSocket connect time and bans survive restarts via `bans.json`.

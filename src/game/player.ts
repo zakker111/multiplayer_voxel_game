@@ -24,6 +24,9 @@ export class Player {
   gravity: number = 20;
   sensitivity: number = 0.002;
   respawnTimer: number = 0;
+  // Set by the Game class in online mode so the server stays authoritative
+  // over death/respawn timing (prevents double-respawn "die immediately" bug).
+  serverAuthoritativeRespawn: boolean = false;
   targetInfo: string = '';
   team: 'red' | 'blue' = 'blue';
   onRespawn?: () => void;
@@ -297,6 +300,14 @@ export class Player {
 
   update(dt: number): void {
     if (this.isDead) {
+      // Online mode: the server owns death & respawn timing. Skip the local
+      // countdown entirely — it previously fired onRespawn() one frame after
+      // playerRespawned, respawning twice and making players appear to
+      // "die immediately" right after each respawn.
+      if (this.serverAuthoritativeRespawn) {
+        this.updateCamera();
+        return;
+      }
       this.respawnTimer -= dt;
       if (this.respawnTimer <= 0) {
         if (this.onRespawn) {

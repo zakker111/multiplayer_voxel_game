@@ -4,16 +4,31 @@ import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { ServerGame, GameConnection } from './src/server/serverGame';
+import { normalizeIp } from './src/server/banStore';
+import { createLogger } from './src/server/logger';
+
+const log = createLogger('server');
 
 interface AliveWebSocket extends WebSocket {
   isAlive: boolean;
   clientIp?: string;
 }
 
+/** Simple timing-safe-ish comparison for the admin token. */
+function tokenOk(provided: string | undefined, required: string): boolean {
+  if (!required) return true; // no ADMIN_TOKEN set => local dev mode, allow all
+  if (!provided) return false;
+  if (provided.length !== required.length) return false;
+  let diff = 0;
+  for (let i = 0; i < provided.length; i++) diff |= provided.charCodeAt(i) ^ required.charCodeAt(i);
+  return diff === 0;
+}
+
 async function startServer() {
   const app = express();
   // Respect hosting platforms (Render, Railway, Fly.io) that inject PORT
   const PORT = parseInt(process.env.PORT || '3000', 10);
+  const startedAt = Date.now();
 
   app.use(express.json());
 
@@ -38,6 +53,92 @@ async function startServer() {
     });
   });
 
+  // ---------------- Admin API (CLI + curl) ----------------
+  const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+  if (!ADMIN_TOKEN) {
+    log.warn('ADMIN_TOKEN not set — admin API open to localhost only. Set ADMIN_TOKEN to allow remote access.');
+  }
+
+  const adminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = normalizeIp(
+      typeof req.headers['x-forwarded-for'] === 'string'
+        ? String(req.headers['x-forwarded-for']).split(',')[0].trim()
+        : req.socket.remoteAddress,
+    );
+    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip === 'unknown';
+    const header = req.headers.authorization || '';
+    const provided = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token as string) || '';
+    if (tokenOk(provided, ADMIN_TOKEN) && (ADMIN_TOKEN || isLocal)) {
+      return next();
+    }
+    log.warn(`admin request denied from ${ip}`);
+    res.status(401).json({ error: 'Unauthorized: provide Authorization: Bearer <ADMIN_TOKEN>' });
+  };
+
+  const findTargets = (target: string): string[] => {
+    // exact player id, else name match (case-insensitive)
+    if (game.listPlayers().some((p) => p.id === target)) return [target];
+    return game
+      .listPlayers()
+      .filter((p) => p.name.toLowerCase() === target.toLowerCase())
+      .map((p) => p.id);
+  };
+
+  app.get('/api/admin/status', adminAuth, (_req, res) => {
+    res.json({
+      uptimeSec: Math.round((Date.now() - startedAt) / 1000),
+      players: game.listPlayers().length,
+      bans: game.bans.list().length,
+      banFile: game.bans.filePath,
+      tickRate: 20,
+    });
+  });
+
+  app.get('/api/admin/players', adminAuth, (_req, res) => {
+    res.json({ players: game.listPlayers() });
+  });
+
+  app.get('/api/admin/bans', adminAuth, (_req, res) => {
+    res.json({ bans: game.bans.list() });
+  });
+
+  app.post('/api/admin/kick', adminAuth, (req, res) => {
+    const { target, reason } = req.body || {};
+    if (!target) return res.status(400).json({ error: 'Missing "target" (playerId or name)' });
+    const ids = findTargets(String(target));
+    if (!ids.length) return res.status(404).json({ error: `No connected player matches "${target}"` });
+    for (const id of ids) game.kickPlayer(id, reason || 'kicked by admin', false);
+    log.info(`ADMIN kick: ${ids.join(',')} reason="${reason || 'n/a'}"`);
+    res.json({ ok: true, kicked: ids });
+  });
+
+  app.post('/api/admin/ban', adminAuth, (req, res) => {
+    const { kind = 'ip', value, reason } = req.body || {};
+    if (!value) return res.status(400).json({ error: 'Missing "value" (ip or name)' });
+    if (kind !== 'ip' && kind !== 'name') return res.status(400).json({ error: 'kind must be "ip" or "name"' });
+    const kicked: string[] = [];
+    if (kind === 'ip') {
+      const norm = normalizeIp(String(value));
+      const before = new Set(game.listPlayers().map((p) => p.id));
+      game.banIp(norm, reason || 'banned by admin');
+      const after = new Set(game.listPlayers().map((p) => p.id));
+      for (const id of before) if (!after.has(id)) kicked.push(id);
+    } else {
+      game.bans.add('name', String(value).toLowerCase(), reason || 'banned by admin');
+      const ids = game.listPlayers().filter((p) => p.name.toLowerCase() === String(value).toLowerCase()).map((p) => p.id);
+      for (const id of ids) { game.kickPlayer(id, reason || 'banned by admin', false); kicked.push(id); }
+      log.info(`ADMIN name-ban: ${value} reason="${reason || 'n/a'}"`);
+    }
+    res.json({ ok: true, kicked, bansTotal: game.bans.list().length });
+  });
+
+  app.post('/api/admin/unban', adminAuth, (req, res) => {
+    const { kind = 'ip', value } = req.body || {};
+    if (!value) return res.status(400).json({ error: 'Missing "value" (ip or name)' });
+    const removed = kind === 'ip' ? game.unbanIp(String(value)) : game.bans.remove('name', String(value));
+    res.json({ ok: true, removed });
+  });
+
   // SSE Game stream fallback (guarantees connectivity behind HTTP proxies, iframes, and restrictive firewalls)
   app.get('/api/game/events', (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
@@ -49,20 +150,21 @@ async function startServer() {
     // Send initial keepalive comment to open the stream
     res.write(': sse-connected\n\n');
 
-    const conn: GameConnection = {
+    const sseConn: GameConnection & { close?: (code?: number, reason?: string) => void } = {
       send: (data: string) => {
         if (!res.writableEnded) {
           res.write(`data: ${data}\n\n`);
         }
       },
       isOpen: () => !res.writableEnded,
+      close: () => { if (!res.writableEnded) res.end(); },
     };
 
-    const playerId = game.addPlayer(conn);
-    console.log(`📡 SSE Client connected (${playerId})`);
+    const playerId = game.addPlayer(sseConn, typeof req.headers['x-forwarded-for'] === 'string' ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : req.socket.remoteAddress);
+    log.info(`SSE client connected id=${playerId} ip=${normalizeIp(typeof req.headers['x-forwarded-for'] === 'string' ? String(req.headers['x-forwarded-for']).split(',')[0] : req.socket.remoteAddress)}`);
 
     req.on('close', () => {
-      console.log(`📡 SSE Client closed (${playerId})`);
+      log.info(`SSE client closed id=${playerId}`);
       game.removePlayer(playerId);
     });
   });
@@ -82,7 +184,7 @@ async function startServer() {
     wss.clients.forEach((ws) => {
       const extWs = ws as AliveWebSocket;
       if (extWs.isAlive === false) {
-        console.log(`⏰ Terminating inactive WebSocket connection from ${extWs.clientIp || 'client'}`);
+        log.warn(`terminating inactive ws ip=${extWs.clientIp || 'client'}`);
         return ws.terminate();
       }
       extWs.isAlive = false;
@@ -100,8 +202,14 @@ async function startServer() {
       : request.socket.remoteAddress || 'unknown';
     extWs.clientIp = clientIp;
 
-    console.log(`👤 Client connected from ${clientIp} (Total clients: ${wss.clients.size})`);
-    const playerId = game.addPlayer(ws);
+    log.info(`ws client connected ip=${clientIp} total=${wss.clients.size}`);
+    // Reject banned IPs immediately
+    if (game.isIpBanned(clientIp)) {
+      log.warn(`rejected banned ip=${clientIp}`);
+      ws.close(4003, 'banned');
+      return;
+    }
+    const playerId = game.addPlayer(ws, clientIp);
 
     ws.on('pong', () => {
       extWs.isAlive = true;
@@ -112,17 +220,17 @@ async function startServer() {
         const message = JSON.parse(data.toString());
         game.handleMessage(playerId, message);
       } catch (error) {
-        console.error('❌ Error handling message:', error);
+        log.error('error handling message', (error as Error).message);
       }
     });
 
     ws.on('close', () => {
-      console.log(`👋 Client disconnected (${playerId}) from ${clientIp}`);
+      log.info(`ws client disconnected id=${playerId} ip=${clientIp}`);
       game.removePlayer(playerId);
     });
 
     ws.on('error', (error) => {
-      console.error('❌ WebSocket error:', error);
+      log.error('websocket error', (error as Error)?.message ?? String(error));
     });
   });
 
@@ -150,7 +258,7 @@ async function startServer() {
     game.broadcastState();
   }, TICK_INTERVAL);
 
-  console.log(`⚙️  Game server loop started with tick rate: ${TICK_RATE}Hz`);
+  log.info(`game loop started tickRate=${TICK_RATE}Hz`);
 
   server.on('close', () => {
     clearInterval(heartbeatInterval);
@@ -176,11 +284,11 @@ async function startServer() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🎮 Voxel FPS Server running on http://0.0.0.0:${PORT}`);
+    log.info(`Voxel FPS server listening on 0.0.0.0:${PORT} (admin: ${ADMIN_TOKEN ? 'token-protected' : 'localhost-only'})`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+  log.error('failed to start server', (err as Error).stack ?? String(err));
   process.exit(1);
 });

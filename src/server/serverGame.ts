@@ -2,6 +2,9 @@ import { WebSocket } from 'ws';
 import { ServerPlayer } from './serverPlayer';
 import { ServerWorld } from './serverWorld';
 import { ServerBot, BotContext, BotTargetInfo } from './serverBot';
+import { createLogger } from './logger';
+const log = createLogger('game');
+import { BanStore, normalizeIp } from './banStore';
 import {
   ClientMessage,
   ServerMessage,
@@ -53,9 +56,13 @@ export class ServerGame {
   // the server schedules respawns itself so dead players don't ghost-update)
   private respawnTimers: Map<string, number> = new Map();
 
+  /** Persistent IP ban list shared with the admin CLI via BAN_FILE. */
+  readonly bans: BanStore = BanStore.default();
+
   constructor() {
     this.world = new ServerWorld();
-    console.log('Server game initialized');
+    this.bans.loadFromDisk();
+    log.info(`initialized (ban file: ${this.bans.filePath}, bans active: ${this.bans.list().length})`);
     this.spawnDefaultBots();
   }
 
@@ -85,7 +92,7 @@ export class ServerGame {
       playerId: botId,
       state: bot.getState(),
     });
-    console.log(`Bot ${name} (${botId}) joined team ${team}`);
+    log.info(`bot spawned id=${botId} name=${name} team=${team} total=${this.players.size}`);
     return botId;
   }
 
@@ -258,11 +265,12 @@ export class ServerGame {
 
   private readonly tickDt: number = 1 / 20;
 
-  addPlayer(ws: WebSocket | GameConnection): string {
+  addPlayer(ws: WebSocket | GameConnection, ip?: string): string {
     const playerId = `player_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const spawnPos = this.getSpawnPosition('blue');
     
     const player = new ServerPlayer(playerId, spawnPos, 'blue');
+    player.ip = normalizeIp(ip);
     this.players.set(playerId, player);
     this.connections.set(playerId, ws);
     this.inventories.set(playerId, 20);
@@ -301,11 +309,12 @@ export class ServerGame {
       },
     });
     
-    console.log(`Player ${playerId} connected (total: ${this.players.size})`);
+    log.info(`player connected id=${playerId} ip=${player.ip} name=${player.name ?? 'unnamed'} total=${this.players.size}`);
     return playerId;
   }
 
   removePlayer(playerId: string): void {
+    const player = this.players.get(playerId);
     this.players.delete(playerId);
     this.connections.delete(playerId);
     this.inventories.delete(playerId);
@@ -317,7 +326,88 @@ export class ServerGame {
       playerId,
     });
     
-    console.log(`Player ${playerId} left (total: ${this.players.size})`);
+    log.info(`player left id=${playerId} ip=${player?.ip ?? '?'} name=${player?.name ?? 'unnamed'} total=${this.players.size}`);
+  }
+
+  /**
+   * Forcibly disconnect a player. If `ban` is true, their IP is also added to
+   * the persistent ban list (which live-reloads from BAN_FILE so the CLI can
+   * edit it while the server runs).
+   */
+  kickPlayer(playerId: string, reason = 'kicked by admin', ban = false): boolean {
+    const player = this.players.get(playerId);
+    if (!player) return false;
+
+    if (ban && player.ip) {
+      this.bans.add('ip', player.ip, reason);
+      log.warn(`BANNED ${player.ip} (${playerId}) reason="${reason}" file=${this.bans.filePath}`);
+    } else {
+      log.warn(`KICKED ${playerId} ip=${player.ip ?? '?'} name=${player.name ?? 'unnamed'} reason="${reason}"`);
+    }
+
+    // Tell the client why it was disconnected before closing the socket.
+    this.sendToPlayer(playerId, {
+      type: 'kicked',
+      reason,
+      banned: ban,
+    });
+    this.closeConnection(playerId);
+    this.removePlayer(playerId);
+    return true;
+  }
+
+  banIp(ip: string, reason = 'banned by admin'): void {
+    this.bans.add('ip', normalizeIp(ip), reason);
+    log.warn(`BAN added ip=${normalizeIp(ip)} reason="${reason}"`);
+    // Also kick anyone currently connected with that IP.
+    for (const [id, p] of [...this.players]) {
+      if (!(p instanceof ServerBot) && p.ip === normalizeIp(ip)) {
+        this.kickPlayer(id, reason, false);
+      }
+    }
+  }
+
+  unbanIp(ip: string): boolean {
+    const removed = this.bans.remove('ip', normalizeIp(ip));
+    if (removed) log.info(`UNBAN ip=${normalizeIp(ip)}`);
+    return removed;
+  }
+
+  isIpBanned(ip: string | undefined): boolean {
+    return this.bans.isIpBanned(normalizeIp(ip)) !== null;
+  }
+
+  /** Snapshot of connected (non-bot) players for logs / status endpoint / CLI. */
+  listPlayers(): Array<{ id: string; name: string; team: string; ip: string; hp: number; isDead: boolean; isSpectating: boolean }> {
+    const out: Array<{ id: string; name: string; team: string; ip: string; hp: number; isDead: boolean; isSpectating: boolean }> = [];
+    for (const [id, p] of this.players) {
+      if (p instanceof ServerBot) continue;
+      out.push({
+        id,
+        name: p.name ?? 'unnamed',
+        team: p.team,
+        ip: p.ip ?? 'unknown',
+        hp: Math.round(p.hp),
+        isDead: p.isDead,
+        isSpectating: p.isSpectating,
+      });
+    }
+    return out;
+  }
+
+  private closeConnection(playerId: string): void {
+    const conn = this.connections.get(playerId);
+    if (!conn) return;
+    try {
+      if ('close' in conn && typeof (conn as WebSocket).close === 'function') {
+        (conn as WebSocket).close(4000, 'kicked');
+      } else if (typeof conn.send === 'function') {
+        // SSE connection — send sentinel then end via isOpen contract
+        conn.send(JSON.stringify({ type: 'kicked', reason: 'kicked', banned: false }));
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
   handleMessage(playerId: string, message: ClientMessage): void {
@@ -330,6 +420,15 @@ export class ServerGame {
         player.team = message.team;
         if (message.name) {
           player.name = message.name;
+          // Name-based ban check: kick + extend to an IP ban for this session.
+          const nameBan = this.bans.list().find(
+            (b) => b.kind === 'name' && b.value.toLowerCase() === message.name!.toLowerCase(),
+          );
+          if (nameBan) {
+            log.warn(`Rejected join by banned name "${message.name}" from ${player.ip ?? '?'}`);
+            this.kickPlayer(playerId, `Banned account: ${nameBan.reason}`, false);
+            return;
+          }
         }
         if (message.position) {
           player.position = { ...message.position };
@@ -393,7 +492,7 @@ export class ServerGame {
           playerId,
           isSpectating: player.isSpectating,
         });
-        console.log(`Player ${playerId} ${player.isSpectating ? 'entered' : 'exited'} spectator mode`);
+        log.info(`player ${playerId} ${player.isSpectating ? 'entered' : 'exited'} spectator mode`);
         break;
 
       case 'footstep':
