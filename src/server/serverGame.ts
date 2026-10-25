@@ -344,6 +344,9 @@ export class ServerGame {
     this.inventories.delete(playerId);
     this.lastShootTime.delete(playerId);
     this.lastToolTime.delete(playerId);
+    this.respawnTimers.delete(playerId);
+    
+    this.handlePlayerDeath(playerId); // drop any carried flag cleanly
     
     this.broadcast({
       type: 'playerLeft',
@@ -351,6 +354,21 @@ export class ServerGame {
     });
     
     log.info(`player left id=${playerId} ip=${player?.ip ?? '?'} name=${player?.name ?? 'unnamed'} total=${this.players.size}`);
+
+    // Maintain the 10v10 roster: when a human vacates a slot, backfill it
+    // with a fresh bot on the SAME team so teams never fall short.
+    const team = player?.team;
+    const wasHuman = !!player && !(player instanceof ServerBot);
+    if (wasHuman && team) {
+      const countOnTeam = [...this.players.values()].filter((p) => p.team === team).length;
+      const target = Number(process.env.SERVER_BOT_COUNT ?? 10);
+      if (countOnTeam < target) {
+        const names = ['Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren',
+          'Bishop', 'Kite', 'Onyx', 'Pike', 'Quill', 'Riven', 'Sable', 'Talon'];
+        this.addBot(team, `🤖 ${names[Math.floor(Math.random() * names.length)]}`);
+        log.info(`backfill bot spawned for team=${team} to keep ${target}v${target}`);
+      }
+    }
   }
 
   /**
