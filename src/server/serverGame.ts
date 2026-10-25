@@ -529,6 +529,16 @@ export class ServerGame {
         } else {
           player.position = this.getSpawnPosition(message.team);
         }
+        // Rejoining connections must never start life dead/eliminated: clear any
+        // stale death/spectate state and pending respawn timers from a previous
+        // session before the join is acknowledged ("spawn already dead" bug).
+        this.respawnTimers.delete(playerId);
+        if (!player.isSpectating) {
+          player.respawn(player.position);
+        } else {
+          player.hp = player.maxHp;
+          player.isDead = false;
+        }
         this.broadcast({
           type: 'playerUpdated',
           playerId,
