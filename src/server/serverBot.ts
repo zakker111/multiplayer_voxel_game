@@ -205,6 +205,20 @@ export class ServerBot extends ServerPlayer {
   // ---------------- State transitions ----------------
 
   private transition(state: BotState, now: number, duration: number): void {
+    // Never interrupt a trench mid-dig: the wall is only useful if it gets
+    // finished, so random re-decisions (GRABFLAG coin-flips, BUILD rolls,
+    // wander timers) must not cancel it. Explicit overrides still apply:
+    // carryingFlag -> RETURN and needsRetreat -> RETREAT are checked earlier
+    // in botUpdate() and call transition('RETURN'/'RETREAT'), which is allowed.
+    if (this.botState === 'TRENCH') {
+      if (state !== 'RETURN' && state !== 'RETREAT') {
+        // Still refresh the timer so doTrench()'s "done digging" hold logic
+        // doesn't expire while we're mid-wall and keep us locked in TRENCH.
+        this.stateUntil = now + Math.max(duration, 2);
+        return;
+      }
+      this.trenchPlan = null; // abandoning the dig to flee/return the flag
+    }
     if (this.botState !== state) {
       this.botState = state;
       this.waypoint = null;

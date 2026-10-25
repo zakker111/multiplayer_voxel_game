@@ -14,7 +14,7 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "pretest": "esbuild src/server/serverWorld.ts --bundle --platform=node --format=cjs --outfile=dist/tests/serverWorld.cjs --log-level=error",
+    "pretest": "esbuild src/server/serverWorld.ts --bundle --platform=node --format=cjs --outfile=dist/tests/serverWorld.cjs --log-level=error && esbuild src/server/serverBot.ts --bundle --platform=node --format=cjs --outfile=dist/tests/serverBot.cjs --external:./serverWorld --log-level=error && esbuild src/shared/types.ts --bundle --platform=node --format=cjs --outfile=dist/tests/sharedTypes.cjs --log-level=error",
     "test": "node --test tests/"
   },
   "dependencies": {
