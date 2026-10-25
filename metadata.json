@@ -1,6 +1,8 @@
 {
   "name": "Voxel FPS",
-  "description": "Voxel FPS multiplayer game featuring Red vs Blue Capture the Flag with destructible terrain and bot combat.",
+  "description": "Voxel FPS: server-authoritative Red vs Blue Capture-the-Flag multiplayer with destructible/buildable voxel terrain, always-10v10 tactical AI bots (trench building), admin kick/ban CLI, and Render-ready auto-deploy. Three.js + React + TypeScript + Node/ws.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
