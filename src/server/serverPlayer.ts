@@ -12,6 +12,7 @@ import {
   CROUCH_HEIGHT,
   PLAYER_RADIUS,
   WORLD_SIZE,
+  GROUND_LEVEL,
 } from '../shared/types';
 import { ServerWorld } from './serverWorld';
 
@@ -101,25 +102,33 @@ export class ServerPlayer {
     }
   }
 
+  isAlive(): boolean {
+    return !this.isDead && !this.isSpectating;
+  }
+
   update(dt: number, world: ServerWorld): void {
     if (this.isDead) return;
-    
+
     // Skip physics and movement for spectators
     if (this.isSpectating) {
       this.updateReload();
       return;
     }
-    
+
     this.updateReload();
-    
-    // Check for footstep generation
-    if (this.shouldPlayFootstep(dt, world)) {
+
+    // The client is authoritative on position (sent via playerInput), so derive
+    // "grounded" from the player's Y level instead of running full physics here.
+    this.isGrounded = Math.abs(this.position.y - GROUND_LEVEL) < 0.6;
+
+    // Check for footstep generation (throttled via lastFootstepTime + serverTime)
+    if (this.shouldPlayFootstep(world)) {
       this.lastFootstepTime = world.serverTime;
       // Footstep will be sent via serverGame broadcast
     }
   }
   
-  private shouldPlayFootstep(dt: number, world: ServerWorld): boolean {
+  private shouldPlayFootstep(world: ServerWorld): boolean {
     // Only play footsteps when moving and grounded
     const moveSpeed = Math.sqrt(this.input.moveX * this.input.moveX + this.input.moveZ * this.input.moveZ);
     if (moveSpeed < 0.1 || !this.isGrounded) return false;

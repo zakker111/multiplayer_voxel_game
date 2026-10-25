@@ -208,11 +208,31 @@ export class VoxelWorld {
       return false;
     }
 
-    // Check if this is a "built" voxel (not natural terrain)
-    // Built voxels need support within 12 blocks
+    // A block must attach to something: either adjacent to an existing solid
+    // voxel, or resting at/below ground level. Without this check, placement
+    // into mid-air fails the support flood-fill (it starts from an empty cell),
+    // which was the bug preventing voxels from being placed.
+    const hasAdjacentSolid =
+      this.isSolid(x + 1, y, z) ||
+      this.isSolid(x - 1, y, z) ||
+      this.isSolid(x, y + 1, z) ||
+      this.isSolid(x, y - 1, z) ||
+      this.isSolid(x, y, z + 1) ||
+      this.isSolid(x, y, z - 1);
+
+    if (!hasAdjacentSolid && y > GROUND_LEVEL) {
+      return false;
+    }
+
+    // Built voxels need structural support within 12 blocks (connectivity to ground).
+    // The flood-fill must start from the *filled* cell, so temporarily mark it solid.
     if (y > GROUND_LEVEL) {
-      // Check if there's support below or within 12 blocks
-      if (!this.hasSupport(x, y, z, 12)) {
+      const chunk = this.getOrCreateChunk(x, z);
+      const key = this.key(x, y, z);
+      chunk.voxels.set(key, { type: VOXEL_BUILT, durability: 3 });
+      const supported = this.hasSupport(x, y, z, 12);
+      chunk.voxels.delete(key);
+      if (!supported) {
         return false;
       }
     }
