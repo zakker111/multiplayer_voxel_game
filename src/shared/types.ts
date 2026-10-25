@@ -74,8 +74,15 @@ export interface PlayerInput {
 }
 
 // Server -> Client messages
+export interface FlagSnapshot {
+  atBase: boolean;
+  carrierId: string | null;
+  respawnTimer: number;
+  droppedPosition: Position | null;
+}
+
 export type ServerMessage =
-  | { type: 'init'; playerId: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; inventory?: number; voxelChanges?: VoxelChange[] }
+  | { type: 'init'; playerId: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot } }
   | { type: 'gameState'; state: GameState }
   | { type: 'playerJoined'; playerId: string; state: PlayerState }
   | { type: 'playerLeft'; playerId: string }
@@ -126,7 +133,7 @@ export const PLAYER_RADIUS = 0.3;
 
 export const WEAPONS = {
   rifle: { fireRate: 0.4, damage: { head: 100, body: 34 }, spread: 0.0005 },
-  smg: { fireRate: 0.1, damage: { head: 100, body: 34 }, spread: 0.04 },
+  smg: { fireRate: 0.1, damage: { head: 34, body: 20 }, spread: 0.04 },
 };
 
 export const TOOLS = {

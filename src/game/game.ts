@@ -336,6 +336,11 @@ export class Game {
 
   blueFlag!: Flag;
   redFlag!: Flag;
+  // Server-authoritative flag status (online mode) for rendering sync
+  serverBlueFlagAtBase: boolean = true;
+  serverRedFlagAtBase: boolean = true;
+  serverBlueFlagCarrierId: string | null = null;
+  serverRedFlagCarrierId: string | null = null;
   captureZoneSize: number = 4;
 
   gameMode: GameMode = 'multiplayer';
@@ -343,7 +348,7 @@ export class Game {
   networkClient: NetworkClient | null = null;
   serverUrl?: string;
   playerName?: string;
-  remotePlayers: Map<string, { mesh: THREE.Group; state: PlayerState; targetPosition: THREE.Vector3; targetRotation: THREE.Euler; lastShootingTime: number }> = new Map();
+  remotePlayers: Map<string, { mesh: THREE.Group; state: PlayerState; targetPosition: THREE.Vector3; targetRotation: THREE.Euler; lastShootingTime: number; flagMesh?: THREE.Group }> = new Map();
   localPlayerId: string | null = null;
   lastInputSendTime: number = 0;
   inputSendRate: number = 50;
@@ -472,9 +477,8 @@ export class Game {
     }
 
     if (this.gameMode === 'online') {
-      console.log('Populating arena with tactical squad bots...');
-      this.spawnTeamBots('blue', 5);
-      this.spawnTeamBots('red', 5);
+      // Server spawns authoritative AI bots in online mode; spawning client-side
+      // bots here would create duplicates/ghosts alongside the server ones.
       this.initializeNetwork();
     }
     
@@ -819,7 +823,70 @@ export class Game {
     }
   }
 
+  /**
+   * Online-mode flag rendering: the server owns ALL flag logic (pickup,
+   * drop, return, capture) and broadcasts events. Here we only sync visuals:
+   * hide taken flags, pulse dropped ones, and reposition them from events.
+   */
+  private updateFlagsVisualsOnline(): void {
+    const applyState = (flag: Flag, atBase: boolean, carrierId: string | null) => {
+      if (atBase) {
+        if (!flag.mesh.visible || flag.isDropped || flag.isCaptured || flag.carrier) {
+          this.resetFlagToBase(flag);
+        }
+        flag.light.intensity = 3;
+        flag.clothMesh.rotation.y = Math.sin(performance.now() * 0.003) * 0.3;
+        return;
+      }
+      if (carrierId) {
+        // Carried: invisible at its post (the carrier wears a backpack flag)
+        flag.mesh.visible = false;
+        flag.light.intensity = 0;
+        return;
+      }
+      // Dropped somewhere on the battlefield (position set by flagDropped event)
+      flag.mesh.visible = true;
+      flag.mesh.position.copy(flag.currentPos);
+      flag.light.intensity = 2 + Math.sin(performance.now() * 0.01) * 1.5;
+    };
+
+    applyState(this.blueFlag, this.serverBlueFlagAtBase, this.serverBlueFlagCarrierId);
+    applyState(this.redFlag, this.serverRedFlagAtBase, this.serverRedFlagCarrierId);
+
+    // Show a little flag on the back of whichever remote player carries it
+    for (const [, remote] of this.remotePlayers) {
+      const carrying = !!remote.state.carryingFlag;
+      if (!remote.flagMesh) {
+        if (!carrying) continue;
+        const backpackFlagGroup = new THREE.Group();
+        const poleGeo = new THREE.CylinderGeometry(0.014, 0.014, 1.0, 6);
+        const poleMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+        const flagPole = new THREE.Mesh(poleGeo, poleMat);
+        flagPole.position.set(0, 0.5, 0);
+        backpackFlagGroup.add(flagPole);
+        const flagClothColor = remote.state.team === 'blue' ? 0xee2222 : 0x2266ee;
+        const clothGeo = new THREE.BoxGeometry(0.02, 0.35, 0.45);
+        const clothMat = new THREE.MeshLambertMaterial({ color: flagClothColor });
+        const flagCloth = new THREE.Mesh(clothGeo, clothMat);
+        flagCloth.position.set(0, 0.75, 0.23);
+        backpackFlagGroup.add(flagCloth);
+        backpackFlagGroup.position.set(0, 1.1, 0.22);
+        remote.mesh.add(backpackFlagGroup);
+        remote.flagMesh = backpackFlagGroup;
+      }
+      remote.flagMesh.visible = carrying;
+    }
+  }
+
   private updateFlags(dt: number): void {
+    // In online mode the server owns all flag state (pickup / drop / return /
+    // capture are broadcast as events). The client only renders those events,
+    // so running local pickup/capture logic here would double-score and desync.
+    if (this.gameMode === 'online') {
+      this.updateFlagsVisualsOnline();
+      return;
+    }
+
     const flags = [this.blueFlag, this.redFlag];
 
     for (const flag of flags) {
@@ -1594,6 +1661,48 @@ export class Game {
       if (typeof msg.inventory === 'number') {
         this.inventory = msg.inventory;
       }
+      // Apply authoritative flag snapshot (late-joiner sync)
+      if (msg.flags) {
+        const applyFlagSnapshot = (team: 'blue' | 'red') => {
+          const f = msg.flags[team];
+          if (!f) return;
+          const flag = team === 'blue' ? this.blueFlag : this.redFlag;
+          if (team === 'blue') {
+            this.serverBlueFlagAtBase = !!f.atBase;
+            this.serverBlueFlagCarrierId = f.carrierId ?? null;
+          } else {
+            this.serverRedFlagAtBase = !!f.atBase;
+            this.serverRedFlagCarrierId = f.carrierId ?? null;
+          }
+          if (f.atBase) {
+            this.resetFlagToBase(flag);
+          } else if (f.droppedPosition) {
+            flag.currentPos.set(f.droppedPosition.x, f.droppedPosition.y + 0.5, f.droppedPosition.z);
+            flag.mesh.position.copy(flag.currentPos);
+            flag.carrier = null;
+            flag.isDropped = true;
+            flag.isCaptured = false;
+            flag.mesh.visible = true;
+          } else if (f.respawnTimer > 0) {
+            // Captured and respawning: hidden until server returns it
+            flag.carrier = null;
+            flag.isDropped = false;
+            flag.isCaptured = true;
+            flag.capturedTimer = f.respawnTimer;
+            flag.mesh.visible = false;
+            flag.light.intensity = 0;
+          } else {
+            // Carried by someone (or just taken): hidden at post
+            flag.carrier = null;
+            flag.isDropped = false;
+            flag.isCaptured = false;
+            flag.mesh.visible = false;
+            flag.light.intensity = 0;
+          }
+        };
+        applyFlagSnapshot('blue');
+        applyFlagSnapshot('red');
+      }
       if (msg.voxelChanges && Array.isArray(msg.voxelChanges) && msg.voxelChanges.length > 0) {
         for (const change of msg.voxelChanges) {
           this.world.setVoxel(change.x, change.y, change.z, change.type, change.durability);
@@ -1661,14 +1770,18 @@ export class Game {
       }
     });
 
-    // Handle local player damaged
+    // Handle player damaged. The server ALSO broadcasts a full-state sync
+    // (playerUpdated) right after damage, so applying the delta locally too
+    // would double every hit (two shots killing from full HP). Trust the
+    // authoritative state sync for HP; use this event only for feedback.
     this.networkClient.onMessage('playerDamaged', (msg: any) => {
       if (msg.playerId === this.localPlayerId) {
-        this.player.takeDamage(msg.damage);
-        this.sounds.hurt();
+        if (!this.player.isDead) {
+          this.sounds.hurt();
+        }
       } else {
         const remote = this.remotePlayers.get(msg.playerId);
-        if (remote) {
+        if (remote && !remote.state.isDead) {
           remote.state.hp = Math.max(0, remote.state.hp - msg.damage);
         }
       }
@@ -1677,10 +1790,13 @@ export class Game {
     // Handle player died
     this.networkClient.onMessage('playerDied', (msg: any) => {
       if (msg.playerId === this.localPlayerId) {
-        this.player.die();
-        this.player.respawnTimer = 4;
-        this.sounds.deathSound();
-        this.showMessage('☠️ You were eliminated! Respawning in 4s...');
+        // Guard against re-applying death (double respawn timers / sounds)
+        if (!this.player.isDead) {
+          this.player.die();
+          this.player.respawnTimer = 4;
+          this.sounds.deathSound();
+          this.showMessage('☠️ You were eliminated! Respawning in 4s...');
+        }
       } else {
         const remote = this.remotePlayers.get(msg.playerId);
         if (remote) {
@@ -1745,16 +1861,22 @@ export class Game {
     this.networkClient.onMessage('flagPickedUp', (msg: any) => {
       const isLocal = msg.playerId === this.localPlayerId;
       const flag = msg.flagTeam === 'blue' ? this.blueFlag : this.redFlag;
+      // Track server-authoritative carrier for online rendering
+      if (msg.flagTeam === 'blue') {
+        this.serverBlueFlagAtBase = false;
+        this.serverBlueFlagCarrierId = msg.playerId;
+      } else {
+        this.serverRedFlagAtBase = false;
+        this.serverRedFlagCarrierId = msg.playerId;
+      }
       if (flag) {
         flag.isDropped = false;
         flag.mesh.visible = false; // Flag disappears when taken until returned
         if (isLocal) {
           this.player.carryingFlag = true;
-          flag.carrier = { isPlayer: true, name: 'You' };
           this.sounds.flagPickup();
           this.showMessage(`🚩 YOU TOOK THE ${msg.flagTeam.toUpperCase()} FLAG! RUN TO BASE!`);
         } else {
-          flag.carrier = { isPlayer: false, name: `Player ${msg.playerId.slice(-4)}` };
           this.sounds.flagAlarm();
           this.showMessage(`⚠️ ${msg.flagTeam.toUpperCase()} FLAG TAKEN by Player ${msg.playerId.slice(-4)}!`);
         }
@@ -1764,6 +1886,9 @@ export class Game {
     // Handle flag dropped
     this.networkClient.onMessage('flagDropped', (msg: any) => {
       const flag = msg.flagTeam === 'blue' ? this.blueFlag : this.redFlag;
+      // Server says the flag is no longer carried, it's on the ground now
+      if (msg.flagTeam === 'blue') this.serverBlueFlagCarrierId = null;
+      else this.serverRedFlagCarrierId = null;
       if (flag) {
         flag.currentPos.set(msg.position.x, msg.position.y + 0.5, msg.position.z);
         flag.mesh.position.copy(flag.currentPos);
@@ -1777,6 +1902,13 @@ export class Game {
     // Handle flag returned
     this.networkClient.onMessage('flagReturned', (msg: any) => {
       const flag = msg.flagTeam === 'blue' ? this.blueFlag : this.redFlag;
+      if (msg.flagTeam === 'blue') {
+        this.serverBlueFlagAtBase = true;
+        this.serverBlueFlagCarrierId = null;
+      } else {
+        this.serverRedFlagAtBase = true;
+        this.serverRedFlagCarrierId = null;
+      }
       if (flag) {
         this.resetFlagToBase(flag);
         this.showMessage(`🛡️ ${msg.flagTeam.toUpperCase()} FLAG RETURNED TO BASE!`);
@@ -1788,6 +1920,16 @@ export class Game {
       this.blueCaptures = msg.captures.blue;
       this.redCaptures = msg.captures.red;
       const capturedFlag = msg.team === 'blue' ? this.redFlag : this.blueFlag;
+      const capturedTeam = msg.team === 'blue' ? 'red' : 'blue';
+      // Captured flag disappears and respawns after the server timer; clear
+      // our authoritative tracking so visuals don't fight the event state
+      if (capturedTeam === 'blue') {
+        this.serverBlueFlagAtBase = false;
+        this.serverBlueFlagCarrierId = null;
+      } else {
+        this.serverRedFlagAtBase = false;
+        this.serverRedFlagCarrierId = null;
+      }
       if (capturedFlag) {
         // Disappear upon capture!
         capturedFlag.carrier = null;
@@ -2835,7 +2977,9 @@ export class Game {
         w.isReloading = false;
       }
     }
-    this.inventory = 0;
+    // Restore build blocks on respawn (server also sends inventoryUpdated=20
+    // in online mode; local games have no server so set it here too)
+    this.inventory = Math.max(this.inventory, 20);
     this.player.carryingFlag = false;
     this.isReloadAnimating = false;
     this.reloadAnimationTime = 0;
