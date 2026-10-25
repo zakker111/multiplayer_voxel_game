@@ -394,6 +394,10 @@ export class Game {
   networkClient: NetworkClient | null = null;
   serverUrl?: string;
   playerName?: string;
+  /** Timestamp (ms) of the last client-initiated respawn request — used by the
+   *  online safety net so a dropped/raced playerRespawned event can never leave
+   *  the player permanently stuck dead at spawn. */
+  private lastRespawnRequestTime = 0;
   remotePlayers: Map<string, { mesh: THREE.Group; state: PlayerState; targetPosition: THREE.Vector3; targetRotation: THREE.Euler; lastShootingTime: number; flagMesh?: THREE.Group; damageFlashTimer: number }> = new Map();
 
   // ---- Tab-held scoreboard state ----
@@ -1780,10 +1784,13 @@ export class Game {
           this.player.position.set(st.position.x, st.position.y, st.position.z);
         }
         this.player.velocity.set(0, 0, 0);
-        if (typeof st.hp === 'number') {
-          this.player.hp = st.hp;
-        }
-        this.player.isDead = !!st.isDead;
+        // Force alive on join: never let a stale/dead server snapshot leave the
+        // client in an eliminated state at spawn. The server's requestRespawn
+        // handler guarantees a fresh full-HP spawn; if any event races or drops,
+        // this ensures the local player starts alive and can move/shoot.
+        this.player.isDead = false;
+        this.player.respawnTimer = 0;
+        this.player.hp = typeof st.hp === 'number' ? Math.max(st.hp, 1) : 100;
         if (st.team === 'red' || st.team === 'blue') {
           this.playerTeam = st.team;
         }
@@ -2388,8 +2395,9 @@ export class Game {
 
   private onWheel(e: WheelEvent): void {
     if (this.isSpectating) {
-      // Adjust drone flight speed
-      this.spectatorSpeed = Math.max(10, Math.min(90, this.spectatorSpeed - e.deltaY * 0.04));
+      // Adjust drone flight speed (min lowered so the cam can crawl for slow
+      // inspection instead of being clamped to a fast minimum)
+      this.spectatorSpeed = Math.max(4, Math.min(90, this.spectatorSpeed - e.deltaY * 0.04));
       this.showMessage(`🚀 Spectator Flight Speed: ${Math.round(this.spectatorSpeed)} m/s (Scroll to adjust)`);
       return;
     }
@@ -3347,6 +3355,20 @@ export class Game {
   private animate = (): void => {
     requestAnimationFrame(this.animate);
     const dt = Math.min(this.clock.getDelta(), 0.05);
+
+    // Online safety net: if the local player is stuck dead for >6s while
+    // connected (e.g. a playerRespawned event was dropped or raced with join),
+    // re-request a server-authoritative safe spawn so they can never remain
+    // permanently eliminated at spawn ("join already dead" bug).
+    if (
+      this.networkClient?.isConnected() &&
+      this.localPlayerId &&
+      this.player.isDead &&
+      Date.now() - this.lastRespawnRequestTime > 6000
+    ) {
+      this.lastRespawnRequestTime = Date.now();
+      this.networkClient.sendRequestRespawn();
+    }
 
     this.player.update(dt);
     this.world.update();
