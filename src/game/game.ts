@@ -1,9 +1,20 @@
 import * as THREE from 'three';
-import { VoxelWorld, VOXEL_BUILT, VOXEL_SIZE } from './world';
+import { VoxelWorld, VOXEL_BUILT, VOXEL_SIZE, WORLD_SIZE, CHUNK_SIZE } from './world';
 import { Player } from './player';
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
 import { PlayerState, PlayerInput, Position, PlayerStats } from '../shared/types';
+// Local copies previously drifted from the server (shared/types) values;
+// now sourced from the shared module so client and server agree on spawns/flags.
+import {
+  BLUE_SPAWN_Z_MIN,
+  BLUE_SPAWN_Z_MAX,
+  RED_SPAWN_Z_MIN,
+  RED_SPAWN_Z_MAX,
+  SPAWN_X_RANGE,
+  BLUE_FLAG_POS,
+  RED_FLAG_POS,
+} from '../shared/types';
 
 /* ---------- Tab-held scoreboard data model ---------- */
 
@@ -47,7 +58,8 @@ const FOV = 75;
 const SKY_COLOR = 0x87CEEB;
 const FOG_COLOR = 0x87CEEB;
 const RENDER_DISTANCE = 60;
-const CHUNK_SIZE = 16;
+// CHUNK_SIZE is imported from ./world (shared with server constants) — the
+// old local copy here risked drifting out of sync when the map was resized.
 const TEXTURE_SCALE = 16;
 
 export type EquipmentType = 'rifle' | 'smg' | 'spade' | 'pickaxe';
@@ -239,18 +251,6 @@ const TEAM_COLORS: Record<Team, { body: number; accent: number; legs: number; la
   red: { body: 0xcc2222, accent: 0xff4444, legs: 0x661111, label: 'RED' },
   blue: { body: 0x2244cc, accent: 0x4488ff, legs: 0x112266, label: 'BLUE' },
 };
-
-// Local copies previously drifted from the server (shared/types) values;
-// now sourced from the shared module so client and server agree on spawns/flags.
-import {
-  BLUE_SPAWN_Z_MIN,
-  BLUE_SPAWN_Z_MAX,
-  RED_SPAWN_Z_MIN,
-  RED_SPAWN_Z_MAX,
-  SPAWN_X_RANGE,
-  BLUE_FLAG_POS,
-  RED_FLAG_POS,
-} from '../shared/types';
 
 export class Game {
   scene: THREE.Scene;
@@ -965,10 +965,17 @@ export class Game {
     // appear twice (e.g. one ghost on a back + one at the post).
     const blueCarried = !this.serverBlueFlagAtBase && !!this.serverBlueFlagCarrierId;
     const redCarried = !this.serverRedFlagAtBase && !!this.serverRedFlagCarrierId;
-    for (const [, remote] of this.remotePlayers) {
+    for (const [id, remote] of this.remotePlayers) {
+      // Bind backpack-flag visibility to the AUTHORITATIVE server carrier id,
+      // not just the per-player `carryingFlag` hint: a flag can exist on at
+      // most one back. If a client-reported flag desyncs from the server's
+      // carrier list, the server wins and the ghost copy is hidden — this is
+      // what prevents "two flags" (one carried + one still on the post).
+      const heldByThisRemote =
+        (remote.state.team === 'blue' && redCarried && this.serverRedFlagCarrierId === id) ||
+        (remote.state.team === 'red' && blueCarried && this.serverBlueFlagCarrierId === id);
       if (!remote.flagMesh) {
-        const carrying = !!remote.state.carryingFlag;
-        if (!carrying) continue;
+        if (!heldByThisRemote) continue;
         const backpackFlagGroup = new THREE.Group();
         const poleGeo = new THREE.CylinderGeometry(0.014, 0.014, 1.0, 6);
         const poleMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
@@ -985,7 +992,7 @@ export class Game {
         remote.mesh.add(backpackFlagGroup);
         remote.flagMesh = backpackFlagGroup;
       }
-      remote.flagMesh.visible = carrying;
+      remote.flagMesh.visible = heldByThisRemote;
     }
   }
 
@@ -3844,8 +3851,11 @@ export class Game {
         continue;
       }
 
-      // Safety: Void / fall check for bots
-      if (bot.position.y < -5 || bot.position.y > 60 || Math.abs(bot.position.x) > 155 || Math.abs(bot.position.z) > 155) {
+      // Safety: Void / fall check for bots. Bounds derive from the shared
+      // WORLD_SIZE (map was enlarged; old hardcoded ±155 tele-killed bots in
+      // the outer field that is now playable terrain).
+      const VOID_BOUND = WORLD_SIZE / 2 - CHUNK_SIZE / 2;
+      if (bot.position.y < -5 || bot.position.y > 60 || Math.abs(bot.position.x) > VOID_BOUND || Math.abs(bot.position.z) > VOID_BOUND) {
         bot.hp = 0;
         bot.isDead = true;
         bot.mesh.visible = false;

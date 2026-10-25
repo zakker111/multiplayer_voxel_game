@@ -541,8 +541,12 @@ export class ServerBot extends ServerPlayer {
     let startX = cx - 2;
     for (let dx = -6; dx <= 6; dx++) {
       const gx = cx + dx;
-      for (let h = 1; h <= 2; h++) {
-        const v = ctx.world.getVoxel(gx, ctx.world.getGroundHeight(gx, frontZ) + h, frontZ);
+      // Scan the two wall-course levels directly: getGroundHeight() returns
+      // the first AIR cell, so an existing built wall sits AT ground height —
+      // probing gy+1/gy+2 would scan empty air above it and miss link-ups.
+      const gy0 = ctx.world.getGroundHeight(gx, frontZ);
+      for (let h = 0; h <= 1; h++) {
+        const v = ctx.world.getVoxel(gx, gy0 + h, frontZ);
         if (v && v.type === VOXEL_BUILT) {
           startX = Math.min(startX, gx - 1);
           break;
@@ -551,27 +555,34 @@ export class ServerBot extends ServerPlayer {
     }
     const endX = cx + 2;
 
+    // NOTE on heights: getGroundHeight() already returns the first free (air)
+    // cell above terrain, so the lowest wall block goes AT gy, not gy+1.
+    // Placing at gy+1 left every block floating one cell in the air, which
+    // canBuild() rejected (no support) — bastions silently built zero blocks.
     for (let x = startX; x <= endX; x++) {
       const gy = ctx.world.getGroundHeight(x, frontZ);
-      for (let h = 1; h <= 2; h++) {
+      for (let h = 0; h <= 1; h++) {
         // Firing port at head height in the middle — keep LOS through the wall
-        const isPort = h === 2 && x === cx;
+        const isPort = h === 1 && x === cx;
         if (!isPort) cells.push({ x, y: gy + h, z: frontZ });
       }
     }
-    // Corner columns (sniper platforms) when budget allows
+    // Corner columns (sniper platforms) when budget allows. These are stacked
+    // ON TOP of the 2-high wall, so they're planned LAST — doBuild consumes
+    // the plan sequentially and a floating cell would fail its support check.
+    // L ramp behind the wall: step up so the bot can crest its own position.
+    // The ramp starts at ground level too (gyBack, not gyBack+1).
+    const backZ = cz - towardEnemy * 1;
+    const gyBack = ctx.world.getGroundHeight(cx - 1, backZ);
+    cells.push({ x: cx - 1, y: gyBack, z: backZ });
+    cells.push({ x: cx - 1, y: gyBack, z: backZ - towardEnemy });
+    cells.push({ x: cx, y: gyBack + 1, z: backZ - towardEnemy });
     if (this.remainingBlocks > 18) {
       for (const x of [startX, endX]) {
         const gy = ctx.world.getGroundHeight(x, frontZ);
-        cells.push({ x, y: gy + 3, z: frontZ });
+        cells.push({ x, y: gy + 2, z: frontZ });
       }
     }
-    // L ramp behind the wall: step up so the bot can crest its own position
-    const backZ = cz - towardEnemy * 1;
-    const gyBack = ctx.world.getGroundHeight(cx - 1, backZ);
-    cells.push({ x: cx - 1, y: gyBack + 1, z: backZ });
-    cells.push({ x: cx - 1, y: gyBack + 1, z: backZ - towardEnemy });
-    cells.push({ x: cx, y: gyBack + 2, z: backZ - towardEnemy });
     return cells;
   }
 
@@ -608,23 +619,30 @@ export class ServerBot extends ServerPlayer {
     // Full budget -> 9-wide wall (22 cells + parapets), trickle -> 3-wide stub.
     const budget = this.remainingBlocks;
     const half = budget >= 24 ? 4 : budget >= 16 ? 3 : budget >= 10 ? 2 : 1;
+    // Wall row sits 2 cells on the friendly side of the bot (away from the
+    // enemy flag it is facing). getGroundHeight() returns the first AIR cell
+    // above the topmost solid voxel, so the lowest wall block must rest AT
+    // that level (colGround), not colGround+1 — placing one higher left every
+    // cell floating in mid-air (canBuild rejects unsupported voxels) and the
+    // whole trench silently built zero blocks.
     const backOffset = -towardEnemy * 2; // wall on the side away from the enemy
     for (let dx = -half; dx <= half; dx++) {
       // Measure ground per column so sloped terrain doesn't produce a
       // ragged 1-high wall on the uphill end (old code used one flat height).
       const colGround = ctx.world.getGroundHeight(cx + dx, cz + backOffset);
       for (let h = 0; h < 2; h++) {
-        cells.push({ x: cx + dx, y: colGround + 1 + h, z: cz + backOffset });
+        cells.push({ x: cx + dx, y: colGround + h, z: cz + backOffset });
       }
       // Firing-step parapets at both ends
       if (Math.abs(dx) === half && budget >= 16) {
-        cells.push({ x: cx + dx, y: colGround + 3, z: cz + backOffset });
+        cells.push({ x: cx + dx, y: colGround + 2, z: cz + backOffset });
       }
     }
     // Anti-grenade / sniper roof over the center when dug under fire — only
     // if we can still afford the full wall afterwards (roof costs half+2).
+    // Built last (after the wall exists) so its support check passes.
     if (underFire && budget >= 20) {
-      const roofY = ctx.world.getGroundHeight(cx, cz) + 4;
+      const roofY = ctx.world.getGroundHeight(cx, cz) + 3;
       for (let dx = -1; dx <= 1; dx++) {
         cells.push({ x: cx + dx, y: roofY, z: cz + backOffset, roof: true });
       }

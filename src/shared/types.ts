@@ -13,7 +13,6 @@ export interface Rotation {
 
 export interface PlayerState {
   id: string;
-  name?: string;
   position: Position;
   rotation: Rotation;
   velocity: Position;

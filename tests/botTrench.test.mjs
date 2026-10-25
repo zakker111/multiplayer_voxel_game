@@ -73,13 +73,13 @@ test('bot enters TRENCH state and builds wall voxels end-to-end', () => {
   }
 
   // Trench shape sanity: cells form a wall line along X at roughly constant Z,
-  // with heights just above ground (groundY+1 .. groundY+3)
+  // with heights on/just above the terrain surface (groundY .. groundY+3).
   const zs = new Set(built.map((c) => c.z));
   assert.equal(zs.size, 1, 'trench wall should lie on a single Z row');
   const xs = built.map((c) => c.x);
   assert.ok(Math.max(...xs) - Math.min(...xs) >= 4, 'wall should span several blocks along X');
   for (const c of built) {
-    assert.ok(c.y > GROUND_Y, 'trench cells sit above ground level');
+    assert.ok(c.y >= GROUND_Y, `trench cell ${JSON.stringify(c)} at or above base ground level`);
     assert.ok(c.y <= GROUND_Y + 3, 'trench cells stay within wall height');
   }
 });
