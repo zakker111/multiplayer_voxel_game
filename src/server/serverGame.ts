@@ -1126,31 +1126,34 @@ export class ServerGame {
     if (player.carryingFlag) {
       player.carryingFlag = false;
       
+      // Snap the dropped flag to solid ground so clients (and late joiners
+      // reading the init snapshot) never render it floating in mid-air.
+      const dropY = this.world.getGroundHeight(player.position.x, player.position.z);
       if (this.blueFlagCarrier === playerId) {
         this.blueFlagCarrier = null;
         this.droppedFlags.push({
-          position: { ...player.position },
+          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
           team: 'blue',
           respawnTimer: 60,
         });
-        
+
         this.broadcast({
           type: 'flagDropped',
-          position: { ...player.position },
+          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
           flagTeam: 'blue',
           playerId,
         });
       } else if (this.redFlagCarrier === playerId) {
         this.redFlagCarrier = null;
         this.droppedFlags.push({
-          position: { ...player.position },
+          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
           team: 'red',
           respawnTimer: 60,
         });
-        
+
         this.broadcast({
           type: 'flagDropped',
-          position: { ...player.position },
+          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
           flagTeam: 'red',
           playerId,
         });
