@@ -11,7 +11,9 @@
     "start": "node dist/server.cjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "pretest": "esbuild src/server/serverWorld.ts --bundle --platform=node --format=cjs --outfile=dist/tests/serverWorld.cjs --log-level=error",
+    "test": "node --test tests/"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.1.0",
