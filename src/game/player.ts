@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { VoxelWorld } from './world';
-import { BLUE_SPAWN_Z_MIN, BLUE_SPAWN_Z_MAX, RED_SPAWN_Z_MIN, RED_SPAWN_Z_MAX, SPAWN_X_RANGE } from '../shared/types';
+import { BLUE_SPAWN_Z_MIN, BLUE_SPAWN_Z_MAX, RED_SPAWN_Z_MIN, RED_SPAWN_Z_MAX, SPAWN_X_RANGE, isOutOfWorld } from '../shared/types';
 
 export class Player {
   camera: THREE.PerspectiveCamera;
@@ -415,8 +415,11 @@ export class Player {
       this.velocity.y = 0;
     }
 
-    // Safety: if player falls into void, eliminate them so they respawn properly at base
-    if (newPos.y < -8 || Math.abs(newPos.x) > 124 || Math.abs(newPos.z) > 124) {
+    // Safety: if player falls into void, eliminate them so they respawn properly at base.
+    // The bounds come from the shared world size — spawn zones sit at |z| 200..220,
+    // so any smaller hardcoded extent makes every freshly spawned player "fall out
+    // of the world" and get eliminated on the first frame ("spawns eliminated").
+    if (isOutOfWorld(newPos)) {
       this.hp = 0;
       this.die();
       return;
