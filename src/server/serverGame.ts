@@ -252,7 +252,10 @@ export class ServerGame {
       target.noteHitBy(attackerId, this.world.serverTime);
     }
 
-    this.sendToPlayer(targetId, { type: 'hitConfirmed', targetId: attackerId, damage, isHeadshot: false });
+    // Confirm the hit to the SHOOTER, not the victim: the client renders the
+    // hit marker + headshot sound from this event, so sending it to the victim
+    // made players see "you hit someone" feedback whenever a bot shot them.
+    this.sendToPlayer(attackerId, { type: 'hitConfirmed', targetId, damage, isHeadshot: false });
 
     this.broadcast({ type: 'playerDamaged', playerId: targetId, damage, attackerId });
     this.broadcast({ type: 'playerUpdated', playerId: targetId, state: target.getState() });
@@ -380,14 +383,18 @@ export class ServerGame {
 
   removePlayer(playerId: string): void {
     const player = this.players.get(playerId);
+
+    // Drop any carried flag BEFORE the player is deleted. handlePlayerDeath()
+    // bails out when the player is already gone, which used to strand the flag
+    // on a disconnected ghost carrier and deadlock the round.
+    this.dropCarriedFlag(playerId);
+
     this.players.delete(playerId);
     this.connections.delete(playerId);
     this.inventories.delete(playerId);
     this.lastShootTime.delete(playerId);
     this.lastToolTime.delete(playerId);
     this.respawnTimers.delete(playerId);
-    
-    this.handlePlayerDeath(playerId); // drop any carried flag cleanly
     
     this.broadcast({
       type: 'playerLeft',
@@ -590,6 +597,9 @@ export class ServerGame {
         break;
 
       case 'toggleSpectator':
+        // A spectator is frozen out of play, so a flag they were carrying would
+        // be stranded on a non-moving player forever — drop it first.
+        if (!player.isSpectating) this.dropCarriedFlag(playerId);
         player.isSpectating = !player.isSpectating;
         this.broadcast({
           type: 'spectatorToggled',
@@ -616,6 +626,29 @@ export class ServerGame {
         // place them inside enemy lines/terrain where hazards kill them on
         // the very first tick ("instant elimination on join" bug).
         {
+          if (!player.isDead) {
+            // Already alive: the server owns this player's position. Re-assert
+            // it so a client that wrongly believes it died (e.g. a local
+            // void-fall) recovers, but never teleport a live player back to
+            // spawn — that was a free full-heal + escape (and let a flag
+            // carrier teleport home with the enemy flag).
+            this.broadcast({
+              type: 'playerRespawned',
+              playerId,
+              position: { ...player.position },
+            });
+            this.broadcast({
+              type: 'playerUpdated',
+              playerId,
+              state: player.getState(),
+            });
+            log.info(`player ${playerId} requested respawn while alive — re-asserted position`);
+            break;
+          }
+
+          // Dead: drop anything they were carrying at the death spot first.
+          this.dropCarriedFlag(playerId);
+
           const spawnPos = this.getSpawnPosition(player.team);
           player.respawn(spawnPos);
           // Clear any pending respawn timer so the scheduled respawn doesn't
@@ -1113,6 +1146,37 @@ export class ServerGame {
     });
   }
 
+  /**
+   * Drop any flag this player is carrying onto the ground at their feet.
+   *
+   * Every path that takes a carrier out of play (death, disconnect, entering
+   * spectator, teleport-respawn) MUST call this while the player still exists
+   * in `players`. Otherwise the carrier id keeps pointing at a player who is
+   * gone or frozen, no dropped-flag entry is created, and the flag can never be
+   * picked up, returned or captured again — the CTF round deadlocks.
+   */
+  private dropCarriedFlag(playerId: string): void {
+    const player = this.players.get(playerId);
+    if (!player || !player.carryingFlag) return;
+
+    player.carryingFlag = false;
+
+    // Snap the dropped flag to solid ground so clients (and late joiners
+    // reading the init snapshot) never render it floating in mid-air.
+    const dropY = this.world.getGroundHeight(player.position.x, player.position.z);
+    const position = { x: player.position.x, y: dropY + 0.5, z: player.position.z };
+
+    if (this.blueFlagCarrier === playerId) {
+      this.blueFlagCarrier = null;
+      this.droppedFlags.push({ position, team: 'blue', respawnTimer: 60 });
+      this.broadcast({ type: 'flagDropped', position, flagTeam: 'blue', playerId });
+    } else if (this.redFlagCarrier === playerId) {
+      this.redFlagCarrier = null;
+      this.droppedFlags.push({ position, team: 'red', respawnTimer: 60 });
+      this.broadcast({ type: 'flagDropped', position, flagTeam: 'red', playerId });
+    }
+  }
+
   private handlePlayerDeath(playerId: string): void {
     const player = this.players.get(playerId);
     if (!player) return;
@@ -1122,43 +1186,7 @@ export class ServerGame {
     this.getStats(playerId).deaths++;
     this.broadcastStats();
 
-    // Drop flag if carrying
-    if (player.carryingFlag) {
-      player.carryingFlag = false;
-      
-      // Snap the dropped flag to solid ground so clients (and late joiners
-      // reading the init snapshot) never render it floating in mid-air.
-      const dropY = this.world.getGroundHeight(player.position.x, player.position.z);
-      if (this.blueFlagCarrier === playerId) {
-        this.blueFlagCarrier = null;
-        this.droppedFlags.push({
-          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
-          team: 'blue',
-          respawnTimer: 60,
-        });
-
-        this.broadcast({
-          type: 'flagDropped',
-          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
-          flagTeam: 'blue',
-          playerId,
-        });
-      } else if (this.redFlagCarrier === playerId) {
-        this.redFlagCarrier = null;
-        this.droppedFlags.push({
-          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
-          team: 'red',
-          respawnTimer: 60,
-        });
-
-        this.broadcast({
-          type: 'flagDropped',
-          position: { x: player.position.x, y: dropY + 0.5, z: player.position.z },
-          flagTeam: 'red',
-          playerId,
-        });
-      }
-    }
+    this.dropCarriedFlag(playerId);
   }
 
   update(dt: number): void {

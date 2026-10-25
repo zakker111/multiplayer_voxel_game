@@ -60,18 +60,24 @@ async function startServer() {
   }
 
   const adminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    // The "localhost-only" fallback must be decided from the REAL socket address.
+    // X-Forwarded-For is client-controlled: behind a proxy (Render et al.) any
+    // remote caller could send "X-Forwarded-For: 127.0.0.1" and reach the
+    // kick/ban endpoints while ADMIN_TOKEN is unset. The forwarded value is
+    // still used for logging, and an unresolvable address is never "local".
+    const socketIp = normalizeIp(req.socket.remoteAddress);
     const ip = normalizeIp(
       typeof req.headers['x-forwarded-for'] === 'string'
         ? String(req.headers['x-forwarded-for']).split(',')[0].trim()
         : req.socket.remoteAddress,
     );
-    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip === 'unknown';
+    const isLocal = socketIp === '127.0.0.1' || socketIp === '::1' || socketIp === '::ffff:127.0.0.1';
     const header = req.headers.authorization || '';
     const provided = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token as string) || '';
     if (tokenOk(provided, ADMIN_TOKEN) && (ADMIN_TOKEN || isLocal)) {
       return next();
     }
-    log.warn(`admin request denied from ${ip}`);
+    log.warn(`admin request denied from ${ip} (socket ${socketIp})`);
     res.status(401).json({ error: 'Unauthorized: provide Authorization: Bearer <ADMIN_TOKEN>' });
   };
 
