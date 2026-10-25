@@ -1824,9 +1824,25 @@ export class Game {
           if (team === 'blue') {
             this.serverBlueFlagAtBase = !!f.atBase;
             this.serverBlueFlagCarrierId = f.carrierId ?? null;
+            if (!f.atBase && !f.carrierId && f.droppedPosition) {
+              this.blueFlag.currentPos.set(f.droppedPosition.x, f.droppedPosition.y, f.droppedPosition.z);
+              this.blueFlag.mesh.position.copy(this.blueFlag.currentPos);
+              this.blueFlag.isDropped = true;
+              this.blueFlag.isCaptured = false;
+              this.blueFlag.carrier = null;
+              this.blueFlag.mesh.visible = true;
+            }
           } else {
             this.serverRedFlagAtBase = !!f.atBase;
             this.serverRedFlagCarrierId = f.carrierId ?? null;
+            if (!f.atBase && !f.carrierId && f.droppedPosition) {
+              this.redFlag.currentPos.set(f.droppedPosition.x, f.droppedPosition.y, f.droppedPosition.z);
+              this.redFlag.mesh.position.copy(this.redFlag.currentPos);
+              this.redFlag.isDropped = true;
+              this.redFlag.isCaptured = false;
+              this.redFlag.carrier = null;
+              this.redFlag.mesh.visible = true;
+            }
           }
           if (f.atBase) {
             this.resetFlagToBase(flag);
@@ -1992,6 +2008,20 @@ export class Game {
       }
     });
 
+    // Handle live per-player K/D/capture stats so the Tab scoreboard stays in
+    // sync for everyone (previously only refreshed on join via `init`).
+    this.networkClient.onMessage('statsUpdate', (msg: any) => {
+      if (!msg.stats) return;
+      for (const [id, s] of Object.entries(msg.stats)) {
+        const st = s as any;
+        this.statsById.set(id, {
+          kills: st.kills ?? 0,
+          deaths: st.deaths ?? 0,
+          captures: st.captures ?? 0,
+        });
+      }
+    });
+
     // Handle player respawned
     this.networkClient.onMessage('playerRespawned', (msg: any) => {
       if (msg.playerId === this.localPlayerId) {
@@ -2084,7 +2114,11 @@ export class Game {
         if (flag) flag.carrier = null;
       }
       if (flag) {
-        flag.currentPos.set(msg.position.x, msg.position.y + 0.5, msg.position.z);
+        // Snap to solid ground beneath the reported death position so a flag
+        // dropped mid-jump/on a slope never hangs in mid-air.
+        const groundY = this.world.getGroundHeightBelow(
+          msg.position.x, msg.position.y + 3, msg.position.z);
+        flag.currentPos.set(msg.position.x, groundY + 0.5, msg.position.z);
         flag.mesh.position.copy(flag.currentPos);
         flag.carrier = null;
         flag.isDropped = true;
