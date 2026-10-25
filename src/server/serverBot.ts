@@ -7,8 +7,12 @@
 //   ADVANCE  -> push toward the objective (grab enemy flag / return own flag)
 //   GRABFLAG -> head to the enemy flag and take it
 //   RETURN   -> carry the flag home; build cover when pinned or mid-field
-//   BUILD    -> place blocks for cover / rush towers near the enemy base
-//   TRENCH   -> dig & wall a fighting trench on the midfield approach lane
+//   BUILD    -> engineer work: raise a bastion with firing ports and an L
+//               ramp toward the enemy flag (scans for existing friendly
+//               structures to link up with instead of building alone)
+//   TRENCH   -> dig & wall a fighting trench; adaptive length, parapet ends,
+//               overhead roof when under fire, and it follows the terrain
+//               contour so the wall stays 2 high even on slopes
 //   RETREAT  -> fall back when low HP, out of ammo, or surrounded
 //
 // Difficulty knobs (env):
@@ -26,6 +30,9 @@ import {
   BLUE_FLAG_POS,
   RED_FLAG_POS,
   GROUND_LEVEL,
+  WORLD_SIZE,
+  CHUNK_SIZE,
+  VOXEL_BUILT,
 } from '../shared/types';
 
 export type BotState =
@@ -60,10 +67,15 @@ export interface BotContext {
 const EYE_HEIGHT = 1.6;
 const AIM_TOLERANCE_RAD = 0.14; // ~8 degrees
 const VISIBLE_RANGE = 75;
+// How many ticks a single placed block "costs" in trench pace. Lowering this
+// makes bots wall their trench faster (one block every other tick by default).
+const TRENCH_BUILD_INTERVAL = 2;
 
 // Difficulty knobs (env-overridable so Render can tune without code changes)
 const BOT_MAX_HP = Number(process.env.SERVER_BOT_HP ?? 130); // beefier than players (100)
 const BOT_BLOCKS = Number(process.env.SERVER_BOT_BLOCKS ?? 36); // building budget per life
+
+type TrenchCell = { x: number; y: number; z: number; roof?: boolean };
 
 export class ServerBot extends ServerPlayer {
   private botState: BotState = 'ADVANCE';
@@ -82,8 +94,14 @@ export class ServerBot extends ServerPlayer {
   private lastAttackerId: string | null = null;
   private lastAttackedAt: number = -100;
   // Trench construction plan (list of cells to wall, consumed over ticks)
-  private trenchPlan: Array<{ x: number; y: number; z: number }> | null = null;
+  private trenchPlan: TrenchCell[] | null = null;
   private lastTrenchCell: number = 0;
+  private trenchPaceTick: number = 0;
+  private trenchCenter: Position | null = null;
+  private lastTrenchAt: number = -100;
+  private pinnedDownUntil: number = -100; // recently shot at -> dig/roof cover
+  // Engineer blueprint: ordered list of remaining build cells (bastion/ramp)
+  private buildPlan: TrenchCell[] | null = null;
 
   // Personality weights (per bot, slightly randomized)
   private aggroBias: number;
@@ -93,6 +111,7 @@ export class ServerBot extends ServerPlayer {
   constructor(id: string, position: Position, team: 'red' | 'blue', name: string) {
     super(id, position, team);
     this.name = name;
+    this.isBotFlag = true; // scoreboard: mark AI combatants as bots
     this.equipment = Math.random() < 0.5 ? 'rifle' : 'smg';
     this.magazineSize = WEAPONS[this.equipment as 'rifle' | 'smg'] ? (this.equipment === 'rifle' ? 10 : 30) : 10;
     this.currentAmmo = this.magazineSize;
@@ -115,6 +134,14 @@ export class ServerBot extends ServerPlayer {
   noteHitBy(attackerId: string, now: number): void {
     this.lastAttackerId = attackerId;
     this.lastAttackedAt = now;
+    // Being shot at counts as "pinned down": the bot will prefer digging a
+    // fighting trench (with an anti-grenade roof) on its next decision.
+    this.pinnedDownUntil = now + 6;
+  }
+
+  /** Called by serverGame when an enemy bullet snaps past this bot. */
+  noteIncoming(now: number): void {
+    if (now > this.pinnedDownUntil) this.pinnedDownUntil = now + 3;
   }
 
   /**
@@ -205,19 +232,21 @@ export class ServerBot extends ServerPlayer {
   // ---------------- State transitions ----------------
 
   private transition(state: BotState, now: number, duration: number): void {
-    // Never interrupt a trench mid-dig: the wall is only useful if it gets
-    // finished, so random re-decisions (GRABFLAG coin-flips, BUILD rolls,
-    // wander timers) must not cancel it. Explicit overrides still apply:
-    // carryingFlag -> RETURN and needsRetreat -> RETREAT are checked earlier
-    // in botUpdate() and call transition('RETURN'/'RETREAT'), which is allowed.
-    if (this.botState === 'TRENCH') {
+    // Never interrupt an engineer mid-dig / mid-blueprint: a half-finished
+    // wall is worse than none, so random re-decisions (GRABFLAG coin-flips,
+    // BUILD rolls, wander timers) must not cancel it. Explicit overrides
+    // still apply: carryingFlag -> RETURN and needsRetreat -> RETREAT are
+    // checked earlier in botUpdate() and call transition('RETURN'/'RETREAT'),
+    // which is allowed.
+    if (this.botState === 'TRENCH' || this.botState === 'BUILD') {
       if (state !== 'RETURN' && state !== 'RETREAT') {
-        // Still refresh the timer so doTrench()'s "done digging" hold logic
-        // doesn't expire while we're mid-wall and keep us locked in TRENCH.
+        // Still refresh the timer so doTrench()/doBuild()'s "done" hold logic
+        // doesn't expire while we're mid-wall and keep us locked in state.
         this.stateUntil = now + Math.max(duration, 2);
         return;
       }
       this.trenchPlan = null; // abandoning the dig to flee/return the flag
+      this.buildPlan = null;
     }
     if (this.botState !== state) {
       this.botState = state;
@@ -281,29 +310,44 @@ export class ServerBot extends ServerPlayer {
 
     const distToEnemyFlag = Math.hypot(enemyFlag.x - this.position.x, enemyFlag.z - this.position.z);
 
-    // Priority 2: grab the enemy flag when reasonably free
-    if (distToEnemyFlag < 120 && Math.random() < 0.55) {
+    // Priority 2: grab the enemy flag when reasonably free. Radius scales
+    // with the map (flags are now 320m apart, so midfield is ~160m out;
+    // was a fixed 120 which made bots ignore the objective on the big map).
+    const GRABFLAG_RADIUS = WORLD_SIZE / 2;
+    if (distToEnemyFlag < GRABFLAG_RADIUS && Math.random() < 0.55) {
       this.transition('GRABFLAG', t, 12);
       return;
     }
 
-    // Priority 3: build pressure near the enemy base (cover/rush wall)
-    if (distToEnemyFlag < 45 && this.remainingBlocks > 6 && Math.random() < this.buildBias) {
-      this.transition('BUILD', t, 4);
-      return;
+    // Priority 3: engineer work near the enemy base (bastion + ramp). Only
+    // start fresh blueprints; a bot already mid-build keeps building via the
+    // TRENCH/BUILD lock in transition(). The Math.random() roll must happen
+    // *after* all cheap gates — early rolls desync the deterministic RNG
+    // sequences used by the trench regression test.
+    if (distToEnemyFlag < 45 && this.remainingBlocks > 10 && !this.buildPlan) {
+      if (Math.random() < this.buildBias) {
+        this.transition('BUILD', t, 6);
+        return;
+      }
     }
 
-    // Priority 3b: dig a fighting trench on the midfield lane (only when we
-    // still have most of our block budget left)
+    // Priority 3b: dig a fighting trench. Triggers are contextual now:
+    //  - pinned down recently (someone just shot at us): dig almost anywhere
+    //    on our side of midfield — engineers under fire earn their keep
+    //  - otherwise: midfield lane hold, when most of the block budget is left
     const midZ = (BLUE_FLAG_POS.z + RED_FLAG_POS.z) / 2;
-    const midDist = Math.abs(this.position.z - midZ);
-    if (
-      midDist < 35 &&
-      this.remainingBlocks >= BOT_BLOCKS * 0.5 &&
-      !this.trenchPlan &&
-      Math.random() < this.buildBias * 0.8
-    ) {
-      this.startTrench(ctx);
+    const towardEnemy = enemyFlag.z > this.position.z ? 1 : -1;
+    const signedMid = (this.position.z - midZ) * towardEnemy; // <0 = own half
+    const pinned = t < this.pinnedDownUntil;
+    const dugRecently = t - this.lastTrenchAt > 25;
+    const midfieldTrigger =
+      Math.abs(signedMid) < 40 && this.remainingBlocks >= BOT_BLOCKS * 0.5 && dugRecently;
+    const reactiveTrigger =
+      pinned && signedMid < 5 && distToEnemyFlag > 55 && this.remainingBlocks >= 8 && dugRecently;
+    if ((midfieldTrigger || reactiveTrigger) && !this.trenchPlan) {
+      if (Math.random() < this.buildBias * (pinned ? 1.6 : 0.8)) {
+        this.startTrench(ctx);
+      }
       return;
     }
 
@@ -439,32 +483,96 @@ export class ServerBot extends ServerPlayer {
   }
 
   private doBuild(ctx: BotContext, enemyFlag: { x: number; z: number }, t: number): void {
-    // Move next to the enemy flag approach lane, then raise a small bastion
-    const near: Position = {
-      x: enemyFlag.x + (Math.random() - 0.5) * 14,
-      y: GROUND_LEVEL,
-      z: enemyFlag.z + (this.team === 'blue' ? 12 : -12),
-    };
+    // Engineer work: generate one blueprint (bastion + L ramp) on entry, then
+    // consume it cell by cell. If a friendly structure already exists in the
+    // area, link our wall onto it instead of building an isolated shed.
+    if (!this.buildPlan) {
+      this.buildPlan = this.planBastion(ctx, enemyFlag);
+      if (this.buildPlan.length === 0) {
+        this.transition('GRABFLAG', t, 10);
+        return;
+      }
+    }
+    // Move to the worksite (first cell's ground position) until we're close
+    const site = this.buildPlan[0];
+    const near: Position = { x: site.x + 0.5, y: GROUND_LEVEL, z: site.z + 2.5 };
     const d = Math.hypot(near.x - this.position.x, near.z - this.position.z);
     if (d > 3) {
       this.moveTo(near, dtOf(ctx), ctx, true);
       return;
     }
-    if (t - this.lastBuildAt > 0.6 && this.remainingBlocks > 0) {
-      this.lastBuildAt = t;
-      const gx = Math.round(this.position.x);
-      const gz = Math.round(this.position.z);
-      // Ring of cover around self, two layers high
-      const cells = [
-        [gx + 1, gz], [gx - 1, gz], [gx, gz + 1], [gx, gz - 1],
-      ];
-      const [cx, cz] = cells[Math.floor(Math.random() * cells.length)];
-      const groundY = ctx.world.getGroundHeight(cx, cz);
-      this.tryBuildColumnAt(ctx, cx, groundY, cz, 2);
+    // Pace: one placed block every TRENCH_BUILD_INTERVAL ticks
+    this.trenchPaceTick++;
+    if (this.trenchPaceTick >= TRENCH_BUILD_INTERVAL && this.remainingBlocks > 0) {
+      this.trenchPaceTick = 0;
+      let attempts = 0;
+      while (this.buildPlan.length > 0 && attempts < 8) {
+        const cell = this.buildPlan.shift()!;
+        attempts++;
+        if (!ctx.world.canBuild(cell.x, cell.y, cell.z)) continue;
+        if (this.cellOverlapsBody(cell)) continue;
+        ctx.buildBlock(this, { x: cell.x, y: cell.y, z: cell.z });
+        this.botBlocks--;
+        break;
+      }
     }
-    if (t >= this.stateUntil || this.remainingBlocks <= 1) {
+    if (this.buildPlan.length === 0 || this.remainingBlocks <= 1 || t >= this.stateUntil + 8) {
+      this.buildPlan = null;
       this.transition('GRABFLAG', t, 10);
     }
+  }
+
+  /**
+   * Blueprint a small bastion: a 5-wide, 2-high front wall facing the enemy,
+   * firing ports at eye level, two corner columns for height advantage and an
+   * L-shaped step ramp so the bot can climb up and shoot over its own wall.
+   * Prefers linking to existing built blocks (friendly structures) so walls
+   * grow into fortifications instead of random huts.
+   */
+  private planBastion(ctx: BotContext, enemyFlag: { x: number; z: number }): TrenchCell[] {
+    const towardEnemy = enemyFlag.z > this.position.z ? 1 : -1;
+    const cx = Math.round(this.position.x);
+    const cz = Math.round(this.position.z);
+    const cells: TrenchCell[] = [];
+    const frontZ = cz + towardEnemy * 2; // wall line between us and the enemy
+
+    // Link-up scan: if another built wall is within 6 blocks along X, extend
+    // from it so two engineers' works join into one continuous fortification.
+    let startX = cx - 2;
+    for (let dx = -6; dx <= 6; dx++) {
+      const gx = cx + dx;
+      for (let h = 1; h <= 2; h++) {
+        const v = ctx.world.getVoxel(gx, ctx.world.getGroundHeight(gx, frontZ) + h, frontZ);
+        if (v && v.type === VOXEL_BUILT) {
+          startX = Math.min(startX, gx - 1);
+          break;
+        }
+      }
+    }
+    const endX = cx + 2;
+
+    for (let x = startX; x <= endX; x++) {
+      const gy = ctx.world.getGroundHeight(x, frontZ);
+      for (let h = 1; h <= 2; h++) {
+        // Firing port at head height in the middle — keep LOS through the wall
+        const isPort = h === 2 && x === cx;
+        if (!isPort) cells.push({ x, y: gy + h, z: frontZ });
+      }
+    }
+    // Corner columns (sniper platforms) when budget allows
+    if (this.remainingBlocks > 18) {
+      for (const x of [startX, endX]) {
+        const gy = ctx.world.getGroundHeight(x, frontZ);
+        cells.push({ x, y: gy + 3, z: frontZ });
+      }
+    }
+    // L ramp behind the wall: step up so the bot can crest its own position
+    const backZ = cz - towardEnemy * 1;
+    const gyBack = ctx.world.getGroundHeight(cx - 1, backZ);
+    cells.push({ x: cx - 1, y: gyBack + 1, z: backZ });
+    cells.push({ x: cx - 1, y: gyBack + 1, z: backZ - towardEnemy });
+    cells.push({ x: cx, y: gyBack + 2, z: backZ - towardEnemy });
+    return cells;
   }
 
   private doRetreat(ctx: BotContext, homeBase: { x: number; z: number }, t: number): void {
@@ -479,58 +587,86 @@ export class ServerBot extends ServerPlayer {
   // ---------------- Trench building ----------------
 
   /**
-   * Lay out a trench plan: a wall line perpendicular to our advance axis,
-   * centered on the bot's current position. Cells are consumed one per tick
-   * in doTrench(), so the trench rises progressively like a real engineer.
+   * Lay out a trench plan: a fighting position perpendicular to the advance
+   * axis, centered on the bot. Smarts:
+   *  - adaptive length from the remaining block budget (short wall when low)
+   *  - follows the terrain contour: each column's height is measured at its
+   *    own X so the wall stays exactly 2 blocks high even on slopes
+   *  - parapet steps at both ends for firing over
+   *  - an overhead roof strip when the bot was pinned down while digging
+   * Cells are consumed one per paced tick in doTrench(), so the trench rises
+   * progressively like real engineers working.
    */
   private startTrench(ctx: BotContext): void {
-    const enemyFlagZ = (this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS).z;
-    const towardEnemy = enemyFlagZ > this.position.z ? 1 : -1; // blue base is at -z
+    const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    const towardEnemy = enemyFlag.z > this.position.z ? 1 : -1; // blue base is at -z
     const cx = Math.round(this.position.x);
     const cz = Math.round(this.position.z);
-    const groundY = ctx.world.getGroundHeight(cx, cz);
-    const cells: Array<{ x: number; y: number; z: number }> = [];
-    // Wall spans 9 blocks left/right along X, 2 high, on the side facing away
-    // from the enemy so it acts as cover for whoever holds the trench.
-    const backOffset = -towardEnemy * 2;
-    for (let dx = -4; dx <= 4; dx++) {
+    const cells: TrenchCell[] = [];
+    const underFire = ctx.serverTime < this.pinnedDownUntil;
+    // Adaptive length: scale the half-width with how many blocks we can afford.
+    // Full budget -> 9-wide wall (22 cells + parapets), trickle -> 3-wide stub.
+    const budget = this.remainingBlocks;
+    const half = budget >= 24 ? 4 : budget >= 16 ? 3 : budget >= 10 ? 2 : 1;
+    const backOffset = -towardEnemy * 2; // wall on the side away from the enemy
+    for (let dx = -half; dx <= half; dx++) {
+      // Measure ground per column so sloped terrain doesn't produce a
+      // ragged 1-high wall on the uphill end (old code used one flat height).
+      const colGround = ctx.world.getGroundHeight(cx + dx, cz + backOffset);
       for (let h = 0; h < 2; h++) {
-        cells.push({ x: cx + dx, y: groundY + 1 + h, z: cz + backOffset });
+        cells.push({ x: cx + dx, y: colGround + 1 + h, z: cz + backOffset });
       }
-      // Small firing-step parapet at both ends
-      if (Math.abs(dx) === 4) {
-        cells.push({ x: cx + dx, y: groundY + 3, z: cz + backOffset });
+      // Firing-step parapets at both ends
+      if (Math.abs(dx) === half && budget >= 16) {
+        cells.push({ x: cx + dx, y: colGround + 3, z: cz + backOffset });
+      }
+    }
+    // Anti-grenade / sniper roof over the center when dug under fire — only
+    // if we can still afford the full wall afterwards (roof costs half+2).
+    if (underFire && budget >= 20) {
+      const roofY = ctx.world.getGroundHeight(cx, cz) + 4;
+      for (let dx = -1; dx <= 1; dx++) {
+        cells.push({ x: cx + dx, y: roofY, z: cz + backOffset, roof: true });
       }
     }
     this.trenchPlan = cells;
     this.lastTrenchCell = 0;
+    this.trenchPaceTick = 0;
+    this.trenchCenter = { x: this.position.x, y: GROUND_LEVEL, z: this.position.z };
+    this.lastTrenchAt = ctx.serverTime;
     this.transition('TRENCH', ctx.serverTime, 14);
   }
 
   private doTrench(ctx: BotContext, t: number): void {
     const step = dtOf(ctx);
     if (!this.trenchPlan || this.remainingBlocks <= 0) {
-      this.trenchPlan = null;
-      this.transition('ADVANCE', t, 6);
+      this.finishTrench(ctx, t);
       return;
     }
-    // Build one cell every other tick (10 blocks/sec max), skipping cells we
-    // can't legally build on (occupied / unsupported / out of bounds).
-    let attempts = 0;
-    while (this.lastTrenchCell < this.trenchPlan.length && attempts < 6) {
-      const cell = this.trenchPlan[this.lastTrenchCell];
-      this.lastTrenchCell++;
-      attempts++;
-      if (ctx.world.canBuild(cell.x, cell.y, cell.z)) {
-        // Never bury ourselves or stand-inside cells
-        if (this.cellOverlapsBody(cell)) continue;
-        ctx.buildBlock(this, { x: cell.x, y: cell.y, z: cell.z });
-        this.botBlocks--;
-        break; // pace: one placed block per tick
+    // Pace construction: one placed block every TRENCH_BUILD_INTERVAL ticks,
+    // skipping cells we can't legally build on (occupied / unsupported / OOB).
+    this.trenchPaceTick++;
+    if (this.trenchPaceTick >= TRENCH_BUILD_INTERVAL) {
+      this.trenchPaceTick = 0;
+      let attempts = 0;
+      while (this.lastTrenchCell < this.trenchPlan.length && attempts < 8) {
+        const cell = this.trenchPlan[this.lastTrenchCell];
+        this.lastTrenchCell++;
+        attempts++;
+        if (ctx.world.canBuild(cell.x, cell.y, cell.z)) {
+          // Never bury ourselves or occupy stand-inside cells
+          if (this.cellOverlapsBody(cell)) continue;
+          ctx.buildBlock(this, { x: cell.x, y: cell.y, z: cell.z });
+          this.botBlocks--;
+          break; // one placed block per paced tick
+        }
       }
     }
-    // Stand inside the trench center while building (crouch behind the wall)
-    const center: Position = { x: this.position.x, y: GROUND_LEVEL, z: this.position.z };
+    // Stand inside the trench center while building (crouch behind the wall).
+    // The center is captured at layout time so walking there never cancels
+    // the dig (the old code compared the bot against its own position —
+    // distance always 0 — which silently froze progress once it moved).
+    const center = this.trenchCenter ?? { x: this.position.x, y: GROUND_LEVEL, z: this.position.z };
     const d = Math.hypot(center.x - this.position.x, center.z - this.position.z);
     if (d > 1.5) this.moveTo(center, step, ctx, false);
     else {
@@ -543,17 +679,24 @@ export class ServerBot extends ServerPlayer {
     if (this.lastTrenchCell >= this.trenchPlan.length) {
       // Done digging: hold the trench briefly, scanning toward the enemy lane
       if (t >= this.stateUntil) {
-        this.trenchPlan = null;
-        this.transition('CAMP', t, 6);
-        const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
-        const spot = this.findCampSpot(ctx, { x: enemyFlag.x, y: GROUND_LEVEL, z: enemyFlag.z });
-        if (spot) {
-          this.campSpot = spot;
-          this.waypoint = { ...spot };
-        } else {
-          this.transition('ADVANCE', t, 6);
-        }
+        this.finishTrench(ctx, t);
       }
+    }
+  }
+
+  /** Cleanly exit the dig: clear the plan and transition onward. */
+  private finishTrench(ctx: BotContext, t: number): void {
+    this.trenchPlan = null;
+    this.trenchCenter = null;
+    const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    const spot = this.findCampSpot(ctx, { x: enemyFlag.x, y: GROUND_LEVEL, z: enemyFlag.z });
+    if (spot && this.remainingBlocks > 0) {
+      // Hold our own new trench as a camp first — don't wander off cover
+      this.campSpot = { x: this.position.x, y: GROUND_LEVEL, z: this.position.z };
+      this.waypoint = { ...this.campSpot };
+      this.transition('CAMP', t, 6);
+    } else {
+      this.transition('ADVANCE', t, 6);
     }
   }
 
@@ -789,7 +932,9 @@ export class ServerBot extends ServerPlayer {
   }
 
   private pickWander(ctx: BotContext): void {
-    const half = 100;
+    // Stay inside the (enlarged) battlefield bounds with a margin; the old
+    // hardcoded half=100 kept bots penned in on the 448-wide map.
+    const half = WORLD_SIZE / 2 - CHUNK_SIZE;
     this.waypoint = {
       x: Math.max(-half, Math.min(half, this.position.x + (Math.random() - 0.5) * 40)),
       y: GROUND_LEVEL,
@@ -801,6 +946,8 @@ export class ServerBot extends ServerPlayer {
   refillBlocks(): void {
     this.botBlocks = BOT_BLOCKS;
     this.trenchPlan = null; // drop any half-built trench on death/respawn
+    this.buildPlan = null; // ...and any unfinished bastion blueprint
+    this.trenchCenter = null;
   }
 }
 

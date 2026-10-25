@@ -1,17 +1,20 @@
 import * as THREE from 'three';
+import {
+  WORLD_SIZE,
+  GROUND_LEVEL,
+  MAX_BUILD_UP,
+  MAX_DIG_DOWN,
+  CHUNK_SIZE,
+  VOXEL_AIR,
+  VOXEL_DIRT,
+  VOXEL_STONE,
+  VOXEL_GRASS,
+  VOXEL_BUILT,
+} from '../shared/types';
 
-export const VOXEL_AIR = 0;
-export const VOXEL_DIRT = 1;
-export const VOXEL_STONE = 2;
-export const VOXEL_GRASS = 3;
-export const VOXEL_BUILT = 4;
+export { WORLD_SIZE, GROUND_LEVEL, MAX_BUILD_UP, MAX_DIG_DOWN, CHUNK_SIZE, VOXEL_AIR, VOXEL_DIRT, VOXEL_STONE, VOXEL_GRASS, VOXEL_BUILT };
 
-export const WORLD_SIZE = 250;
-export const GROUND_LEVEL = 8;
-export const MAX_BUILD_UP = 20;
-export const MAX_DIG_DOWN = 20;
 export const VOXEL_SIZE = 1;
-export const CHUNK_SIZE = 16;
 
 export interface VoxelData {
   type: number;

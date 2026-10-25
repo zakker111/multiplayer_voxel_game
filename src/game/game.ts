@@ -3,7 +3,34 @@ import { VoxelWorld, VOXEL_BUILT, VOXEL_SIZE } from './world';
 import { Player } from './player';
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
-import { PlayerState, PlayerInput, Position } from '../shared/types';
+import { PlayerState, PlayerInput, Position, PlayerStats } from '../shared/types';
+
+/* ---------- Tab-held scoreboard data model ---------- */
+
+export interface ScoreboardRow {
+  id: string;
+  name: string;
+  isBot: boolean;
+  kills: number;
+  deaths: number;
+  captures: number;
+  kd: number;
+  isLocalPlayer: boolean;
+  isTopCapturer: boolean;
+}
+
+export interface ScoreboardTeamPanel {
+  team: 'blue' | 'red';
+  points: number;      // flag captures = points
+  killPoints: number;  // total team kills (secondary score)
+  rows: ScoreboardRow[];
+}
+
+export interface ScoreboardData {
+  teams: ScoreboardTeamPanel[];   // own team first
+  leadingTeam: 'blue' | 'red' | null; // which side is on top
+  topCapturerName: string | null;
+}
 
 // Game Constants
 const VERSION = "1.4.0"; // Spectator fix, Bot AI overhaul, Footsteps, Spawn dist
@@ -71,6 +98,8 @@ export interface GameState {
   blueFlagTimer?: number;
   redFlagTimer?: number;
   radioLog?: RadioMessage[];
+  scoreboard?: ScoreboardData;
+  showScoreboard?: boolean;
 }
 
 interface Bot {
@@ -211,14 +240,17 @@ const TEAM_COLORS: Record<Team, { body: number; accent: number; legs: number; la
   blue: { body: 0x2244cc, accent: 0x4488ff, legs: 0x112266, label: 'BLUE' },
 };
 
-const BLUE_SPAWN_Z_MIN = -90;
-const BLUE_SPAWN_Z_MAX = -75;
-const RED_SPAWN_Z_MIN = 75;
-const RED_SPAWN_Z_MAX = 90;
-const SPAWN_X_RANGE = 20;
-
-const BLUE_FLAG_POS = { x: 0, z: -80 };
-const RED_FLAG_POS = { x: 0, z: 80 };
+// Local copies previously drifted from the server (shared/types) values;
+// now sourced from the shared module so client and server agree on spawns/flags.
+import {
+  BLUE_SPAWN_Z_MIN,
+  BLUE_SPAWN_Z_MAX,
+  RED_SPAWN_Z_MIN,
+  RED_SPAWN_Z_MAX,
+  SPAWN_X_RANGE,
+  BLUE_FLAG_POS,
+  RED_FLAG_POS,
+} from '../shared/types';
 
 export class Game {
   scene: THREE.Scene;
@@ -345,6 +377,11 @@ export class Game {
   serverRedFlagAtBase: boolean = true;
   serverBlueFlagCarrierId: string | null = null;
   serverRedFlagCarrierId: string | null = null;
+  // Which flag team the LOCAL player is currently carrying (online mode).
+  // Needed to clear the correct carrier id when we die or score a capture —
+  // without it, the stale carrier id keeps the flag "hidden at post" while the
+  // server simultaneously marks it dropped/at-base, producing ghost duplicates.
+  serverCarriedFlagTeam: 'blue' | 'red' | null = null;
   // True while the LOCAL player carries the enemy flag (online mode). The
   // server does not echo a flagPickedUp event back to the picker, so we set
   // this optimistically on pickup and clear it on capture/death. It is purely
@@ -358,6 +395,14 @@ export class Game {
   serverUrl?: string;
   playerName?: string;
   remotePlayers: Map<string, { mesh: THREE.Group; state: PlayerState; targetPosition: THREE.Vector3; targetRotation: THREE.Euler; lastShootingTime: number; flagMesh?: THREE.Group; damageFlashTimer: number }> = new Map();
+
+  // ---- Tab-held scoreboard state ----
+  /** Authoritative (online) or locally tallied (singleplayer) K/D/captures. */
+  statsById: Map<string, PlayerStats> = new Map();
+  tabHeld = false;
+  private lastScoreboardJson = '';
+  private cachedScoreboard: ScoreboardData | undefined = undefined;
+  private boundBlur: () => void;
   localPlayerId: string | null = null;
   lastInputSendTime: number = 0;
   inputSendRate: number = 50;
@@ -406,7 +451,9 @@ export class Game {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x87CEEB);
-    this.scene.fog = new THREE.Fog(0x87CEEB, 60, 150);
+    // Fog tuned for the enlarged map: distant flag bases stay visible across
+    // the longer battlefield (was 60/150, which hid everything past midfield).
+    this.scene.fog = new THREE.Fog(0x87CEEB, 120, 400);
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
@@ -501,6 +548,9 @@ export class Game {
     this.boundWheel = this.onWheel.bind(this);
     this.boundKeyDown = this.onKeyDown.bind(this);
     this.boundKeyUp = this.onKeyUp.bind(this);
+    // If the window loses focus while Tab is held, keyup never arrives —
+    // clear the flag so the scoreboard can't get stuck open.
+    this.boundBlur = () => { this.tabHeld = false; };
     this.boundMouseMove = this.onMouseMove.bind(this);
 
     window.addEventListener('resize', this.boundResize);
@@ -509,6 +559,7 @@ export class Game {
     canvas.addEventListener('wheel', this.boundWheel);
     document.addEventListener('keydown', this.boundKeyDown);
     document.addEventListener('keyup', this.boundKeyUp);
+    window.addEventListener('blur', this.boundBlur);
     document.addEventListener('mousemove', this.boundMouseMove);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     } catch (error) {
@@ -827,11 +878,45 @@ export class Game {
     flag.mesh.visible = true; // Flag reappears once returned to base!
     flag.light.intensity = 3;
 
-    // Ensure any carrying bot drops their back flag
+    // In online mode the server owns flag state — mirror the return in our
+    // authoritative tracking so the renderer doesn't fight the event state.
+    if (flag.team === 'blue') this.serverBlueFlagAtBase = true;
+    else this.serverRedFlagAtBase = true;
+
+    // A flag can only exist in ONE place at a time: on its post, dropped on
+    // the ground, or worn by exactly one carrier. When it returns to base,
+    // clear every backpack-carried copy of it (local player + all bots + all
+    // remote players) so no ghost duplicates linger on anyone's back.
+    this.clearFlagCarriers(flag.team);
+  }
+
+  /**
+   * Remove every visual/state copy of the given flag from carriers. Called
+   * whenever a flag leaves play (returned to base, captured, respawned).
+   */
+  private clearFlagCarriers(flagTeam: 'blue' | 'red'): void {
+    // The carried flag is the ENEMY team's flag: blue carriers wear red flags.
+    const carrierTeam: 'blue' | 'red' = flagTeam === 'blue' ? 'red' : 'blue';
+
+    if (this.gameMode !== 'online' && this.player.carryingFlag && this.playerTeam === carrierTeam) {
+      this.player.carryingFlag = false;
+    }
+    if (this.serverCarryingEnemyFlag && this.playerTeam === carrierTeam) {
+      this.serverCarryingEnemyFlag = false;
+      this.serverCarriedFlagTeam = null;
+    }
+
     for (const b of this.bots) {
-      if (b.carryingFlag && (b.team !== flag.team)) {
+      if (b.carryingFlag && b.team === carrierTeam) {
         b.carryingFlag = false;
         if (b.flagMesh) b.flagMesh.visible = false;
+      }
+    }
+
+    for (const [, remote] of this.remotePlayers) {
+      if (remote.state.carryingFlag && remote.state.team === carrierTeam) {
+        remote.state.carryingFlag = false;
+        if (remote.flagMesh) remote.flagMesh.visible = false;
       }
     }
   }
@@ -842,6 +927,14 @@ export class Game {
    * hide taken flags, pulse dropped ones, and reposition them from events.
    */
   private updateFlagsVisualsOnline(): void {
+    // Consistency guard: a flag is EITHER at its post, carried by exactly one
+    // player, or dropped on the ground — never two of those at once. If an
+    // event ordering slip leaves a stale carrier id while the server says the
+    // flag is back at base (or vice versa), drop the stale state so we don't
+    // render ghost duplicates (e.g. two flags on one flag post).
+    if (this.serverBlueFlagAtBase) this.serverBlueFlagCarrierId = null;
+    if (this.serverRedFlagAtBase) this.serverRedFlagCarrierId = null;
+
     const applyState = (flag: Flag, atBase: boolean, carrierId: string | null) => {
       if (atBase) {
         if (!flag.mesh.visible || flag.isDropped || flag.isCaptured || flag.carrier) {
@@ -866,10 +959,15 @@ export class Game {
     applyState(this.blueFlag, this.serverBlueFlagAtBase, this.serverBlueFlagCarrierId);
     applyState(this.redFlag, this.serverRedFlagAtBase, this.serverRedFlagCarrierId);
 
-    // Show a little flag on the back of whichever remote player carries it
+    // Server-authoritative backpack flags: show the flag ONLY on the back of
+    // the current carrier (players AND server bots — their state carries an
+    // isBot flag). Everyone else's copy is hidden, so a taken flag can never
+    // appear twice (e.g. one ghost on a back + one at the post).
+    const blueCarried = !this.serverBlueFlagAtBase && !!this.serverBlueFlagCarrierId;
+    const redCarried = !this.serverRedFlagAtBase && !!this.serverRedFlagCarrierId;
     for (const [, remote] of this.remotePlayers) {
-      const carrying = !!remote.state.carryingFlag;
       if (!remote.flagMesh) {
+        const carrying = !!remote.state.carryingFlag;
         if (!carrying) continue;
         const backpackFlagGroup = new THREE.Group();
         const poleGeo = new THREE.CylinderGeometry(0.014, 0.014, 1.0, 6);
@@ -1655,6 +1753,12 @@ export class Game {
     // Handle full init message
     this.networkClient.onMessage('init', (msg: any) => {
       this.localPlayerId = msg.playerId;
+      // Scoreboard: adopt the server's authoritative K/D/capture tallies.
+      if (msg.stats && typeof msg.stats === 'object') {
+        for (const [id, s] of Object.entries(msg.stats as Record<string, PlayerStats>)) {
+          this.statsById.set(id, { kills: s.kills || 0, deaths: s.deaths || 0, captures: s.captures || 0 });
+        }
+      }
       if (msg.captures) {
         this.blueCaptures = msg.captures.blue || 0;
         this.redCaptures = msg.captures.red || 0;
@@ -1812,6 +1916,12 @@ export class Game {
           // flagDropped event which repositions the flag on the ground.
           this.player.carryingFlag = false;
           this.serverCarryingEnemyFlag = false;
+          // Clear OUR carrier id on the flag we were holding — otherwise the
+          // post stays "hidden, carried by <us>" until the flagDropped event
+          // lands, and any desync in between can render ghost duplicates.
+          if (this.serverCarriedFlagTeam === 'blue') this.serverBlueFlagCarrierId = null;
+          if (this.serverCarriedFlagTeam === 'red') this.serverRedFlagCarrierId = null;
+          this.serverCarriedFlagTeam = null;
           this.player.respawnTimer = 4;
           this.sounds.deathSound();
           this.showMessage('☠️ You were eliminated! Respawning in 4s...');
@@ -1824,10 +1934,24 @@ export class Game {
           remote.state.hp = 0;
         }
         if (msg.killerId === this.localPlayerId) {
-          if (this.playerTeam === 'blue') this.blueKills++; else this.redKills++;
+          // Optimistic local increment only when not networked (singleplayer /
+          // bot kills handled locally). In multiplayer the server broadcasts
+          // authoritative totals via `scoreUpdate`, so incrementing here too
+          // would double-count.
+          if (!this.networkClient?.isConnected()) {
+            if (this.playerTeam === 'blue') this.blueKills++; else this.redKills++;
+          }
           this.sounds.killSound();
           this.showMessage(`🎯 You eliminated Player ${msg.playerId.slice(-4)}!`);
         }
+      }
+    });
+
+    // Handle authoritative team score sync from the server
+    this.networkClient.onMessage('scoreUpdate', (msg: any) => {
+      if (msg.scores) {
+        this.blueKills = msg.scores.blue || 0;
+        this.redKills = msg.scores.red || 0;
       }
     });
 
@@ -1890,10 +2014,15 @@ export class Game {
       }
       if (flag) {
         flag.isDropped = false;
+        flag.isCaptured = false; // leaving the respawn-shadow state: it's carried now
+        flag.capturedTimer = 0;
+        flag.carrier = null;
         flag.mesh.visible = false; // Flag disappears when taken until returned
+        flag.light.intensity = 0;
         if (isLocal) {
           this.player.carryingFlag = true;
           this.serverCarryingEnemyFlag = true;
+          this.serverCarriedFlagTeam = msg.flagTeam === 'blue' ? 'blue' : 'red';
           this.sounds.flagPickup();
           this.showMessage(`🚩 YOU TOOK THE ${msg.flagTeam.toUpperCase()} FLAG! RUN TO BASE!`);
         } else {
@@ -1914,6 +2043,7 @@ export class Game {
       if (msg.playerId === this.localPlayerId || flag?.carrier?.isPlayer) {
         this.player.carryingFlag = false;
         this.serverCarryingEnemyFlag = false;
+        this.serverCarriedFlagTeam = null;
         if (flag) flag.carrier = null;
       }
       if (flag) {
@@ -1972,10 +2102,15 @@ export class Game {
         capturedFlag.mesh.visible = false;
         capturedFlag.light.intensity = 0;
       }
+      // The scored flag left play: wipe every backpack copy of it (including a
+      // stale one on the scorer or any desynced carrier) so no ghost duplicate
+      // lingers while the flag is in its respawn shadow.
+      this.clearFlagCarriers(capturedTeam);
       this.sounds.flagCapture();
       if (msg.playerId === this.localPlayerId) {
         this.player.carryingFlag = false;
         this.serverCarryingEnemyFlag = false;
+        this.serverCarriedFlagTeam = null;
         this.showMessage(`🏆 YOU CAPTURED THE ENEMY FLAG! (+1 SCORE) Flag respawns in 8s...`);
       } else {
         this.showMessage(`🏆 ${msg.team.toUpperCase()} TEAM SCORED A FLAG CAPTURE! Flag respawns in 8s...`);
@@ -2040,6 +2175,108 @@ export class Game {
       this.remotePlayers.delete(id);
       this.showMessage(`Player ${id.slice(-4)} left the game.`);
     }
+  }
+
+  /* ---------- Tab-held scoreboard helpers ---------- */
+
+  /** Get (creating if needed) the tally record for a combatant id. */
+  private statFor(id: string): PlayerStats {
+    let s = this.statsById.get(id);
+    if (!s) {
+      s = { kills: 0, deaths: 0, captures: 0 };
+      this.statsById.set(id, s);
+    }
+    return s;
+  }
+
+  /** Build the full scoreboard payload: both teams, all players and bots,
+   *  per-team flag-capture points, K/D tallies, top capturer and leader. */
+  private buildScoreboard(): ScoreboardData {
+    const online = this.gameMode === 'online';
+    interface Entry extends ScoreboardRow { team: 'blue' | 'red' }
+    const entries: Entry[] = [];
+
+    if (online) {
+      // Server-authoritative rows: every connected player + server bot.
+      for (const [id, remote] of this.remotePlayers) {
+        const st = this.statFor(id);
+        entries.push({
+          id,
+          name: remote.state.name || `Player ${id.slice(-4)}`,
+          isBot: !!remote.state.isBot,
+          kills: st.kills, deaths: st.deaths, captures: st.captures,
+          kd: st.deaths > 0 ? Math.round((st.kills / st.deaths) * 100) / 100 : st.kills,
+          isLocalPlayer: false,
+          isTopCapturer: false,
+          team: remote.state.team === 'red' ? 'red' : 'blue',
+        });
+      }
+      const meSt = this.statFor(this.localPlayerId || 'me');
+      entries.push({
+        id: this.localPlayerId || 'me',
+        name: this.playerName || 'You',
+        isBot: false,
+        kills: meSt.kills, deaths: meSt.deaths, captures: meSt.captures,
+        kd: meSt.deaths > 0 ? Math.round((meSt.kills / meSt.deaths) * 100) / 100 : meSt.kills,
+        isLocalPlayer: true,
+        isTopCapturer: false,
+        team: this.playerTeam,
+      });
+    } else {
+      // Local match: AI bots + the human player.
+      for (const bot of this.bots) {
+        const st = this.statFor(bot.name);
+        entries.push({
+          id: bot.name,
+          name: bot.name,
+          isBot: true,
+          kills: st.kills, deaths: st.deaths, captures: st.captures,
+          kd: st.deaths > 0 ? Math.round((st.kills / st.deaths) * 100) / 100 : st.kills,
+          isLocalPlayer: false,
+          isTopCapturer: false,
+          team: bot.team,
+        });
+      }
+      const meSt = this.statFor('you');
+      entries.push({
+        id: 'you',
+        name: this.playerName || 'You',
+        isBot: false,
+        kills: meSt.kills, deaths: meSt.deaths, captures: meSt.captures,
+        kd: meSt.deaths > 0 ? Math.round((meSt.kills / meSt.deaths) * 100) / 100 : meSt.kills,
+        isLocalPlayer: true,
+        isTopCapturer: false,
+        team: this.playerTeam,
+      });
+    }
+
+    // Top flag capturer across the whole match (🏅 badge).
+    let top: Entry | null = null;
+    for (const e of entries) {
+      if (e.captures > 0 && (!top || e.captures > top.captures)) top = e;
+    }
+    if (top) top.isTopCapturer = true;
+
+    const mkPanel = (team: 'blue' | 'red'): ScoreboardTeamPanel => ({
+      team,
+      points: team === 'blue' ? this.blueCaptures : this.redCaptures,
+      killPoints: team === 'blue' ? this.blueKills : this.redKills,
+      rows: entries
+        .filter(e => e.team === team)
+        .sort((a, b) => b.kills - a.kills || b.captures - a.captures || a.name.localeCompare(b.name)),
+    });
+
+    // Which side is on top: capture points first, kills as tiebreak.
+    let leadingTeam: 'blue' | 'red' | null = null;
+    if (this.blueCaptures !== this.redCaptures) {
+      leadingTeam = this.blueCaptures > this.redCaptures ? 'blue' : 'red';
+    } else if (this.blueKills !== this.redKills) {
+      leadingTeam = this.blueKills > this.redKills ? 'blue' : 'red';
+    }
+
+    const own = mkPanel(this.playerTeam);
+    const enemy = mkPanel(this.playerTeam === 'blue' ? 'red' : 'blue');
+    return { teams: [own, enemy], leadingTeam, topCapturerName: top ? top.name : null };
   }
 
   private renderRemotePlayerShot(playerId: string, origin: Position, direction: Position, weaponType: string): void {
@@ -2135,6 +2372,12 @@ export class Game {
   }
 
   private onKeyDown(e: KeyboardEvent): void {
+    // Tab (held) opens the scoreboard; preventDefault stops browser focus-switching.
+    if (e.code === 'Tab') {
+      e.preventDefault();
+      this.tabHeld = true;
+      return;
+    }
     if (e.code === 'KeyP') {
       this.toggleSpectator();
       return;
@@ -2202,6 +2445,10 @@ export class Game {
   }
 
   private onKeyUp(e: KeyboardEvent): void {
+    if (e.code === 'Tab') {
+      this.tabHeld = false;
+      return;
+    }
     if (this.isSpectating) {
       if (e.code === 'Space' || e.code === 'KeyE') this.spectatorFlyUp = false;
       if (e.code === 'KeyQ') this.spectatorFlyDown = false;
@@ -4756,8 +5003,22 @@ export class Game {
         blueFlagTimer,
         redFlagTimer,
         radioLog: this.radioLog,
+        scoreboard: this.getCachedScoreboard(),
+        showScoreboard: this.tabHeld,
       });
     }
+  }
+
+  /** Rebuild the scoreboard only when its contents actually changed — avoids
+   *  allocating new objects every tick and re-rendering React at 60fps. */
+  private getCachedScoreboard(): ScoreboardData | undefined {
+    const sb = this.buildScoreboard();
+    const json = JSON.stringify(sb);
+    if (json !== this.lastScoreboardJson) {
+      this.lastScoreboardJson = json;
+      this.cachedScoreboard = sb;
+    }
+    return this.cachedScoreboard;
   }
 
   destroy(): void {

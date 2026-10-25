@@ -9,6 +9,7 @@ import {
   ClientMessage,
   ServerMessage,
   PlayerState,
+  PlayerStats,
   Position,
   WEAPONS,
   TOOLS,
@@ -26,6 +27,8 @@ export interface GameConnection {
   send(data: string): void;
   isOpen?: () => boolean;
   readyState?: number;
+  /** Optional close hook — SSE connections use this to end the HTTP response. */
+  close?(code?: number, reason?: string): void;
 }
 
 export class ServerGame {
@@ -34,6 +37,8 @@ export class ServerGame {
   private connections: Map<string, WebSocket | GameConnection> = new Map();
   private scores = { red: 0, blue: 0 };
   private captures = { red: 0, blue: 0 };
+  /** Per-combatant kill/death/capture tallies for the Tab scoreboard. */
+  private playerStats: Map<string, PlayerStats> = new Map();
   private lastShootTime: Map<string, number> = new Map();
   private lastToolTime: Map<string, number> = new Map();
   private inventories: Map<string, number> = new Map();
@@ -123,6 +128,8 @@ export class ServerGame {
     this.lastShootTime.delete(botId);
     this.lastToolTime.delete(botId);
     this.inventories.delete(botId);
+    // Keep retired bots' stats until they rejoin — the scoreboard still shows
+    // their kills/captures for the match (they remain part of the battle).
     this.broadcast({ type: 'playerLeft', playerId: botId });
   }
 
@@ -253,12 +260,43 @@ export class ServerGame {
     if (target.isDead) {
       this.handlePlayerDeath(targetId);
       if (attacker) {
-        if (attacker.team === 'red') this.scores.red++;
-        else this.scores.blue++;
+        if (attacker.team === 'red') this.addTeamScore('red');
+        else this.addTeamScore('blue');
+        this.getStats(attacker.id).kills++;
+        this.broadcastStats();
       }
       this.broadcast({ type: 'playerDied', playerId: targetId, killerId: attackerId });
       this.respawnTimers.set(targetId, 4.0);
     }
+  }
+
+  /**
+   * Increment a team's kill score and broadcast the authoritative totals to
+   * every client. Without this sync, clients only learn scores at `init`, so
+   * kill feeds / HUD scores drift out of sync for everyone but the local
+   * killer (whose optimistic increment never matches the server tally).
+   */
+  private addTeamScore(team: 'red' | 'blue'): void {
+    this.scores[team]++;
+    this.broadcast({ type: 'scoreUpdate', scores: { ...this.scores } });
+  }
+
+  /** Get (creating if needed) the scoreboard tally record for a combatant. */
+  private getStats(id: string): PlayerStats {
+    let s = this.playerStats.get(id);
+    if (!s) {
+      s = { kills: 0, deaths: 0, captures: 0 };
+      this.playerStats.set(id, s);
+    }
+    return s;
+  }
+
+  /** Push authoritative per-player K/D/captures to every client so the Tab
+   *  scoreboard stays in sync across all viewers (not just local estimates). */
+  private broadcastStats(): void {
+    const stats: Record<string, PlayerStats> = {};
+    for (const [id, s] of this.playerStats) stats[id] = { ...s };
+    this.broadcast({ type: 'statsUpdate', stats });
   }
 
   /** Bot places a building block (validated like human builds). */
@@ -312,6 +350,9 @@ export class ServerGame {
       players: existingPlayersList,
       scores: this.scores,
       captures: this.captures,
+      stats: Object.fromEntries(
+        [...this.playerStats].map(([id, s]) => [id, { ...s }]),
+      ),
       inventory: this.inventories.get(playerId) || 20,
       voxelChanges: this.world.getModifiedVoxels(),
       // Full authoritative flag snapshot so late joiners see flags that were
@@ -441,10 +482,18 @@ export class ServerGame {
     const conn = this.connections.get(playerId);
     if (!conn) return;
     try {
-      if ('close' in conn && typeof (conn as WebSocket).close === 'function') {
+      // WebSocket has .close(); SSE connections created by server.ts also
+      // expose an optional close() that ends the HTTP response. Prefer the
+      // explicit close hook so kicked SSE clients stop receiving events and
+      // the browser's EventSource actually terminates (previously we only
+      // sent a sentinel message and left the stream open forever).
+      if (typeof conn.close === 'function') {
+        conn.close(4000, 'kicked');
+      } else if ('close' in conn && typeof (conn as WebSocket).close === 'function') {
         (conn as WebSocket).close(4000, 'kicked');
       } else if (typeof conn.send === 'function') {
-        // SSE connection — send sentinel then end via isOpen contract
+        // Legacy SSE connection without a close hook — send sentinel then
+        // end via isOpen contract.
         conn.send(JSON.stringify({ type: 'kicked', reason: 'kicked', banned: false }));
       }
     } catch {
@@ -597,24 +646,45 @@ export class ServerGame {
     const hit = this.world.raycast(origin, direction, 350);
     const maxDist = hit ? hit.distance : 350;
 
+    // Suppression awareness: enemies within ~2m of the bullet's path were
+    // nearly hit — bot victims react by seeking/digging cover ("pinned down").
+    if (player.team !== undefined) {
+      const rayLen = maxDist;
+      for (const [tid, tgt] of this.players) {
+        if (tid === playerId || tgt.isDead || tgt.team === player.team) continue;
+        if (!(tgt instanceof ServerBot)) continue;
+        const tx = tgt.position.x - origin.x;
+        const ty = tgt.position.y + 1.0 - origin.y;
+        const tz = tgt.position.z - origin.z;
+        const dot = tx * direction.x + ty * direction.y + tz * direction.z;
+        if (dot <= 0 || dot > rayLen) continue;
+        const px = origin.x + direction.x * dot - tgt.position.x;
+        const py = origin.y + direction.y * dot - (tgt.position.y + 1.0);
+        const pz = origin.z + direction.z * dot - tgt.position.z;
+        if (Math.hypot(px, py, pz) < 2.0) {
+          tgt.noteIncoming(this.world.serverTime);
+        }
+      }
+    }
+
     let confirmedTarget: { id: string; player: ServerPlayer; isHeadshot: boolean } | null = null;
 
     // 1. First priority: validate client-reported hit candidate if enemy was hit on shooter's screen
     if (clientTargetId && this.players.has(clientTargetId)) {
       const target = this.players.get(clientTargetId)!;
       if (!target.isDead && target.team !== player.team) {
-        const dist = Math.hypot(
-          target.position.x - origin.x,
-          target.position.y - origin.y,
-          target.position.z - origin.z
-        );
-        if (dist <= 350) {
-          // Line of sight check
-          const toTargetDir = {
-            x: (target.position.x - origin.x) / dist,
-            y: (target.position.y + 1.0 - origin.y) / dist,
-            z: (target.position.z - origin.z) / dist,
-          };
+        const dx = target.position.x - origin.x;
+        // Aim at torso height (+1.0), matching the client's hit model, so the
+        // server LoS ray uses the same endpoint the client actually shot at.
+        const dy = target.position.y + 1.0 - origin.y;
+        const dz = target.position.z - origin.z;
+        const dist = Math.hypot(dx, dy, dz);
+        if (dist > 1e-6 && dist <= 350) {
+          // Line of sight check — normalize by the TRUE distance to the
+          // torso point (previously divided by foot-level distance while
+          // adding +1.0 to y, producing a skewed unit vector that could
+          // fail LoS against terrain for legitimately-hit targets).
+          const toTargetDir = { x: dx / dist, y: dy / dist, z: dz / dist };
           const terrainHit = this.world.raycast(origin, toTargetDir, dist);
           if (!terrainHit || terrainHit.distance >= dist - 1.2) {
             confirmedTarget = {
@@ -700,10 +770,12 @@ export class ServerGame {
         this.handlePlayerDeath(targetId);
 
         if (player.team === 'red') {
-          this.scores.red++;
+          this.addTeamScore('red');
         } else {
-          this.scores.blue++;
+          this.addTeamScore('blue');
         }
+        this.getStats(playerId).kills++;
+        this.broadcastStats();
         this.broadcast({
           type: 'playerDied',
           playerId: targetId,
@@ -986,6 +1058,8 @@ export class ServerGame {
       this.blueFlagRespawnTimer = 8.0;
     }
     player.carryingFlag = false;
+    this.getStats(playerId).captures++;
+    this.broadcastStats();
     log.info(`FLAG CAPTURED by ${playerId} (${player.team}) — score blue:${this.captures.blue} red:${this.captures.red}`);
 
     this.broadcast({
@@ -1001,6 +1075,11 @@ export class ServerGame {
   private handlePlayerDeath(playerId: string): void {
     const player = this.players.get(playerId);
     if (!player) return;
+
+    // Scoreboard bookkeeping: count the death (handlePlayerDeath is the single
+    // choke point every kill path funnels through, so deaths can't be missed).
+    this.getStats(playerId).deaths++;
+    this.broadcastStats();
 
     // Drop flag if carrying
     if (player.carryingFlag) {

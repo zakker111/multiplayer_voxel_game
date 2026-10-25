@@ -71,7 +71,7 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
    - Server synchronizes players, positions, equipment, flag states, voxel modifications, and match scores at 20Hz. Teams are kept at 10v10 by retiring a bot when a human joins that team and backfilling a bot when a human leaves/is kicked/disconnects.
    - Legacy client-side bots are DISABLED in online mode (server owns all bots) to prevent duplicates.
 2. **🤖 Bot Match (`'multiplayer'` client mode)**:
-   - Offline local simulation with client-side tactical AI bots on Red and Blue teams across the 320m arena (only used when NOT connected to a server).
+   - Offline local simulation with client-side tactical AI bots on Red and Blue teams across the 448m arena (only used when NOT connected to a server).
    - Player can play as either team or enter Spectator mode (`P`).
 3. **🧪 Free Sandbox (`'singleplayer'` client mode)**:
    - No bots or enemies; used for free building, terrain destruction testing, and weapon mechanics.
@@ -106,7 +106,7 @@ Because browser iframe sandboxes often restrict the HTML5 Pointer Lock API:
 ## 5. Arena Sizing, Spawns & Anti-Clipping System
 
 ### Arena Dimensions & Spawn Positioning
-- **World Dimensions**: Expanded arena size `WORLD_SIZE = 320` meters (`-160` to `+160` along X and Z).
+- **World Dimensions**: Arena size `WORLD_SIZE = 448` meters (`-224` to `+224` along X and Z; chunk-aligned at 28x28 chunks of 16m).
 - **Flag Positions**:
   - Blue Flag: `(0, y, -95)`
   - Red Flag: `(0, y, +95)`

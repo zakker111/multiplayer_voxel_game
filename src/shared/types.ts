@@ -30,6 +30,16 @@ export interface PlayerState {
   isReloading?: boolean;
   aimTransition?: number; // 0-1 for smooth aiming animation
   carryingFlag?: boolean; // Is player carrying enemy flag?
+  isBot?: boolean; // Server-authoritative: true for AI combatants (scoreboard)
+  name?: string;   // Display name shown on the Tab scoreboard / nametags
+}
+
+/** Per-combatant scoreboard tallies (kills/deaths/flag captures). Broadcast
+ *  to all clients via `statsUpdate` so the Tab scoreboard can rank players. */
+export interface PlayerStats {
+  kills: number;
+  deaths: number;
+  captures: number;
 }
 
 export interface VoxelChange {
@@ -82,7 +92,7 @@ export interface FlagSnapshot {
 }
 
 export type ServerMessage =
-  | { type: 'init'; playerId: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot } }
+  | { type: 'init'; playerId: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot } }
   | { type: 'gameState'; state: GameState }
   | { type: 'playerJoined'; playerId: string; state: PlayerState }
   | { type: 'playerLeft'; playerId: string }
@@ -92,6 +102,8 @@ export type ServerMessage =
   | { type: 'chunkUpdated'; chunk: ChunkData }
   | { type: 'playerDamaged'; playerId: string; damage: number; attackerId?: string }
   | { type: 'playerDied'; playerId: string; killerId?: string }
+  | { type: 'scoreUpdate'; scores: { red: number; blue: number } }
+  | { type: 'statsUpdate'; stats: Record<string, PlayerStats> }
   | { type: 'playerRespawned'; playerId: string; position: Position }
   | { type: 'hitConfirmed'; targetId: string; damage: number; isHeadshot: boolean }
   | { type: 'inventoryUpdated'; inventory: number }
@@ -110,7 +122,9 @@ export interface GameState {
 }
 
 // Constants (shared between client and server)
-export const WORLD_SIZE = 320;
+// NOTE: single source of truth for map size. The client voxel world
+// (src/game/world.ts) imports this value — do not re-declare it there.
+export const WORLD_SIZE = 448; // 28 chunks of CHUNK_SIZE(16); keeps half=224 aligned to chunk grid
 export const CHUNK_SIZE = 16;
 export const GROUND_LEVEL = 8;
 export const MAX_BUILD_UP = 20;
@@ -142,13 +156,15 @@ export const TOOLS = {
   spade: { damage: 3, cooldown: 0.3, harvests: false, affectsMultiple: true },
 };
 
-// Spawns are placed far behind the base flag (25m - 50m behind flag)
-export const BLUE_SPAWN_Z_MIN = -145;
-export const BLUE_SPAWN_Z_MAX = -120;
-export const RED_SPAWN_Z_MIN = 120;
-export const RED_SPAWN_Z_MAX = 145;
-export const SPAWN_X_RANGE = 28;
+// Flag bases moved deeper into the halves (-160 / +160) so the two bases are
+// 320m apart on the enlarged map.
+export const BLUE_FLAG_POS = { x: 0, z: -160 };
+export const RED_FLAG_POS = { x: 0, z: 160 };
 
-// Flag bases located at -95m (Blue) and +95m (Red)
-export const BLUE_FLAG_POS = { x: 0, z: -95 };
-export const RED_FLAG_POS = { x: 0, z: 95 };
+// Spawns are placed far behind the base flag (40m - 60m behind flag), so each
+// team must cross ~200m of contested ground to reach the enemy flag.
+export const BLUE_SPAWN_Z_MIN = -220;
+export const BLUE_SPAWN_Z_MAX = -200;
+export const RED_SPAWN_Z_MIN = 200;
+export const RED_SPAWN_Z_MAX = 220;
+export const SPAWN_X_RANGE = 32;
