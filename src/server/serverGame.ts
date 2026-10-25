@@ -68,9 +68,14 @@ export class ServerGame {
 
   // ---------------- AI Bots ----------------
 
-  /** Spawn a balanced set of AI bots (flank / camp / build / trench behaviors). */
-  spawnDefaultBots(countPerTeam: number = Number(process.env.SERVER_BOT_COUNT ?? 2)): void {
-    const names = ['Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren'];
+  /** Spawn a balanced set of AI bots (flank / camp / build / trench behaviors).
+   *  Default fills the match to 10v10; humans replacing bots via makeRoomForHuman(). */
+  spawnDefaultBots(countPerTeam: number = Number(process.env.SERVER_BOT_COUNT ?? 10)): void {
+    const names = [
+      'Rook', 'Vex', 'Milo', 'Dana', 'Cinder', 'Flint', 'Echo', 'Wren',
+      'Bishop', 'Kite', 'Onyx', 'Pike', 'Quill', 'Riven', 'Sable', 'Talon',
+      'Umbra', 'Volt', 'Wisp', 'Zephyr', 'Ash', 'Bramble', 'Cobalt', 'Dusk',
+    ];
     let i = 0;
     for (const team of ['blue', 'red'] as const) {
       for (let n = 0; n < countPerTeam; n++) {
@@ -78,6 +83,20 @@ export class ServerGame {
         i++;
       }
     }
+  }
+
+  /** Kick one bot off the human's newly chosen team so teams stay balanced
+   *  and total roster size stays constant (e.g. 10 per side in a 10v10). */
+  private makeRoomForHuman(team: 'red' | 'blue'): void {
+    if (!team) return;
+    const bots = [...this.players.values()].filter(
+      (p): p is ServerBot => p instanceof ServerBot && p.team === team,
+    );
+    if (bots.length === 0) return; // no bots left on this team — allow overflow
+    // Remove the most recently added bot (last spawned) for a stable feel.
+    const victim = bots[bots.length - 1];
+    log.info(`human joined ${team} — retiring bot "${victim.name}" (${victim.id}) to keep balance`);
+    this.removeBot(victim.id);
   }
 
   addBot(team: 'red' | 'blue', name: string): string {
@@ -423,6 +442,9 @@ export class ServerGame {
       case 'join':
         // Handle team selection and initial spawn position
         player.team = message.team;
+        // Keep teams balanced: retire one bot from this team so the human
+        // takes their slot (e.g. stays 10v10 with bots filling the roster).
+        this.makeRoomForHuman(message.team);
         if (message.name) {
           player.name = message.name;
           // Name-based ban check: kick + extend to an IP ban for this session.
