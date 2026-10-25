@@ -38,7 +38,7 @@ export class ServerGame {
   // Flag positions (must match client)
   private readonly BLUE_FLAG_POS = BLUE_FLAG_POS;
   private readonly RED_FLAG_POS = RED_FLAG_POS;
-  private readonly CAPTURE_DISTANCE = 4.8;
+  private readonly CAPTURE_DISTANCE = 7.0; // Unified capture radius (matches client)
   
   // Flag state tracking
   private blueFlagAtBase: boolean = true;
@@ -615,7 +615,7 @@ export class ServerGame {
 
   private handleUseTool(playerId: string, tool: 'pickaxe' | 'spade', target: Position): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead) return;
+    if (!player || player.isDead || player.isSpectating) return;
 
     const now = Date.now() / 1000;
     const toolData = TOOLS[tool];
@@ -696,7 +696,7 @@ export class ServerGame {
 
   private handleBuild(playerId: string, position: Position): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead) return;
+    if (!player || player.isDead || player.isSpectating) return;
 
     const inventory = this.inventories.get(playerId) || 0;
     if (inventory <= 0) return;

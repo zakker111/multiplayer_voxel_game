@@ -155,6 +155,17 @@ export class ServerPlayer {
     
     const moveSpeed = Math.sqrt(this.input.moveX * this.input.moveX + this.input.moveZ * this.input.moveZ);
     if (moveSpeed < 0.1) return null;
+
+    // Throttle: only emit a footstep once the interval has elapsed, otherwise
+    // every tick (20Hz) would broadcast a sound event (footstep spam).
+    let stepInterval = this.footstepInterval;
+    if (this.isSprinting) {
+      stepInterval *= 0.6;
+    } else if (this.isCrouching) {
+      stepInterval *= 1.5;
+    }
+    if (world.serverTime - this.lastFootstepTime < stepInterval) return null;
+    this.lastFootstepTime = world.serverTime;
     
     // Volume based on movement speed and stance
     let volume = 0.3; // Base volume

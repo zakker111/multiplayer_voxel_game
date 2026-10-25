@@ -169,7 +169,45 @@ export class ServerWorld {
   }
 
   canBuild(x: number, y: number, z: number): boolean {
-    return y <= GROUND_LEVEL + MAX_BUILD_UP && !this.isSolid(x, y, z);
+    // Height limit
+    if (y > GROUND_LEVEL + MAX_BUILD_UP) return false;
+
+    // Position must be empty
+    if (this.isSolid(x, y, z)) return false;
+
+    // A block must attach to something: adjacent solid voxel, or at/below
+    // terrain height (which includes digging into ground). Without this,
+    // mid-air placement passed validation on the server but failed the
+    // client's support flood-fill, causing builds to silently desync/fail.
+    const hasAdjacentSolid =
+      this.isSolid(x + 1, y, z) ||
+      this.isSolid(x - 1, y, z) ||
+      this.isSolid(x, y + 1, z) ||
+      this.isSolid(x, y - 1, z) ||
+      this.isSolid(x, y, z + 1) ||
+      this.isSolid(x, y, z - 1);
+
+    const columnTop = this.getGroundHeight(x, z) - 1; // topmost solid cell in column
+    const restingOnGround = y <= columnTop;
+
+    if (!hasAdjacentSolid && !restingOnGround) return false;
+
+    // Structural support: connectivity to ground within 12 blocks. The
+    // flood-fill must start from the *filled* cell, so temporarily mark it
+    // solid before checking (same logic as the client's VoxelWorld.canBuild).
+    // Write directly into the chunk map so this probe is NOT recorded in
+    // modifiedVoxels (late joiners must not receive phantom add+delete pairs).
+    if (y > GROUND_LEVEL) {
+      const { chunkX, chunkZ } = this.getChunkCoords(x, z);
+      const chunk = this.getOrCreateChunk(chunkX, chunkZ);
+      const vkey = this.getVoxelKey(x, y, z);
+      chunk.voxels.set(vkey, { type: VOXEL_BUILT, durability: 3 });
+      const supported = this.hasSupport(x, y, z, 12);
+      chunk.voxels.delete(vkey);
+      if (!supported) return false;
+    }
+
+    return true;
   }
 
   damageVoxel(x: number, y: number, z: number, damage: number): boolean {

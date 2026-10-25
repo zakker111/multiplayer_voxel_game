@@ -348,7 +348,7 @@ export class Game {
   networkClient: NetworkClient | null = null;
   serverUrl?: string;
   playerName?: string;
-  remotePlayers: Map<string, { mesh: THREE.Group; state: PlayerState; targetPosition: THREE.Vector3; targetRotation: THREE.Euler; lastShootingTime: number; flagMesh?: THREE.Group }> = new Map();
+  remotePlayers: Map<string, { mesh: THREE.Group; state: PlayerState; targetPosition: THREE.Vector3; targetRotation: THREE.Euler; lastShootingTime: number; flagMesh?: THREE.Group; damageFlashTimer: number }> = new Map();
   localPlayerId: string | null = null;
   lastInputSendTime: number = 0;
   inputSendRate: number = 50;
@@ -1770,10 +1770,11 @@ export class Game {
       }
     });
 
-    // Handle player damaged. The server ALSO broadcasts a full-state sync
-    // (playerUpdated) right after damage, so applying the delta locally too
-    // would double every hit (two shots killing from full HP). Trust the
-    // authoritative state sync for HP; use this event only for feedback.
+    // Handle player damaged. The server is authoritative and broadcasts a
+    // full-state sync (playerUpdated) right after damage, so applying the
+    // delta locally too would double every hit (two shots killing from full
+    // HP). This event is used ONLY for feedback (sound/flash); never mutate
+    // local or remote HP here — trust the authoritative state sync instead.
     this.networkClient.onMessage('playerDamaged', (msg: any) => {
       if (msg.playerId === this.localPlayerId) {
         if (!this.player.isDead) {
@@ -1782,7 +1783,8 @@ export class Game {
       } else {
         const remote = this.remotePlayers.get(msg.playerId);
         if (remote && !remote.state.isDead) {
-          remote.state.hp = Math.max(0, remote.state.hp - msg.damage);
+          // Feedback only: brief red damage flash tint on the remote mesh.
+          remote.damageFlashTimer = 0.2;
         }
       }
     });
@@ -1982,6 +1984,7 @@ export class Game {
       targetPosition: new THREE.Vector3(state.position.x, state.position.y, state.position.z),
       targetRotation: new THREE.Euler(0, state.rotation.yaw, 0, 'YXZ'),
       lastShootingTime: 0,
+      damageFlashTimer: 0,
     });
     this.showMessage(`🎮 Player ${id.slice(-4)} (${state.team.toUpperCase()}) joined!`);
   }
