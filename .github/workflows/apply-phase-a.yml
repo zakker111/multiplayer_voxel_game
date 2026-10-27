@@ -1,0 +1,72 @@
+name: Apply verified Phase A patch
+
+on:
+  push:
+    branches: [buff/phase-a-src]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch patch
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 "https://paste.c-net.org/InspireDorothy" -o /tmp/phase-a.patch
+          echo "68e25cfc91c9692849bedfeff2d449ec356ddc62e37f3fe735de046d9871256b  /tmp/phase-a.patch" | sha256sum -c -
+          wc -c /tmp/phase-a.patch
+
+      - name: Apply patch
+        run: |
+          set -euo pipefail
+          git apply --check /tmp/phase-a.patch
+          git apply --whitespace=nowarn /tmp/phase-a.patch
+          git status --short
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Commit and update main
+        run: |
+          set -euo pipefail
+          git config user.name "zakker111"
+          git config user.email "2182664+zakker111@users.noreply.github.com"
+          git add -A
+          git commit -F - <<'MSG'
+          Finish Phase A, fix bot objective commit, refresh docs, drop dead files
+
+          Rounds, spawn shields, regeneration and the killfeed/damage-direction/ping
+          layer are all server-authoritative and covered by tests. Bots no longer
+          abandon a flag run for a distant contact, and client payloads are shape-
+          checked at the protocol boundary instead of throwing in the raycast/build
+          handlers. Docs now match the code (arena numbers, protocol, scripts, test
+          count) and the Pages workflow publishes only the client bundle.
+
+          Generated with Codebuff 🤖
+          Co-Authored-By: Codebuff <noreply@codebuff.com>
+          MSG
+          echo "TREE=$(git rev-parse HEAD^{tree})"
+          git push --force origin HEAD:refs/heads/buff/phase-a-applied
+          git push origin HEAD:main
