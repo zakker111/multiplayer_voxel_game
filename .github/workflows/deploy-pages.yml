@@ -37,15 +37,21 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Publish ONLY the client bundle. `dist/` also holds the server bundle,
+      # its source map and the admin CLI, none of which belong on a public
+      # static host.
       - name: Prepare GitHub Pages Static Files
         run: |
-          touch dist/.nojekyll
-          cp dist/index.html dist/404.html
+          mkdir -p pages-dist
+          cp -r dist/assets pages-dist/assets
+          cp dist/index.html pages-dist/index.html
+          cp dist/index.html pages-dist/404.html
+          touch pages-dist/.nojekyll
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './dist'
+          path: './pages-dist'
 
   deploy:
     environment:
