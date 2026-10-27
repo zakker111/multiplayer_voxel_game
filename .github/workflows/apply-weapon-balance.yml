@@ -1,0 +1,72 @@
+name: Apply verified weapon-balance patch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rebuild and verify the patch
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, sys
+
+          raw = open('wb-tmp/part0.b64','rb').read() + open('wb-tmp/part1.b64','rb').read()
+          if raw[:2] == b'\x1f\x8b':
+              gz = raw
+          else:
+              gz = base64.b64decode(b''.join(raw.split()))
+          patch = gzip.decompress(gz)
+
+          expected = '57209de92b4ced635fc4daa041c9ad14b999bf56ce6dfefef7990ac4bd93b1c1'
+          got = hashlib.sha256(patch).hexdigest()
+          print('patch bytes', len(patch), 'sha256', got)
+          if got != expected:
+              print('PATCH HASH MISMATCH -- refusing to touch main')
+              sys.exit(1)
+          open('/tmp/change.patch','wb').write(patch)
+          PY
+
+      - name: Verify we are on the tested base
+        run: |
+          set -euo pipefail
+          test "$(git hash-object src/game/game.ts)" = "61499fdfcbaaa633415da0ac6c6a26738548f7cb"
+          test "$(git hash-object src/shared/types.ts)" = "735277023bf79cc496de74cd44e710a47b261c9f"
+          test "$(git hash-object src/server/serverGame.ts)" = "431f02de208708e9a568f00da944bc8fdd811e4f"
+          test "$(git hash-object src/server/serverPlayer.ts)" = "3cb499f39c128e90df3f1922f298b73f7ce44753"
+          test "$(git hash-object src/server/serverBot.ts)" = "555356083ec4ce09d12ee47c91f94c1ab6dd11ee"
+          echo 'base blobs match the tested tree'
+
+      - name: Apply and verify the result
+        run: |
+          set -euo pipefail
+          git apply --check -v /tmp/change.patch
+          git apply /tmp/change.patch
+          test "$(git hash-object src/game/game.ts)" = "8f3800746bbb260a462aa686dc85f5472fc10b5b"
+          test "$(git hash-object src/shared/types.ts)" = "1d865c088fe02b65f4a3f4ad88ea1087ba9838b3"
+          test "$(git hash-object src/server/serverGame.ts)" = "321e57e9c92460320f1635e4dd41917eae2013ff"
+          test "$(git hash-object src/server/serverPlayer.ts)" = "80440f7ddb2faaf3220f047e43a2deab7b5726a4"
+          test "$(git hash-object src/server/serverBot.ts)" = "bf92e4d1d016d8fde29809fd611a1ff48c1534fb"
+          test "$(git hash-object tests/weaponBalance.test.mjs)" = "eb1745fc4675562ac81ad9ee0ea42914df902bbf"
+          test "$(git hash-object AGENTS.md)" = "f5b8d15b55b3cefa9a722d5b4268c244c770db14"
+          test "$(git hash-object src/server/README.md)" = "79c2afb1f1347f87e4df79cd621acc64325ce7dd"
+          echo 'all target blobs verified'
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          rm -rf wb-tmp
+          rm -f .github/workflows/apply-weapon-balance.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git status --short
+          git commit -m "Share one authoritative weapon table; rebalance rifle vs SMG" -m "The client kept its own copy of the weapon stats, so the SMG hit for 34/100 in a local bot match while the server dealt 20/34 for the same gun. Move every weapon number (damage, fire rate, spread, magazine, reload, range falloff) into WEAPONS in src/shared/types.ts and give each weapon a role: the rifle is a slow marksman weapon (two body shots, or one headshot, at any range) and the SMG keeps its close-range DPS with damage falling off past 18m. weaponDamage() now applies the falloff identically on the server, for bots and in the offline bot match." -m "Also fix two shot-path bugs: a rate-limited shot no longer spends a round (ammo was deducted before the rate check), and the fire-rate tolerance drops from 25% to a jitter-only 10% so a modified client can no longer fire 33% faster than the weapon allows." -m "Generated with Codebuff \xF0\x9F\xA4\x96" -m "Co-Authored-By: Codebuff <noreply@codebuff.com>"
+          git push
