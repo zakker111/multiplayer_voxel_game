@@ -1,258 +1,120 @@
-# Voxel FPS - Multiplayer Server
+# Voxel FPS — Server Component
 
-## Overview
+The authoritative game server for the Voxel FPS CTF game. It owns the 20 Hz tick
+loop, the voxel world, combat, the CTF objective, rounds and the bot AI. Clients
+send input and mirror state; they never decide outcomes.
 
-This is the server component for the Voxel FPS multiplayer game. The server handles all game logic, physics, and state management in a server-authoritative architecture.
+The full product documentation (features, controls, deployment, AI-agent guide)
+lives in the repo root: [README.md](../../README.md), [DEPLOYMENT.md](../../DEPLOYMENT.md)
+and [AGENTS.md](../../AGENTS.md). This file only covers the server internals.
 
-## Features
+## Files
 
-- **Server-Authoritative**: All game logic runs on the server
-- **Chunk-Based World**: Efficient 16x16 chunk system for voxel management
-- **Real-Time Physics**: 20 ticks per second game loop
-- **Team System**: Red vs Blue teams
-- **Combat System**: Hitscan weapons with headshot/bodyshot damage
-- **Building/Destruction**: Voxel manipulation with structural collapse
-- **WebSocket Communication**: Real-time client-server communication
+| File | Role |
+| :--- | :--- |
+| `../../server.ts` | Entry point: Express static hosting for `dist/`, HTTP API (`/api/status`, admin), WebSocket upgrade, 20 Hz loop |
+| `serverGame.ts` | Players, connections, combat validation, CTF objective, rounds, scores, bot orchestration |
+| `serverPlayer.ts` | Server-side player state, movement, ammo/reload, damage, footsteps |
+| `serverBot.ts` | FSM bot AI (see below) |
+| `serverWorld.ts` | Voxel storage, chunked dirty tracking, raycasts, `canBuild()` |
+| `logger.ts` | Structured timestamped logging (`[INFO]` / `[WARN]` / `[ERROR]` + subsystem tag) |
+| `banStore.ts` | Persistent `bans.json` store for IP/name bans |
 
-## Architecture
+## Running
 
-```
-Server (Node.js + Express + WebSocket)
-├── server.ts           - Entry point, HTTP + WebSocket server
-├── serverGame.ts       - Game logic, player management, combat
-├── serverPlayer.ts     - Player state, physics, collision
-└── serverWorld.ts      - Voxel world, chunks, raycasting
-```
-
-## Installation
+The server and the built client are one process — there is no separate "server
+script". From the repository root:
 
 ```bash
-# Install dependencies
 npm install
-
-# Build the project
-npm run build
-
-# Start the server
-npm run server
+npm run dev      # tsx server.ts + Vite middleware (development, PORT=3000)
+npm run build    # vite build + dist/server.cjs + dist/admin.cjs
+npm start        # node dist/server.cjs (production)
 ```
 
-## Configuration
+`dist/server.cjs` therefore needs `dist/` (the client bundle) next to it.
+There is no `npm run server` script and no `TICK_RATE` variable: the tick rate
+is fixed at 20 Hz (`server.ts`), and the port comes from `PORT` (default `3000`).
 
-Environment variables:
-- `PORT` - Server port (default: 3000)
-- `TICK_RATE` - Server tick rate in Hz (default: 20)
+### Environment variables
 
-## Network Protocol
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `PORT` | `3000` | HTTP + WebSocket bind port |
+| `NODE_ENV` | `development` | `production` disables the Vite middleware |
+| `ADMIN_TOKEN` | *(empty)* | Remote admin access; empty = localhost-only admin API |
+| `SERVER_BOT_COUNT` | `10` | Bots per team at startup and the rebalance target |
+| `SERVER_BOT_HP` | `130` | Bot max HP |
+| `SERVER_BOT_BLOCKS` | `36` | Bot build budget per life |
+| `ROUND_MINUTES` | `30` | Round length in minutes |
+| `BAN_FILE` | `bans.json` | Where persistent bans are stored |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `LOG_FILE` | *(none)* | Also append logs to this file |
 
-### Client → Server Messages
+## Simulation model
 
-```typescript
-{ type: 'join', team: 'red' | 'blue' }
-{ type: 'playerInput', input: PlayerInput }
-{ type: 'shoot', origin: Position, direction: Position }
-{ type: 'useTool', tool: 'pickaxe' | 'spade', target: Position }
-{ type: 'build', position: Position }
-```
+- **20 Hz tick** (`serverGame.update(dt)`): respawn timers, player movement,
+  bot AI, dropped-flag timers, captured-flag return timers, round clock,
+  spawn-shield expiry, health regeneration and flag-capture checks.
+- **Server-authoritative combat**: shots are validated against the shooter's
+  weapon (rate limit + ammo), then resolved by a server raycast with line-of-sight
+  and range falloff (`weaponDamage()`). Damage, kills, scores and stats are only
+  ever applied on the server.
+- **Spawn protection**: 2.5 s of immunity at every real spawn, cancelled by the
+  player's own shot, and applied on both damage paths.
+- **Regeneration**: 6 HP/s after 6 s without taking damage.
+- **Rounds**: `ROUND_MINUTES` of CTF, then an intermission that resets captures,
+  flags and spawns. Scoring is frozen outside a live round.
+- **Roster**: the server keeps `SERVER_BOT_COUNT` combatants per team. A human
+  joining retires one bot from that team; a leave/kick/disconnect spawns a
+  backfill bot.
 
-### Server → Client Messages
+Shared constants (world size, spawns, flags, weapon table, round/feedback
+timings) live in `src/shared/types.ts` — do not re-declare them here.
 
-```typescript
-{ type: 'playerJoined', playerId: string, state: PlayerState }
-{ type: 'playerUpdated', playerId: string, state: PlayerState }
-{ type: 'voxelChanged', change: VoxelChange }
-{ type: 'playerDamaged', playerId: string, damage: number }
-{ type: 'playerDied', playerId: string, killerId?: string }
-{ type: 'hitConfirmed', targetId: string, damage: number, isHeadshot: boolean }
-```
+## Bot AI (`serverBot.ts`)
 
-## Game Constants
+States: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `BUILD`,
+`TRENCH`, `RETREAT`. Bots check line of sight before firing, revenge-target their
+last attacker, prioritize enemy flag carriers, harvest and place blocks through
+the same `canBuild()` / entity-clearance rules as players, and build midfield
+trench walls with a multi-tick plan guarded from re-decision.
 
-```typescript
-WORLD_SIZE = 150          // 150x150 voxel world
-CHUNK_SIZE = 16           // 16x16 chunks
-GROUND_LEVEL = 8          // Base ground height
-PLAYER_SPEED = 5          // Movement speed
-SPRINT_MULTIPLIER = 1.6   // Sprint speed boost
-JUMP_FORCE = 8            // Jump velocity
-GRAVITY = 20              // Gravity acceleration
-```
+## Protocol
 
-## Weapons
+The wire format is a small JSON schema defined once in
+`src/shared/types.ts` (`ClientMessage` / `ServerMessage`). Do not hand-document
+or duplicate it: add a variant there and both sides type-check.
 
-All weapon stats live in exactly one place: `WEAPONS` in `src/shared/types.ts`.
-The client, the server and the bots read that table, and `weaponDamage()` applies
-range falloff identically everywhere. Do not re-declare damage, fire-rate,
-magazine or reload values in another file.
+Server → client highlights: `init` (full snapshot incl. round state),
+`playerJoined` / `playerUpdated` / `playerLeft`, `playerShot`,
+`hitConfirmed`, `playerDamaged` / `playerDied` (with `weapon` + `isHeadshot`),
+`playerRespawned`, `voxelChanged`, `inventoryUpdated`, `scoreUpdate`,
+`statsUpdate`, `flagPickedUp` / `flagDropped` / `flagReturned` / `flagCaptured`,
+`roundUpdate` / `roundEnded`, `pong`, `kicked`.
 
-### Rifle — marksman
-- Fire rate: 0.7s (semi-auto, one shot per click)
-- Headshot: 100 (one-shot kill on a player)
-- Body: 65 (two-shot kill; two shots also kill a 130 HP bot)
-- Spread: 0.0006 hip fire, 0 when aiming
-- Magazine 10, reload 2.0s
-- Full damage out to 140m, tapering to 0.8x at 260m
+Client → server: `join`, `playerInput`, `shoot`, `useTool`, `build`, `reload`,
+`pickupFlag`, `captureFlag`, `toggleSpectator`, `footstep`, `requestRespawn`,
+`ping`, `disconnect`.
 
-### SMG — close quarters
-- Fire rate: 0.1s (hold to auto-fire)
-- Headshot: 34
-- Body: 20 (five-shot kill on a player)
-- Spread: 0.012 hip fire, ~1/6 of that when aiming
-- Magazine 30, reload 1.5s
-- Full damage out to 18m, falling to 0.35x at 50m — out-DPSed by the rifle past ~25m
+## Security model
 
-## Tools
+- Dead and spectating clients have `playerInput` / `shoot` / `build` /
+  `useTool` / flag actions rejected (no ghost entities).
+- Voxel edits are re-validated server-side (`canBuild()`, durability, reach).
+- Weapon fire rate and magazines are enforced server-side; a replayed shot
+  consumes nothing and deals nothing.
+- Bans are checked at the WebSocket upgrade stage and persist across restarts.
+- Admin endpoints require either a loopback peer or `ADMIN_TOKEN`.
 
-### Pickaxe
-- Damage: 1 per hit
-- Cooldown: 0.5s
-- Harvests voxels (adds to inventory)
+## Tests
 
-### Spade
-- Damage: 3 per hit (instant destroy)
-- Cooldown: 0.3s
-- Does not harvest
-
-## Voxel Types
-
-- `0` - Air (empty)
-- `1` - Dirt
-- `2` - Stone
-- `3` - Grass
-- `4` - Built (player-placed)
-
-## Performance
-
-### Optimizations
-
-1. **Chunk-Based Rendering**: Only rebuild affected chunks
-2. **Dirty Tracking**: Only send changed chunks to clients
-3. **Shared Geometry**: All chunks share same BoxGeometry
-4. **Deferred Rebuilds**: Batch voxel changes per frame
-5. **Server-Side Physics**: Prevents cheating, ensures consistency
-
-### Benchmarks
-
-- Voxel destruction: ~90x faster with chunks
-- Network bandwidth: Only dirty chunks transmitted
-- Server tick rate: 20 Hz (50ms per tick)
-- Max players: 32+ (depends on server hardware)
-
-## Testing
-
-### Local Testing
-
-```bash
-# Terminal 1: Start server
-npm run server
-
-# Terminal 2: Start client
-npm run dev
-
-# Open multiple browser tabs to test multiplayer
-http://localhost:5173
-```
-
-### Stress Testing
-
-Test with multiple concurrent players:
-- Rapid voxel destruction
-- Large-scale building
-- Combat scenarios
-- Network latency simulation
-
-## Security
-
-### Anti-Cheat Measures
-
-1. **Server Authority**: All game logic on server
-2. **Input Validation**: Validate all client inputs
-3. **Rate Limiting**: Weapon cooldowns enforced server-side
-4. **Movement Validation**: Check for teleportation/speed hacks
-5. **Hit Validation**: Server calculates hits, not client
-
-## Deployment
-
-### Production Setup
-
-```bash
-# Build
-npm run build
-
-# Run with PM2 (process manager)
-pm2 start dist/server/server.js --name voxel-fps-server
-
-# Or use Docker
-docker build -t voxel-fps-server .
-docker run -p 3000:3000 voxel-fps-server
-```
-
-### Scaling
-
-For multiple servers:
-- Use Redis for shared state
-- Load balancer for WebSocket connections
-- Region-based servers for low latency
-
-## Troubleshooting
-
-### Port Already in Use
-
-```bash
-# Change port
-PORT=3001 npm run server
-```
-
-### WebSocket Connection Failed
-
-- Check firewall settings
-- Ensure WebSocket protocol is allowed
-- Verify server is running
-
-### Performance Issues
-
-- Reduce `TICK_RATE` environment variable
-- Reduce `WORLD_SIZE` in types.ts
-- Increase server resources
-
-## Development
-
-### Adding New Features
-
-1. Update shared types in `src/shared/types.ts`
-2. Implement server logic in appropriate file
-3. Add network message handlers
-4. Update client to handle new messages
-
-### Code Structure
-
-```
-src/
-├── server/
-│   ├── server.ts          # Entry point
-│   ├── serverGame.ts      # Game logic
-│   ├── serverPlayer.ts    # Player physics
-│   └── serverWorld.ts     # Voxel world
-├── shared/
-│   └── types.ts           # Shared types
-└── game/                  # Client code (to be updated)
-```
+From the repository root: `npm test` (54 `node:test` cases). The suites load the
+real `serverGame` / `serverWorld` / `serverBot` bundles from `dist/tests/`, so
+they exercise real behaviour: voxel build/mine rules, bot trench building and
+stuck-state handling, CTF flag drops, spawn bounds, weapon balance, the round
+lifecycle and the spawn-shield/regen/feedback layer.
 
 ## License
 
-MIT
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## Support
-
-For issues and questions:
-- Check MULTIPLAYER_ARCHITECTURE.md for detailed documentation
-- Review the code comments
-- Test with multiple clients locally
+MIT — see [LICENSE](../../LICENSE).

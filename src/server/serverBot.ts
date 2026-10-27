@@ -75,6 +75,18 @@ const TRENCH_BUILD_INTERVAL = 2;
 // long it waits before it is willing to fall back again.
 const RETREAT_MAX_SECONDS = 6;
 const RETREAT_COOLDOWN_SECONDS = 10;
+// A bot running for the enemy flag only aborts the run for enemies inside this
+// range. Without it, any visible enemy anywhere on the map cancelled GRABFLAG,
+// so a bot-only match never reached a flag stand at all (measured: zero flag
+// pickups in 10 simulated minutes with a full 10v10 roster).
+const OBJECTIVE_COMMIT_RANGE = 24;
+// Inside this radius of the enemy stand the pickup is worth more than a
+// midfield duel, so bots keep pushing for the flag instead of brawling.
+const OBJECTIVE_PUSH_RANGE = 45;
+// A flag runner only abandons the run at this fraction of max HP (normal bots
+// retreat at 25%). Giving up at 25% near the enemy base meant nobody ever
+// arrived with the flag.
+const OBJECTIVE_RETREAT_HP = 0.15;
 
 // Difficulty knobs (env-overridable so Render can tune without code changes)
 const BOT_MAX_HP = Number(process.env.SERVER_BOT_HP ?? 130); // beefier than players (100)
@@ -191,7 +203,12 @@ export class ServerBot extends ServerPlayer {
     if (nearest) this.lastSeenEnemy = { ...nearest.position };
 
     // --- Reactive overrides (checked every tick) ---
-    if (this.needsRetreat(nearestDist)) {
+    const distToEnemyFlag = Math.hypot(
+      enemyFlag.x - this.position.x,
+      enemyFlag.z - this.position.z,
+    );
+    const onObjectiveRun = this.botState === 'GRABFLAG' || this.botState === 'RETURN';
+    if (this.needsRetreat(nearestDist, onObjectiveRun)) {
       // Only START a withdrawal; re-transitioning every tick kept resetting
       // the retreat deadline, so the bot never finished falling back.
       if (this.botState !== 'RETREAT' && t >= this.retreatCooldownUntil) {
@@ -200,7 +217,18 @@ export class ServerBot extends ServerPlayer {
     } else if (this.carryingFlag) {
       if (this.botState !== 'RETURN') this.transition('RETURN', t, 10);
     } else if (nearest && this.botState !== 'RETREAT') {
-      this.combatReaction(nearest, nearestDist, ctx, t);
+      if (distToEnemyFlag < OBJECTIVE_PUSH_RANGE) {
+        // In the enemy base: take the stand. Without this a bot that saw any
+        // defender within ~75m picked a duel instead and the flag was never
+        // touched (measured: zero pickups in a bot-only match).
+        if (this.botState !== 'GRABFLAG') this.transition('GRABFLAG', t, 12);
+      } else {
+        // A runner keeps running: only close contacts may pull it off the
+        // objective. It still shoots back from inside doGrabFlag.
+        const committedToRun =
+          this.botState === 'GRABFLAG' && nearestDist > OBJECTIVE_COMMIT_RANGE;
+        if (!committedToRun) this.combatReaction(nearest, nearestDist, ctx, t);
+      }
     } else if (t >= this.stateUntil) {
       this.chooseObjective(ctx, t, enemyFlag, homeBase);
     }
@@ -220,7 +248,7 @@ export class ServerBot extends ServerPlayer {
         this.doAdvance(ctx, t, enemyFlag);
         break;
       case 'GRABFLAG':
-        this.doGrabFlag(ctx, enemyFlag);
+        this.doGrabFlag(ctx, enemyFlag, nearest, nearestDist, t);
         break;
       case 'RETURN':
         this.doReturn(ctx, homeBase, nearest, nearestDist, t);
@@ -276,8 +304,8 @@ export class ServerBot extends ServerPlayer {
     this.stateUntil = now + duration;
   }
 
-  private needsRetreat(nearestDist: number): boolean {
-    const lowHp = this.hp <= 0.25 * this.maxHp;
+  private needsRetreat(nearestDist: number, objectiveRun: boolean = false): boolean {
+    const lowHp = this.hp <= (objectiveRun ? OBJECTIVE_RETREAT_HP : 0.25) * this.maxHp;
     const noAmmo = this.currentAmmo <= 0 && !this.isReloading;
     const closeContact = nearestDist < 9 && this.hp <= 0.55 * this.maxHp;
     return lowHp || noAmmo || closeContact;
@@ -472,9 +500,17 @@ export class ServerBot extends ServerPlayer {
     this.moveTo(this.waypoint, dtOf(ctx), ctx, true);
   }
 
-  private doGrabFlag(ctx: BotContext, enemyFlag: { x: number; z: number }): void {
+  private doGrabFlag(
+    ctx: BotContext,
+    enemyFlag: { x: number; z: number },
+    enemy: BotTargetInfo | null,
+    dist: number,
+    t: number,
+  ): void {
     const wp: Position = { x: enemyFlag.x, y: GROUND_LEVEL, z: enemyFlag.z };
     this.moveTo(wp, dtOf(ctx), ctx, true);
+    // Fire on the move: a committed runner must not be a free kill.
+    if (enemy && dist < 45) this.aimAndShoot(enemy, ctx, t);
     const d = Math.hypot(wp.x - this.position.x, wp.z - this.position.z);
     if (d < 3) {
       // Attempt pickup via context-driven game logic: rely on auto-pickup

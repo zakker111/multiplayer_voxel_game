@@ -29,6 +29,7 @@ export interface PlayerState {
   isReloading?: boolean;
   aimTransition?: number; // 0-1 for smooth aiming animation
   carryingFlag?: boolean; // Is player carrying enemy flag?
+  spawnProtected?: boolean; // spawn invulnerability is still active (HUD shield)
   isBot?: boolean; // Server-authoritative: true for AI combatants (scoreboard)
   name?: string;   // Display name shown on the Tab scoreboard / nametags
 }
@@ -68,6 +69,9 @@ export type ClientMessage =
   | { type: 'toggleSpectator' }
   | { type: 'footstep'; volume: number; pitch: number }
   | { type: 'requestRespawn' }
+  // Round-trip probe: the server echoes `t` straight back so the client can
+  // measure latency without relying on WebSocket protocol pings.
+  | { type: 'ping'; t: number }
   | { type: 'disconnect' };
 
 export interface PlayerInput {
@@ -91,8 +95,31 @@ export interface FlagSnapshot {
   droppedPosition: Position | null;
 }
 
+export type RoundPhase = 'live' | 'intermission';
+
+/** Authoritative round state, mirrored to every client (and included in `init`
+ *  so a late joiner immediately sees the current round and clock). */
+export interface RoundSnapshot {
+  /** 1-based round number for this server session. */
+  round: number;
+  phase: RoundPhase;
+  /** Seconds left in the live round (0 during an intermission). */
+  timeLeft: number;
+  /** Seconds left of the intermission (0 while the round is live). */
+  intermission: number;
+  captures: { red: number; blue: number };
+  /** Rounds won per team this session. */
+  wins: { red: number; blue: number };
+  /** Configured round length in seconds, so the HUD can draw a clock/bar. */
+  duration: number;
+}
+
+export type RoundWinner = 'red' | 'blue' | 'draw';
+
 export type ServerMessage =
-  | { type: 'init'; playerId: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot } }
+  | { type: 'init'; playerId: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
+  | { type: 'roundUpdate'; round: RoundSnapshot }
+  | { type: 'roundEnded'; round: number; winner: RoundWinner; captures: { red: number; blue: number }; wins: { red: number; blue: number } }
   | { type: 'gameState'; state: GameState }
   | { type: 'playerJoined'; playerId: string; state: PlayerState }
   | { type: 'playerLeft'; playerId: string }
@@ -101,7 +128,8 @@ export type ServerMessage =
   | { type: 'voxelChanged'; change: VoxelChange }
   | { type: 'chunkUpdated'; chunk: ChunkData }
   | { type: 'playerDamaged'; playerId: string; damage: number; attackerId?: string }
-  | { type: 'playerDied'; playerId: string; killerId?: string }
+  | { type: 'playerDied'; playerId: string; killerId?: string; weapon?: string; isHeadshot?: boolean }
+  | { type: 'pong'; t: number }
   | { type: 'scoreUpdate'; scores: { red: number; blue: number } }
   | { type: 'statsUpdate'; stats: Record<string, PlayerStats> }
   | { type: 'playerRespawned'; playerId: string; position: Position }
@@ -153,6 +181,52 @@ export const VOXEL_DIRT = 1;
 export const VOXEL_STONE = 2;
 export const VOXEL_GRASS = 3;
 export const VOXEL_BUILT = 4;
+
+/** Round length in minutes. Both teams are already 320m apart at the start of a
+ *  round and a flag run crosses the whole arena, so rounds are long by design;
+ *  override with ROUND_MINUTES (the round clock is never shorter than 30 min). */
+export const DEFAULT_ROUND_MINUTES = 30;
+
+/** Pause between rounds: flags return to their stands, everyone respawns. */
+export const INTERMISSION_SECONDS = 20;
+
+/** Spawn invulnerability. Given on join, respawn and round start; a player's
+ *  own shot cancels it early so it can never be used as an attack shield. */
+export const SPAWN_PROTECTION_SECONDS = 2.5;
+
+/** Health regenerates only after this long without taking damage (long enough
+ *  that a firefight is still decided by aim, short enough that a survivor can
+ *  push again instead of limping around at 12 HP forever). */
+export const REGEN_DELAY_SECONDS = 6;
+
+/** Health per second once regeneration starts. */
+export const REGEN_RATE = 6;
+
+/** Screen-space bearing of a target from an observer, in degrees: 0 is dead
+ *  ahead, +90 is to the right, +/-180 is directly behind. Used by the HUD's
+ *  damage-direction indicator, so it lives here (shared, pure, testable)
+ *  instead of inside the 5k-line game class. */
+export function relativeBearingDegrees(
+  origin: { x: number; z: number },
+  forward: { x: number; z: number },
+  target: { x: number; z: number },
+): number {
+  const dx = target.x - origin.x;
+  const dz = target.z - origin.z;
+  const dist = Math.hypot(dx, dz);
+  if (!Number.isFinite(dist) || dist < 1e-4) return 0;
+
+  const fLen = Math.hypot(forward.x, forward.z) || 1;
+  const fx = forward.x / fLen;
+  const fz = forward.z / fLen;
+  // Right-hand side of the view direction (y-up), i.e. forward rotated -90deg.
+  const rx = -fz;
+  const rz = fx;
+
+  const ahead = (dx * fx + dz * fz) / dist;
+  const right = (dx * rx + dz * rz) / dist;
+  return (Math.atan2(right, ahead) * 180) / Math.PI;
+}
 
 export const PLAYER_SPEED = 5;
 export const SPRINT_MULTIPLIER = 1.6;

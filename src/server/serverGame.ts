@@ -4,6 +4,18 @@ import { ServerWorld } from './serverWorld';
 import { ServerBot, BotContext, BotTargetInfo } from './serverBot';
 import { createLogger } from './logger';
 const log = createLogger('game');
+
+/** Shape check for client-supplied positions/vectors.
+ *
+ *  Message payloads arrive from untrusted sockets: a null `origin`, `target` or
+ *  `position` used to throw inside the raycast/build handlers and log an
+ *  `error handling message` line for every bad frame. Reject them quietly at
+ *  the protocol boundary instead. */
+function isVec3(value: unknown): value is Position {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as { x?: unknown; y?: unknown; z?: unknown };
+  return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+}
 import { BanStore, normalizeIp } from './banStore';
 import {
   ClientMessage,
@@ -14,6 +26,14 @@ import {
   WEAPONS,
   TOOLS,
   weaponDamage,
+  RoundPhase,
+  RoundSnapshot,
+  RoundWinner,
+  DEFAULT_ROUND_MINUTES,
+  INTERMISSION_SECONDS,
+  SPAWN_PROTECTION_SECONDS,
+  REGEN_DELAY_SECONDS,
+  REGEN_RATE,
   VOXEL_AIR,
   BLUE_SPAWN_Z_MIN,
   BLUE_SPAWN_Z_MAX,
@@ -38,6 +58,32 @@ export class ServerGame {
   private connections: Map<string, WebSocket | GameConnection> = new Map();
   private scores = { red: 0, blue: 0 };
   private captures = { red: 0, blue: 0 };
+
+  // ---------------- Rounds ----------------
+  // A round is a fixed-length window of CTF. When the clock runs out the team
+  // with more captures takes it, everything resets during a short intermission
+  // and the next round starts. Rounds are long on purpose: the arena is 448m
+  // wide and a flag run crosses ~320m, so shorter rounds would mostly be travel.
+  private roundSeconds: number = Math.max(
+    60,
+    (Number(process.env.ROUND_MINUTES) || DEFAULT_ROUND_MINUTES) * 60,
+  );
+  private roundNumber: number = 1;
+  private roundPhase: RoundPhase = 'live';
+  private roundTimeLeft: number = this.roundSeconds;
+  private intermissionTimeLeft: number = 0;
+  private roundWins = { red: 0, blue: 0 };
+  /** Throttles the periodic roundUpdate broadcast to ~1Hz. */
+  private roundSyncAccumulator: number = 0;
+
+  // ---------------- Spawn protection & regeneration ----------------
+  /** world.serverTime at which each player's spawn shield expires. */
+  private spawnProtectedUntil = new Map<string, number>();
+  /** world.serverTime of each player's last damage (drives regen delay). */
+  private lastDamagedAt = new Map<string, number>();
+  /** Last integer HP broadcast, so regen syncs at ~1-2Hz instead of 20Hz. */
+  private lastHpBroadcast = new Map<string, number>();
+
   /** Per-combatant kill/death/capture tallies for the Tab scoreboard. */
   private playerStats: Map<string, PlayerStats> = new Map();
   private lastShootTime: Map<string, number> = new Map();
@@ -129,6 +175,9 @@ export class ServerGame {
     this.lastShootTime.delete(botId);
     this.lastToolTime.delete(botId);
     this.inventories.delete(botId);
+    this.spawnProtectedUntil.delete(botId);
+    this.lastDamagedAt.delete(botId);
+    this.lastHpBroadcast.delete(botId);
     // Keep retired bots' stats until they rejoin — the scoreboard still shows
     // their kills/captures for the match (they remain part of the battle).
     this.broadcast({ type: 'playerLeft', playerId: botId });
@@ -220,7 +269,8 @@ export class ServerGame {
     const isHeadshot = dist < 25 && Math.random() < 0.18;
     const damage = weaponDamage(weapon, isHeadshot, dist);
 
-    this.applyDamage(targetId, damage, botId);
+    this.clearSpawnProtection(botId);
+    this.applyDamage(targetId, damage, botId, isHeadshot);
   }
 
   private damageAndBroadcastVoxel(pos: Position): void {
@@ -241,12 +291,14 @@ export class ServerGame {
 
   /** Centralized damage application (used by bot shots). Human shots keep
    *  their own path but respect the same death/respawn bookkeeping. */
-  private applyDamage(targetId: string, damage: number, attackerId: string): void {
+  private applyDamage(targetId: string, damage: number, attackerId: string, isHeadshot: boolean = false): void {
     const target = this.players.get(targetId);
     const attacker = this.players.get(attackerId);
     if (!target || target.isDead) return;
+    if (this.isSpawnProtected(targetId)) return; // shield soaks the round
 
     target.takeDamage(damage);
+    this.noteDamaged(targetId);
 
     // Threat memory for bot victims: they hunt back toward their attacker
     if (target instanceof ServerBot && attackerId) {
@@ -256,7 +308,7 @@ export class ServerGame {
     // Confirm the hit to the SHOOTER, not the victim: the client renders the
     // hit marker + headshot sound from this event, so sending it to the victim
     // made players see "you hit someone" feedback whenever a bot shot them.
-    this.sendToPlayer(attackerId, { type: 'hitConfirmed', targetId, damage, isHeadshot: false });
+    this.sendToPlayer(attackerId, { type: 'hitConfirmed', targetId, damage, isHeadshot });
 
     this.broadcast({ type: 'playerDamaged', playerId: targetId, damage, attackerId });
     this.broadcast({ type: 'playerUpdated', playerId: targetId, state: target.getState() });
@@ -269,8 +321,181 @@ export class ServerGame {
         this.getStats(attacker.id).kills++;
         this.broadcastStats();
       }
-      this.broadcast({ type: 'playerDied', playerId: targetId, killerId: attackerId });
+      this.broadcast({
+        type: 'playerDied',
+        playerId: targetId,
+        killerId: attackerId,
+        weapon: attacker?.equipment,
+        isHeadshot,
+      });
       this.respawnTimers.set(targetId, 4.0);
+    }
+  }
+
+  // ---------------- Spawn protection & regeneration ----------------
+
+  /** Give a freshly spawned/joined player a short invulnerability window. */
+  private grantSpawnProtection(playerId: string): void {
+    this.spawnProtectedUntil.set(playerId, this.world.serverTime + SPAWN_PROTECTION_SECONDS);
+    const player = this.players.get(playerId);
+    if (player) player.spawnProtected = true;
+  }
+
+  /** Drop the shield early — a player's own shot cancels it, so it can never be
+   *  used as an attack shield from inside cover. */
+  private clearSpawnProtection(playerId: string): void {
+    if (!this.spawnProtectedUntil.delete(playerId)) return;
+    const player = this.players.get(playerId);
+    if (player) player.spawnProtected = false;
+  }
+
+  private isSpawnProtected(playerId: string): boolean {
+    const until = this.spawnProtectedUntil.get(playerId) ?? 0;
+    return until > this.world.serverTime;
+  }
+
+  /** Reset the regeneration delay for a player that just took damage. */
+  private noteDamaged(playerId: string): void {
+    this.lastDamagedAt.set(playerId, this.world.serverTime);
+  }
+
+  /** Tick spawn shields and out-of-combat regeneration. */
+  private updateHealth(dt: number): void {
+    const now = this.world.serverTime;
+    for (const player of this.players.values()) {
+      // Shield expiry: flip the flag and tell clients the shield is gone.
+      const until = this.spawnProtectedUntil.get(player.id) ?? 0;
+      if (until > 0 && until <= now && player.spawnProtected) {
+        player.spawnProtected = false;
+        this.spawnProtectedUntil.delete(player.id);
+        this.broadcast({ type: 'playerUpdated', playerId: player.id, state: player.getState() });
+      }
+
+      if (player.isDead || player.isSpectating || player.spawnProtected) continue;
+      if (player.hp >= player.maxHp) continue;
+
+      const lastHit = this.lastDamagedAt.get(player.id) ?? -Infinity;
+      if (now - lastHit < REGEN_DELAY_SECONDS) continue;
+
+      player.hp = Math.min(player.maxHp, player.hp + REGEN_RATE * dt);
+      // Sync only when the visible integer changes (and on the final full heal).
+      const shown = Math.floor(player.hp);
+      if (this.lastHpBroadcast.get(player.id) !== shown) {
+        this.lastHpBroadcast.set(player.id, shown);
+        this.broadcast({ type: 'playerUpdated', playerId: player.id, state: player.getState() });
+      }
+    }
+  }
+
+  // ---------------- Round lifecycle ----------------
+
+  /** Authoritative round snapshot (join payload + every roundUpdate). */
+  getRoundSnapshot(): RoundSnapshot {
+    return {
+      round: this.roundNumber,
+      phase: this.roundPhase,
+      timeLeft: this.roundTimeLeft,
+      intermission: this.intermissionTimeLeft,
+      captures: { ...this.captures },
+      wins: { ...this.roundWins },
+      duration: this.roundSeconds,
+    };
+  }
+
+  private broadcastRound(): void {
+    this.broadcast({ type: 'roundUpdate', round: this.getRoundSnapshot() });
+  }
+
+  /** Round clock and phase transitions, driven from the game loop. */
+  private updateRound(dt: number): void {
+    if (this.roundPhase === 'live') {
+      this.roundTimeLeft = Math.max(0, this.roundTimeLeft - dt);
+      if (this.roundTimeLeft <= 0) {
+        this.endRound();
+        return;
+      }
+    } else {
+      this.intermissionTimeLeft = Math.max(0, this.intermissionTimeLeft - dt);
+      if (this.intermissionTimeLeft <= 0) {
+        this.startNextRound();
+        return;
+      }
+    }
+
+    this.roundSyncAccumulator += dt;
+    if (this.roundSyncAccumulator >= 1) {
+      this.roundSyncAccumulator = 0;
+      this.broadcastRound();
+    }
+  }
+
+  /** Time is up: more captures takes the round, equal captures is a draw. */
+  private endRound(): void {
+    const { red, blue } = this.captures;
+    const winner: RoundWinner = red === blue ? 'draw' : red > blue ? 'red' : 'blue';
+    if (winner !== 'draw') this.roundWins[winner]++;
+
+    this.roundPhase = 'intermission';
+    this.roundTimeLeft = 0;
+    this.intermissionTimeLeft = INTERMISSION_SECONDS;
+    this.roundSyncAccumulator = 0;
+
+    this.resetFlags();
+    this.broadcast({
+      type: 'roundEnded',
+      round: this.roundNumber,
+      winner,
+      captures: { ...this.captures },
+      wins: { ...this.roundWins },
+    });
+    this.broadcastRound();
+    log.info(
+      `ROUND ${this.roundNumber} ENDED — winner=${winner} (blue:${blue} red:${red}) ` +
+      `rounds blue:${this.roundWins.blue} red:${this.roundWins.red}`,
+    );
+  }
+
+  private startNextRound(): void {
+    this.roundNumber++;
+    this.captures = { red: 0, blue: 0 };
+    this.roundPhase = 'live';
+    this.roundTimeLeft = this.roundSeconds;
+    this.intermissionTimeLeft = 0;
+    this.roundSyncAccumulator = 0;
+
+    this.resetFlags();
+    this.resetPlayersForRound();
+    this.broadcastRound();
+    log.info(`ROUND ${this.roundNumber} STARTED — ${Math.round(this.roundSeconds / 60)} minute round`);
+  }
+
+  /** Flags back on their stands: nothing carried, nothing lying on the ground. */
+  private resetFlags(): void {
+    this.blueFlagAtBase = true;
+    this.redFlagAtBase = true;
+    this.blueFlagCarrier = null;
+    this.redFlagCarrier = null;
+    this.blueFlagRespawnTimer = 0;
+    this.redFlagRespawnTimer = 0;
+    this.droppedFlags = [];
+    for (const player of this.players.values()) player.carryingFlag = false;
+    // Clients reposition the flag meshes from these events.
+    this.broadcast({ type: 'flagReturned', flagTeam: 'blue' });
+    this.broadcast({ type: 'flagReturned', flagTeam: 'red' });
+  }
+
+  /** Every combatant restarts the round alive at their own spawn. */
+  private resetPlayersForRound(): void {
+    for (const player of this.players.values()) {
+      if (player.isSpectating) continue; // spectators keep watching
+      this.respawnTimers.delete(player.id);
+      const spawnPos = this.getSpawnPosition(player.team);
+      player.respawn(spawnPos);
+      this.grantSpawnProtection(player.id);
+      this.inventories.set(player.id, 20);
+      if (player instanceof ServerBot) player.refillBlocks();
+      this.broadcast({ type: 'playerRespawned', playerId: player.id, position: spawnPos });
+      this.sendToPlayer(player.id, { type: 'inventoryUpdated', inventory: 20 });
     }
   }
 
@@ -376,6 +601,9 @@ export class ServerGame {
           droppedPosition: this.droppedFlags.find(f => f.team === 'red')?.position ?? null,
         },
       },
+      // Late joiners need the current round/clock immediately, otherwise their
+      // HUD shows round 1 with a full clock until the next 1Hz sync.
+      round: this.getRoundSnapshot(),
     });
     
     log.info(`player connected id=${playerId} ip=${player.ip} name=${player.name ?? 'unnamed'} total=${this.players.size}`);
@@ -396,6 +624,9 @@ export class ServerGame {
     this.lastShootTime.delete(playerId);
     this.lastToolTime.delete(playerId);
     this.respawnTimers.delete(playerId);
+    this.spawnProtectedUntil.delete(playerId);
+    this.lastDamagedAt.delete(playerId);
+    this.lastHpBroadcast.delete(playerId);
     
     this.broadcast({
       type: 'playerLeft',
@@ -543,6 +774,7 @@ export class ServerGame {
         this.respawnTimers.delete(playerId);
         if (!player.isSpectating) {
           player.respawn(player.position);
+          this.grantSpawnProtection(playerId);
         } else {
           player.hp = player.maxHp;
           player.isDead = false;
@@ -562,20 +794,24 @@ export class ServerGame {
       case 'playerInput':
         // Reject movement from dead players (prevents ghost position updates
         // while the respawn timer runs) and spectators (no world presence)
-        if (!player.isDead && !player.isSpectating) {
+        if (message.input && typeof message.input === 'object'
+          && !player.isDead && !player.isSpectating) {
           player.applyInput(message.input);
         }
         break;
 
       case 'shoot':
+        if (!isVec3(message.origin) || !isVec3(message.direction)) break;
         this.handleShoot(playerId, message.origin, message.direction, message.targetId, message.isHeadshot);
         break;
 
       case 'useTool':
+        if (!isVec3(message.target)) break;
         this.handleUseTool(playerId, message.tool, message.target);
         break;
 
       case 'build':
+        if (!isVec3(message.position)) break;
         this.handleBuild(playerId, message.position);
         break;
 
@@ -652,6 +888,7 @@ export class ServerGame {
 
           const spawnPos = this.getSpawnPosition(player.team);
           player.respawn(spawnPos);
+          this.grantSpawnProtection(playerId);
           // Clear any pending respawn timer so the scheduled respawn doesn't
           // fire redundantly on top of this one.
           this.respawnTimers.delete(playerId);
@@ -672,6 +909,11 @@ export class ServerGame {
           });
           log.info(`player ${playerId} requested respawn at safe spawn`);
         }
+        break;
+
+      case 'ping':
+        // Echo the client's timestamp back for a latency readout (no state).
+        this.sendToPlayer(playerId, { type: 'pong', t: message.t });
         break;
 
       case 'disconnect':
@@ -700,6 +942,8 @@ export class ServerGame {
     if (!player.useAmmo()) return; // false when the magazine is empty
 
     this.lastShootTime.set(playerId, now);
+    // Shooting gives up your spawn shield (never an attack shield).
+    this.clearSpawnProtection(playerId);
     
     // Set shooting state for sound effects. The game loop clears this flag
     // after ~100ms (see update()), so no per-shot timer is needed here.
@@ -820,7 +1064,12 @@ export class ServerGame {
       const target = confirmedTarget.player;
       const targetId = confirmedTarget.id;
 
+      // Spawn shield: the round lands on nothing. Returning here also skips the
+      // hit marker and every death/score path, so the shield cannot leak kills.
+      if (this.isSpawnProtected(targetId)) return;
+
       target.takeDamage(damage);
+      this.noteDamaged(targetId);
 
       // Threat memory: bot victims hunt back toward whoever shot them
       if (target instanceof ServerBot) {
@@ -865,6 +1114,8 @@ export class ServerGame {
           type: 'playerDied',
           playerId: targetId,
           killerId: playerId,
+          weapon: player.equipment,
+          isHeadshot: confirmedTarget.isHeadshot,
         });
 
         // Respawn after 4s via the game loop tick (no setTimeout: survives
@@ -1032,6 +1283,7 @@ export class ServerGame {
   }
 
   private handleFlagPickup(playerId: string): void {
+    if (this.roundPhase !== 'live') return; // no objective play between rounds
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating) return;
 
@@ -1116,6 +1368,7 @@ export class ServerGame {
   }
 
   private handleFlagCapture(playerId: string): void {
+    if (this.roundPhase !== 'live') return; // clock already stopped this round
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating) return;
 
@@ -1197,12 +1450,16 @@ export class ServerGame {
     this.getStats(playerId).deaths++;
     this.broadcastStats();
 
+    this.clearSpawnProtection(playerId);
     this.dropCarriedFlag(playerId);
   }
 
   update(dt: number): void {
     // Advance authoritative server clock (used for footstep throttling etc.)
     this.world.updateTime(dt);
+
+    // Round clock + phase transitions (live -> intermission -> next round)
+    this.updateRound(dt);
 
     // Clear stale shooting flags once the 100ms window has elapsed.
     // Done in the game loop instead of per-shot setTimeout so state stays
@@ -1225,6 +1482,7 @@ export class ServerGame {
           if (player && player.isDead) {
             const spawnPos = this.getSpawnPosition(player.team);
             player.respawn(spawnPos);
+            this.grantSpawnProtection(playerId);
             // Restore build inventory on respawn (matches join-time value)
             this.inventories.set(playerId, 20);
             if (player instanceof ServerBot) {
@@ -1294,8 +1552,14 @@ export class ServerGame {
       }
     }
     
-    // Check for flag captures
-    this.checkFlagCaptures();
+    // Check for flag captures — only while a round is live, so the intermission
+    // is a genuine pause in scoring even though the world keeps simulating.
+    if (this.roundPhase === 'live') {
+      this.checkFlagCaptures();
+    }
+
+    // Spawn shields + out-of-combat regeneration
+    this.updateHealth(dt);
   }
   
   private updateDroppedFlags(dt: number): void {

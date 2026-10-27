@@ -522,4 +522,9 @@ export class NetworkClient {
   sendFootstep(volume: number, pitch: number): void {
     this.send({ type: 'footstep', volume, pitch });
   }
+
+  /** Round-trip latency probe: the server echoes the timestamp straight back. */
+  ping(t: number): void {
+    this.send({ type: 'ping', t });
+  }
 }

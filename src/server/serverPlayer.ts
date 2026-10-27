@@ -46,6 +46,10 @@ export class ServerPlayer {
   lastFootstepTime: number = 0;
   footstepInterval: number = 0.5; // Base interval between footsteps in seconds
   
+  /** Spawn invulnerability flag, refreshed by ServerGame on every spawn so
+   *  `getState()` can tell the HUD (and remote clients) about the shield. */
+  spawnProtected: boolean = false;
+
   // Magazine system
   currentAmmo: number = 10;
   magazineSize: number = 10;
@@ -296,6 +300,7 @@ export class ServerPlayer {
       isReloading: this.isReloading,
       aimTransition: this.isAiming ? 1 : 0, // Sync aiming state
       carryingFlag: this.carryingFlag,
+      spawnProtected: this.spawnProtected || undefined,
       isBot: this.isBotFlag || undefined, // scoreboard "BOT" tag for AI combatants
     };
   }

@@ -23,7 +23,7 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
 │   └── workflows/
 │       ├── ci.yml            # GitHub Actions: lint -> build -> test on every push/PR
 │       └── deploy-pages.yml  # Optional static GitHub Pages client deployment
-├── .env.example              # Example env config (PORT, NODE_ENV, SERVER_BOT_COUNT, SERVER_BOT_HP, ADMIN_TOKEN)
+├── .env.example              # Example env config (PORT, NODE_ENV, ADMIN_TOKEN, bot + round tuning)
 ├── .gitignore                # Production git ignore configuration (node_modules, dist, etc.)
 ├── AGENTS.md                 # This AI agent & architectural reference documentation
 ├── DEPLOYMENT.md             # Deployment guide (Render primary; Docker, Cloudflare Tunnel, VPS+Nginx+PM2, GitHub Pages)
@@ -32,13 +32,14 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
 ├── LICENSE                   # MIT License
 ├── README.md                 # Public GitHub repository documentation and quick start
 ├── index.html                # Application HTML5 entry point with responsive styling
-├── metadata.json             # AI Studio app metadata & capability declarations
 ├── package.json              # NPM scripts, dependencies, and project metadata
+├── public/.nojekyll          # Keeps GitHub Pages from running Jekyll on the client build
 ├── scripts/admin.ts          # Admin CLI: status/players/kick/ban/unban against the admin API
-├── tests/                    # node:test regression suites (voxel placement rules + botTrench E2E)
+├── tests/                    # node:test regression suites: voxel rules, bots, flag drops,
+│                             #   spawn bounds, weapon balance, rounds, spawn shield/regen/feedback
 ├── server.ts                 # Single production entry: Express static + WS server + admin API (reads process.env.PORT)
 ├── tsconfig.json             # TypeScript compiler options
-├── vite.config.ts            # Vite bundler configuration with Tailwind CSS plugin
+├── vite.config.js            # Vite bundler configuration with Tailwind CSS plugin
 └── src/
     ├── App.tsx               # Primary React HUD UI, start menu, scoreboard, ammo counters
     ├── index.css             # Global CSS with Tailwind CSS import (@import "tailwindcss";)
@@ -57,7 +58,8 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
     │   ├── serverPlayer.ts   # Server player state, throttled footsteps, inventories
     │   ├── serverWorld.ts    # Server voxel storage, delta sync, unified canBuild() flood-fill
     │   ├── logger.ts         # Structured timestamped [INFO]/[WARN] logging with subsystem tags
-    │   └── banStore.ts       # Persistent bans.json store (IP/name), checked at WS upgrade
+    │   ├── banStore.ts       # Persistent bans.json store (IP/name), checked at WS upgrade
+    │   └── README.md         # Server-component reference (files, env vars, simulation model)
     └── shared/
         └── types.ts          # Shared network payloads, game state interfaces, and protocols
 ```
@@ -107,12 +109,15 @@ Because browser iframe sandboxes often restrict the HTML5 Pointer Lock API:
 
 ### Arena Dimensions & Spawn Positioning
 - **World Dimensions**: Arena size `WORLD_SIZE = 448` meters (`-224` to `+224` along X and Z; chunk-aligned at 28x28 chunks of 16m).
-- **Flag Positions**:
-  - Blue Flag: `(0, y, -95)`
-  - Red Flag: `(0, y, +95)`
+- **Flag Positions** (`BLUE_FLAG_POS` / `RED_FLAG_POS` in `src/shared/types.ts`):
+  - Blue Flag: `(0, y, -160)`
+  - Red Flag: `(0, y, +160)` — 320m apart, so a flag run crosses the whole arena
 - **Spawn Zones**: Positioned deep behind home flags to ensure safe rallies and tactical progression:
-  - Blue Team Spawn: `Z = -120` to `-145`, `X = ±32`
-  - Red Team Spawn: `Z = +120` to `+145`, `X = ±32`
+  - Blue Team Spawn: `Z = -220` to `-200`, `X = ±32`
+  - Red Team Spawn: `Z = +200` to `+220`, `X = ±32`
+- **Out-of-world check**: `isOutOfWorld()` / `VOID_KILL_Y` are derived from `WORLD_SIZE`
+  (`WORLD_HALF`); never hardcode a map bound — a stale `124` was what made spawns
+  self-eliminate on the 448m map.
 - **Guaranteed Solid Ground & Headroom**:
   - Spawning checks up to 25 candidate spots using `world.getGroundHeight(x, z)` to position entity feet exactly on the surface (`pos.y = groundY`).
   - Headspace clearance is verified at `y + 0.8` and `y + 1.6` meters to prevent entities from ever spawning embedded inside blocks.
@@ -121,7 +126,7 @@ Because browser iframe sandboxes often restrict the HTML5 Pointer Lock API:
 - Voxel coordinates are integer grid values: `x, y, z` centered at `(x, y, z)`.
 - Voxel bounding box: `[x - 0.5, x + 0.5] × [y - 0.5, y + 0.5] × [z - 0.5, z + 0.5]`.
 - Voxel size is `VOXEL_SIZE = 1.0` meter.
-- Types: `0 = AIR`, `1 = GRASS`, `2 = DIRT`, `3 = STONE`, `4 = BUILT`.
+- Types: `0 = AIR`, `1 = DIRT`, `2 = STONE`, `3 = GRASS`, `4 = BUILT` (player-placed).
 - **Raycasting Coordinate Alignment**: Because voxels are centered at `(x, y, z)` with boundaries at `(x ± 0.5, y ± 0.5, z ± 0.5)`, voxel raycasting algorithms (`world.raycast` and `serverWorld.raycast`) offset the ray origin by `+0.5` (`sx = origin.x + 0.5`, etc.). This maps the voxel cubes cleanly onto the standard integer grid cells `[voxel, voxel + 1]`, guaranteeing that bullets and tools hit the exact voxel and surface boundary without offset drift.
 
 ### Entity Clearance Check (`doesVoxelIntersectAnyEntity` & `canPlaceBlock`)
@@ -151,7 +156,7 @@ Located in `src/game/game.ts`:
 
 ## 6. Server-Side Bot AI (`src/server/serverBot.ts`)
 
-Bots are authoritative server entities running a finite-state machine. Defaults: **10 per team** (`SERVER_BOT_COUNT`), **130 HP** (`SERVER_BOT_HP`), **36-block** build budget, 5s respawn.
+Bots are authoritative server entities running a finite-state machine. Defaults: **10 per team** (`SERVER_BOT_COUNT`), **130 HP** (`SERVER_BOT_HP`), **36-block** build budget (`SERVER_BOT_BLOCKS`), 4s respawn (same as humans).
 
 ### States
 - **`ENGAGE`** — strafe & shoot visible enemies (LOS raycast checks, aim error, combat reaction throttle).
@@ -169,6 +174,50 @@ Bots are authoritative server entities running a finite-state machine. Defaults:
 - **Flag-carrier priority**: bots hunt the enemy carrier and defend their own.
 - Transition guard protects multi-tick jobs (TRENCH) from random re-decisions while keeping legitimate exits (RETURN/RETREAT) open.
 - Bots respect the same anti-clipping pipeline as players (`canPlaceBlock`, de-penetration, step-up limits).
+- **Objective commit**: a bot in `GRABFLAG` only abandons the run for enemies inside
+  `OBJECTIVE_COMMIT_RANGE` (24m) and only retreats below `OBJECTIVE_RETREAT_HP` (15%),
+  and it fires on the move. Before this, any visible enemy (75m) cancelled the run.
+- **Known limitation (measured, not fixed)**: bot-only matches rarely complete flag
+  runs — a 10-minute headless match (20 bots) produced zero pickups and no bot got
+  closer than ~50m to an enemy stand, because every attacker crosses 300m of open
+  ground against an equal number of defenders with no cover play or push coordination.
+  CTF scoring therefore depends on human players or a future AI pass (roles, cover
+  usage, respawn-wave timing). Don't assume the objective is exercised just because
+  `GRABFLAG`/`RETURN` exist in the state machine.
+
+### Rounds (`serverGame.ts`)
+- A round is a fixed-length window of CTF: `ROUND_MINUTES` (default 30) → `roundSeconds`. Rounds are long on purpose (448m arena, ~320m flag runs).
+- `updateRound(dt)` runs from the game loop: live → clock down → `endRound()` (more captures wins, equal is a draw) → 20s intermission → `startNextRound()` (captures reset, flags home, everyone respawns at their own spawn).
+- Scoring is frozen outside a live round: `handleFlagPickup()` and `handleFlagCapture()` early-return, and `update()` skips `checkFlagCaptures()`. The world keeps simulating so the battle stays alive through the intermission.
+- `getRoundSnapshot()` is the single source for the HUD (`init` + `roundUpdate`) and `/api/status`.
+- `tests/roundLifecycle.test.mjs` drives a shortened round through the real `ServerGame` clock.
+
+### Spawn protection & regeneration (`serverGame.ts`)
+- Every real spawn (join, manual respawn, scheduled respawn, round start) calls
+  `grantSpawnProtection()`: `SPAWN_PROTECTION_SECONDS` (2.5s) of immunity.
+- Both damage paths are gated — `applyDamage()` (bots) and the human shot raycast
+  in `handleShoot()` — and a shielded hit returns **before** the hit marker, so it
+  cannot leak kills, score or stats. The shield is dropped early by the player's
+  own shot (`clearSpawnProtection()` in `handleShoot`, `clearSpawnProtection(botId)`
+  on bot fire), so it can never be used offensively. Death also clears it.
+- `updateHealth(dt)` (from `update()`) expires shields (broadcasting the state so
+  the HUD badge disappears) and regenerates `REGEN_RATE` HP/s once a player has
+  been quiet for `REGEN_DELAY_SECONDS` (6s). HP is synced only when the visible
+  integer changes, never per tick.
+- The client applies HP in **both** directions from `playerUpdated` (damage and
+  regen); it used to ignore any HP increase, so healed players never saw it.
+
+### Feedback layer (`game.ts` / `App.tsx`)
+- `killfeed`: the client builds rows from `playerDied` (server sends `weapon` +
+  `isHeadshot`); names are resolved client-side because the server only knows ids.
+- `damageIndicators`: `playerDamaged` on the local player records the **attacker's
+  world position**, and each frame the bearing is recomputed with
+  `relativeBearingDegrees()` (shared, pure) so the arc keeps pointing at the
+  shooter while you turn. Degrees: 0 = ahead, +90 = right, ±180 = behind.
+- `pingMs`: the client sends `{ type: 'ping', t }` every 2s and the server echoes
+  `{ type: 'pong', t }`; the HUD shows the round-trip time (green/amber/red).
+- `tests/feedback.test.mjs` covers the shield on both damage paths, regen timing
+  and caps, ping/pong, the killfeed payload and the bearing math.
 
 ### Join/Leave Rebalancing (`serverGame.ts`)
 - `replaceBotWithPlayer(team)` kills & removes one bot from the joining human's team (fallback: other team, then fresh spawn).
@@ -180,26 +229,50 @@ Bots are authoritative server entities running a finite-state machine. Defaults:
 
 The WebSocket protocol uses lightweight JSON messages over `ws://` (or `wss://` in SSL environments).
 
-All messages are JSON. The server REJECTS `input`/`shoot`/`build`/`useTool`/`pickupFlag` from dead or spectating clients (ghost-update protection) and validates every voxel edit through `serverWorld.canBuild()` / mining rules.
+All messages are JSON. The server REJECTS `playerInput`/`shoot`/`build`/`useTool`/`pickupFlag` from dead or spectating clients (ghost-update protection) and validates every voxel edit through `serverWorld.canBuild()` / mining rules.
 
 ### Client -> Server Messages
-- `join`: `{ type: 'join', name: string, team: 'red' | 'blue' }`
-- `input`: `{ type: 'input', position: Vector3, rotation: { yaw, pitch }, isCrouching, isSprinting }`
-- `shoot`: `{ type: 'shoot', origin: Vector3, direction: Vector3, weapon: 'rifle' | 'smg' }`
-- `build`: `{ type: 'build', position: { x, y, z } }`
-- `useTool`: `{ type: 'useTool', tool: 'spade' | 'pickaxe', target: { x, y, z } }`
-- `pickupFlag`: `{ type: 'pickupFlag', team: 'red' | 'blue' }`
-- `dropFlag`: `{ type: 'dropFlag' }`
+The single source of truth is `ClientMessage` in `src/shared/types.ts`.
+- `join`: `{ type: 'join', team: 'red' | 'blue', position?: Position, name?: string }`
+- `playerInput`: `{ type: 'playerInput', input: PlayerInput }` where `PlayerInput` is
+  `{ moveX, moveZ, jump, crouch, sprint, yaw, pitch, position?, equipment?, isAiming? }`
+- `shoot`: `{ type: 'shoot', origin: Position, direction: Position, targetId?: string, isHeadshot?: boolean }`
+  (`targetId` is only a hint: the server re-raycasts and validates line of sight.)
+- `useTool`: `{ type: 'useTool', tool: 'pickaxe' | 'spade', target: Position }`
+- `build`: `{ type: 'build', position: Position }`
+- `reload`: `{ type: 'reload' }`
+- `pickupFlag`: `{ type: 'pickupFlag' }` (the server decides which flag by proximity)
+- `captureFlag`: `{ type: 'captureFlag', team: 'red' | 'blue' }`
+- `toggleSpectator`: `{ type: 'toggleSpectator' }`
+- `footstep`: `{ type: 'footstep', volume: number, pitch: number }`
+- `requestRespawn`: `{ type: 'requestRespawn' }`
+- `ping`: `{ type: 'ping', t: number }` — echoed back as `pong` for the latency readout
+- `disconnect`: `{ type: 'disconnect' }`
 
 ### Server -> Client Messages
-- `init`: Sends assigned `playerId`, team, map dimensions, and initial player/flag states.
-- `state`: 20Hz tick state synchronization (player positions, rotations, animations, health).
-- `voxelChanged`: Broadcasts block additions, damages, and destructions.
-- `flagCaptured` / `flagDropped` / `flagReturned`: Authoritative CTF updates (`flagDropped` includes optional `playerId` of the former carrier).
-- `playerDamaged` / `playerDied` / `playerRespawned`: Server-authoritative combat events (clients do NOT apply local HP deltas on damage; respawn is server-scheduled only in online mode via `serverAuthoritativeRespawn`).
-- `inventoryUpdated`: Block count sync (respawn resets to 20).
-- `kicked`: Sent before closing a kicked session (client displays the reason).
-- `sound`: Broadcasts sound triggers (shots, impacts) with spatial coordinates for procedural Web Audio synthesis.
+`ServerMessage` in `src/shared/types.ts` is authoritative; summary:
+- `init`: assigned `playerId`, own `state`, all `players`, `scores`, `captures`,
+  `stats`, `inventory`, modified `voxelChanges`, full `flags` snapshot and the
+  current `round` — so a late joiner is immediately in sync.
+- `playerJoined` / `playerUpdated` / `playerLeft`: roster and per-player state
+  (positions, rotation, HP, equipment, ammo, `carryingFlag`, `spawnProtected`, `isBot`).
+- `playerShot`: `{ playerId, origin, direction, weapon }` for tracers/muzzle flash.
+- `hitConfirmed`: `{ targetId, damage, isHeadshot }` sent to the **shooter** only.
+- `playerDamaged`: `{ playerId, damage, attackerId? }` — feedback only; clients do
+  not apply HP deltas from it (the authoritative `playerUpdated` follows).
+- `playerDied`: `{ playerId, killerId?, weapon?, isHeadshot? }` — drives the killfeed.
+- `playerRespawned`: `{ playerId, position }`; the server schedules respawns (4s).
+- `voxelChanged`: `{ change: { x, y, z, type, durability } }`; `chunkUpdated` for bulk chunks.
+- `inventoryUpdated`: block count sync (respawn resets to 20).
+- `scoreUpdate` / `statsUpdate`: authoritative team scores and per-player K/D/captures.
+- `flagPickedUp` / `flagDropped` / `flagReturned` / `flagCaptured`: CTF events
+  (`flagDropped` carries the ground position and optional former carrier).
+- `roundUpdate`: `{ round: RoundSnapshot }` — ~1Hz plus every phase change; clients
+  count the clock down locally in between.
+- `roundEnded`: `{ round, winner: 'red'|'blue'|'draw', captures, wins }`.
+- `pong`: `{ t }` — echo of `ping`, used only to measure latency.
+- `spectatorToggled`, `footstep`, `gameState`, `kicked`: spectator mirroring, remote
+  footstep audio, full-state fallback and kick/ban notices.
 
 ---
 
@@ -208,7 +281,7 @@ All messages are JSON. The server REJECTS `input`/`shoot`/`build`/`useTool`/`pic
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 9 regression tests (voxel rules + botTrench E2E)
+npm test            # node --test tests/ — 54 regression tests (voxel rules, bots, rounds, spawn shield/regen, feedback)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run dev         # tsx server.ts with Vite middleware (PORT, default 3000)
 npm run build       # vite bundle + dist/server.cjs + dist/admin.cjs (esbuild)

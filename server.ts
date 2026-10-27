@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { ServerGame, GameConnection } from './src/server/serverGame';
 import { normalizeIp } from './src/server/banStore';
+import type { ClientMessage } from './src/shared/types';
 import { createLogger } from './src/server/logger';
 
 const log = createLogger('server');
@@ -50,6 +51,8 @@ async function startServer() {
       connectedPlayers: wss.clients.size,
       tickRate: 20,
       version: '1.0.0',
+      // Round clock: lets ops see which round is live without opening the game.
+      round: game.getRoundSnapshot(),
     });
   });
 
@@ -222,9 +225,21 @@ async function startServer() {
     });
 
     ws.on('message', (data: Buffer | string) => {
+      let parsed: unknown;
       try {
-        const message = JSON.parse(data.toString());
-        game.handleMessage(playerId, message);
+        parsed = JSON.parse(data.toString());
+      } catch {
+        // Garbage frame from a client (or a proxy). Not a server fault, and it
+        // must not be able to flood the error log — drop it at debug level.
+        log.debug('dropped malformed frame');
+        return;
+      }
+      if (!parsed || typeof parsed !== 'object' || typeof (parsed as { type?: unknown }).type !== 'string') {
+        log.debug('dropped frame without a message type');
+        return;
+      }
+      try {
+        game.handleMessage(playerId, parsed as ClientMessage);
       } catch (error) {
         log.error('error handling message', (error as Error).message);
       }

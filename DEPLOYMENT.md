@@ -10,6 +10,7 @@ How to get the game live for developers and playtesters. **Render is the primary
 - **Always 10v10**: Server boots with `SERVER_BOT_COUNT` bots per team (default 10 → 20 total). A human joining retires one bot from *their* team; a human leaving/disconnecting/kicked triggers an instant backfill bot on that team.
 - **Server-authoritative gameplay**: damage/death/respawn/inventory, voxel edits (`canBuild()` flood-fill identical to client), and all CTF events (pickup/drop/return/capture at unified 7.0m radius) are validated server-side. Dead/spectating players' inputs are rejected (no ghost meshes). Respawn restores 20 blocks.
 - **Bots**: FSM AI (ENGAGE / FLANK / CAMP / ADVANCE / GRABFLAG / RETURN / BUILD / TRENCH / RETREAT), 130 HP, 36-block budget, revenge targeting, flag-carrier priority, LOS-checked fire, and midfield trench wall construction.
+- **Rounds & survivability**: 30-minute rounds (`ROUND_MINUTES`) with a 20s intermission that resets captures, flags and spawns; 2.5s spawn shields (cancelled by your own shot) and out-of-combat regeneration (6 HP/s after 6s). All server-authoritative.
 - **Admin API + CLI**: structured logs, live kick/ban/unban, persistent bans enforced at WS connect.
 
 ### Environment Variables (see `.env.example`)
@@ -20,7 +21,10 @@ How to get the game live for developers and playtesters. **Render is the primary
 | `NODE_ENV` | `development` | Set `production` when hosted |
 | `SERVER_BOT_COUNT` | `10` | Bots per team at startup & rebalance target |
 | `SERVER_BOT_HP` | `130` | Bot max health |
+| `SERVER_BOT_BLOCKS` | `36` | Bot build budget per life |
+| `ROUND_MINUTES` | `30` | Round length in minutes (clock + reset between rounds) |
 | `ADMIN_TOKEN` | *(empty)* | Enables remote admin API access; empty = localhost-only |
+| `LOG_LEVEL` / `LOG_FILE` | `info` / *(none)* | Log verbosity, optional log file |
 
 ---
 
@@ -155,7 +159,8 @@ Checklist:
 3. Close the tab → log shows backfill bot spawn; roster returns to 20.
 4. Right-click ground → exactly one block; stacking/bridging accepted; mid-air rejected.
 5. Rifle fires once per click; respawn grants 20 blocks; captures score only via the server.
-6. `npm run admin -- status` responds (locally, or remotely with token).
+6. HUD shows a killfeed row on a kill, a damage-direction arc when you are hit, a ping in ms, and a spawn-shield badge for ~2.5s after spawning (gone as soon as you fire).
+7. `npm run admin -- status` responds (locally, or remotely with token).
 
 ---
 

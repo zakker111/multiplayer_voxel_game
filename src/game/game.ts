@@ -16,8 +16,37 @@ import {
   RED_FLAG_POS,
   WEAPONS,
   weaponDamage,
+  DEFAULT_ROUND_MINUTES,
+  INTERMISSION_SECONDS,
+  relativeBearingDegrees,
   type WeaponStats,
+  type RoundPhase,
+  type RoundSnapshot,
+  type RoundWinner,
 } from '../shared/types';
+
+/** How long a killfeed row stays on screen. */
+const KILLFEED_SECONDS = 8;
+/** How long a damage-direction arc lingers after you are hit. */
+const DAMAGE_INDICATOR_SECONDS = 2;
+/** Latency probe interval (ms, measured every N seconds). */
+const PING_INTERVAL_SECONDS = 2;
+
+/** One row of the killfeed. Names are resolved on the client because the server
+ *  only sends ids (it never needs to know display names). */
+export interface KillfeedEntry {
+  id: number;
+  killerId: string | null;
+  victimId: string;
+  killerName: string;
+  killerTeam: Team | null;
+  victimName: string;
+  victimTeam: Team | null;
+  weapon: string;
+  isHeadshot: boolean;
+  /** Wall-clock ms, used only to expire the row. */
+  at: number;
+}
 
 /* ---------- Tab-held scoreboard data model ---------- */
 
@@ -108,6 +137,15 @@ export interface GameState {
   isNetworkConnected?: boolean;
   transportName?: string;
   localPlayerId?: string | null;
+  // Round HUD (online play only; `roundIsServerDriven` gates the display)
+  roundIsServerDriven: boolean;
+  roundNumber: number;
+  roundPhase: RoundPhase;
+  roundTimeLeft: number;
+  roundIntermission: number;
+  roundDuration: number;
+  roundWins: { red: number; blue: number };
+  roundWinner: RoundWinner | null;
   blueFlagStatus?: 'at_base' | 'carried' | 'dropped' | 'captured';
   redFlagStatus?: 'at_base' | 'carried' | 'dropped' | 'captured';
   blueFlagTimer?: number;
@@ -115,6 +153,14 @@ export interface GameState {
   radioLog?: RadioMessage[];
   scoreboard?: ScoreboardData;
   showScoreboard?: boolean;
+  // Feedback layer (Phase A): killfeed, damage direction, latency, spawn shield
+  killfeed: KillfeedEntry[];
+  /** Bearings of recent damage sources in degrees (0 = ahead, +90 = right). */
+  damageIndicators: number[];
+  /** Round-trip latency in ms; 0 when offline or not measured yet. */
+  pingMs: number;
+  /** Spawn invulnerability is active right now. */
+  spawnProtected: boolean;
 }
 
 interface Bot {
@@ -280,6 +326,14 @@ export class Game {
   muzzleFlash: THREE.PointLight;
   muzzleTimer: number = 0;
   hitMarkerTimer: number = 0;
+  // Feedback layer
+  killfeed: KillfeedEntry[] = [];
+  private killfeedSeq: number = 0;
+  /** Recent damage sources, kept in world space so the HUD arc tracks as you turn. */
+  private damageSources: Array<{ x: number; z: number; until: number }> = [];
+  private pingMs: number = 0;
+  private pingTimer: number = 0;
+  private spawnProtected: boolean = false;
   message: string = '';
   messageTimer: number = 0;
   blueKills: number = 0;
@@ -419,6 +473,18 @@ export class Game {
   localPlayerId: string | null = null;
   lastInputSendTime: number = 0;
   inputSendRate: number = 50;
+
+  // ---- Round state (online: the server owns this clock) ----
+  /** Set once the server reports rounds, so offline modes keep the old HUD. */
+  roundIsServerDriven: boolean = false;
+  roundNumber: number = 1;
+  roundPhase: RoundPhase = 'live';
+  roundTimeLeft: number = DEFAULT_ROUND_MINUTES * 60;
+  roundIntermission: number = 0;
+  roundDuration: number = DEFAULT_ROUND_MINUTES * 60;
+  roundWins: { red: number; blue: number } = { red: 0, blue: 0 };
+  roundWinner: RoundWinner | null = null;
+  roundWinnerTimer: number = 0;
 
   private boundResize: () => void;
   private boundMouseDown: (e: MouseEvent) => void;
@@ -1774,6 +1840,13 @@ export class Game {
     // Handle full init message
     this.networkClient.onMessage('init', (msg: any) => {
       this.localPlayerId = msg.playerId;
+      // Fresh session: drop any feedback left over from a previous server.
+      this.killfeed = [];
+      this.damageSources = [];
+      this.pingMs = 0;
+      // Round HUD: adopt the server clock immediately, otherwise a late joiner
+      // would show round 1 with a full 30:00 clock until the next 1Hz sync.
+      if (msg.round) this.applyRoundSnapshot(msg.round as RoundSnapshot);
       // Scoreboard: adopt the server's authoritative K/D/capture tallies.
       // Clear stale singleplayer tallies first so they don't linger in online play.
       this.statsById.clear();
@@ -1799,6 +1872,7 @@ export class Game {
         this.player.isDead = false;
         this.player.respawnTimer = 0;
         this.player.hp = typeof st.hp === 'number' ? Math.max(st.hp, 1) : 100;
+        this.spawnProtected = !!st.spawnProtected;
         if (st.team === 'red' || st.team === 'blue') {
           this.playerTeam = st.team;
         }
@@ -1904,9 +1978,15 @@ export class Game {
     // Handle player updated
     this.networkClient.onMessage('playerUpdated', (msg: any) => {
       if (msg.playerId === this.localPlayerId) {
-        if (msg.state?.hp !== undefined && msg.state.hp < this.player.hp) {
-          this.player.hp = msg.state.hp;
-          this.sounds.hurt();
+        if (msg.state) {
+          // The server is authoritative over HP in both directions: damage
+          // takes it down and out-of-combat regen brings it back up. Only the
+          // downward direction makes a hurt sound.
+          if (typeof msg.state.hp === 'number' && msg.state.hp < this.player.hp) {
+            this.sounds.hurt();
+          }
+          if (typeof msg.state.hp === 'number') this.player.hp = msg.state.hp;
+          this.spawnProtected = !!msg.state.spawnProtected;
         }
         return;
       }
@@ -1958,6 +2038,21 @@ export class Game {
         if (!this.player.isDead) {
           this.sounds.hurt();
         }
+        // Record WHERE it came from (world space) so the HUD arc keeps
+        // pointing at the shooter even after the player turns.
+        const attackerPos =
+          msg.attackerId && msg.attackerId !== this.localPlayerId
+            ? this.remotePlayers.get(msg.attackerId)?.state.position
+            : undefined;
+        if (attackerPos && Number.isFinite(attackerPos.x) && Number.isFinite(attackerPos.z)) {
+          const nowSec = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
+          this.damageSources.push({
+            x: attackerPos.x,
+            z: attackerPos.z,
+            until: nowSec + DAMAGE_INDICATOR_SECONDS,
+          });
+          if (this.damageSources.length > 6) this.damageSources.shift();
+        }
       } else {
         const remote = this.remotePlayers.get(msg.playerId);
         if (remote && !remote.state.isDead) {
@@ -1969,6 +2064,7 @@ export class Game {
 
     // Handle player died
     this.networkClient.onMessage('playerDied', (msg: any) => {
+      this.pushKillfeed(msg.killerId, msg.playerId, msg.weapon, !!msg.isHeadshot);
       if (msg.playerId === this.localPlayerId) {
         // Guard against re-applying death (double respawn timers / sounds)
         if (!this.player.isDead) {
@@ -2197,6 +2293,33 @@ export class Game {
     });
 
     // Handle spectator toggled from other players
+    this.networkClient.onMessage('roundUpdate', (msg: any) => {
+      if (msg && msg.round) this.applyRoundSnapshot(msg.round as RoundSnapshot);
+    });
+
+    this.networkClient.onMessage('roundEnded', (msg: any) => {
+      this.roundIsServerDriven = true;
+      if (msg.captures) {
+        this.blueCaptures = msg.captures.blue || 0;
+        this.redCaptures = msg.captures.red || 0;
+      }
+      if (msg.wins) this.roundWins = { red: msg.wins.red || 0, blue: msg.wins.blue || 0 };
+      this.roundWinner = (msg.winner || 'draw') as RoundWinner;
+      this.roundWinnerTimer = 5;
+      const label = this.roundWinner === 'draw'
+        ? 'ROUND DRAWN'
+        : `${String(this.roundWinner).toUpperCase()} TAKES ROUND ${msg.round}`;
+      this.showMessage(
+        `🏁 ${label} — ${this.blueCaptures}:${this.redCaptures} · next round in ${INTERMISSION_SECONDS}s`,
+      );
+    });
+
+    this.networkClient.onMessage('pong', (msg: any) => {
+      if (typeof msg?.t === 'number') {
+        this.pingMs = Math.max(0, Math.round(Date.now() - msg.t));
+      }
+    });
+
     this.networkClient.onMessage('spectatorToggled', (msg: any) => {
       // Track remote player spectator state (for future use)
       console.log(`Player ${msg.playerId} ${msg.isSpectating ? 'entered' : 'exited'} spectator mode`);
@@ -3821,6 +3944,27 @@ export class Game {
       if (this.messageTimer <= 0) this.message = '';
     }
 
+    // Round clock: tick locally between server syncs so the HUD is smooth.
+    if (this.roundIsServerDriven) {
+      if (this.roundPhase === 'live') {
+        this.roundTimeLeft = Math.max(0, this.roundTimeLeft - dt);
+      } else {
+        this.roundIntermission = Math.max(0, this.roundIntermission - dt);
+      }
+      if (this.roundWinnerTimer > 0) this.roundWinnerTimer = Math.max(0, this.roundWinnerTimer - dt);
+    }
+
+    // Latency probe: one round-trip every couple of seconds while connected.
+    if (this.networkClient && this.networkClient.isConnected()) {
+      this.pingTimer -= dt;
+      if (this.pingTimer <= 0) {
+        this.pingTimer = PING_INTERVAL_SECONDS;
+        this.networkClient.ping(Date.now());
+      }
+    } else {
+      this.pingMs = 0;
+    }
+
     this.emitState();
     this.renderer.render(this.scene, this.player.camera);
   };
@@ -5029,6 +5173,70 @@ export class Game {
     this.tryBuild();
   }
 
+  /** Mirror the authoritative round state into the HUD state. */
+  private applyRoundSnapshot(round: RoundSnapshot): void {
+    this.roundIsServerDriven = true;
+    if (round.round) this.roundNumber = round.round;
+    if (round.phase) this.roundPhase = round.phase;
+    if (typeof round.timeLeft === 'number') this.roundTimeLeft = round.timeLeft;
+    if (typeof round.intermission === 'number') this.roundIntermission = round.intermission;
+    if (typeof round.duration === 'number' && round.duration > 0) this.roundDuration = round.duration;
+    if (round.captures) {
+      this.blueCaptures = round.captures.blue || 0;
+      this.redCaptures = round.captures.red || 0;
+    }
+    if (round.wins) this.roundWins = { red: round.wins.red || 0, blue: round.wins.blue || 0 };
+  }
+
+  /** Resolve a combatant id to a display name + team for the killfeed. */
+  private nameOf(id?: string | null): { name: string; team: Team | null } {
+    if (!id) return { name: 'the world', team: null };
+    if (id === this.localPlayerId) {
+      return { name: this.playerName || 'You', team: this.playerTeam };
+    }
+    const remote = this.remotePlayers.get(id);
+    if (remote) {
+      return {
+        name: remote.state.name || `Player ${id.slice(-4)}`,
+        team: (remote.state.team as Team) ?? null,
+      };
+    }
+    const fallback = id.startsWith('bot_') ? 'Bot' : 'Player';
+    return { name: `${fallback} ${id.slice(-4)}`, team: null };
+  }
+
+  /** Append a death to the killfeed (client-side only, newest last). */
+  private pushKillfeed(
+    killerId: string | undefined,
+    victimId: string,
+    weapon?: string,
+    isHeadshot: boolean = false,
+  ): void {
+    const killer = this.nameOf(killerId);
+    const victim = this.nameOf(victimId);
+    let label = 'Unknown';
+    if (weapon === 'rifle' || weapon === 'smg') {
+      label = WEAPONS[weapon]?.name ?? weapon.toUpperCase();
+    } else if (weapon) {
+      label = weapon.charAt(0).toUpperCase() + weapon.slice(1);
+    } else if (!killerId) {
+      label = 'World';
+    }
+    this.killfeed.push({
+      id: ++this.killfeedSeq,
+      killerId: killerId ?? null,
+      victimId,
+      killerName: killer.name,
+      killerTeam: killer.team,
+      victimName: victim.name,
+      victimTeam: victim.team,
+      weapon: label,
+      isHeadshot,
+      at: Date.now(),
+    });
+    if (this.killfeed.length > 6) this.killfeed.shift();
+  }
+
   private emitState(): void {
     if (this.onStateChange) {
       const weapon = this.weapons[this.equipment];
@@ -5069,6 +5277,17 @@ export class Game {
         }
       }
 
+      // Feedback layer: expire old killfeed rows and damage arcs, then compute
+      // where each recent damage source currently sits on screen.
+      const wallNow = Date.now();
+      this.killfeed = this.killfeed.filter((k) => wallNow - k.at < KILLFEED_SECONDS * 1000);
+      const monoNow = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
+      this.damageSources = this.damageSources.filter((src) => src.until > monoNow);
+      const viewForward = this.player.getForward();
+      const damageIndicators = this.damageSources.map((src) =>
+        Math.round(relativeBearingDegrees(this.player.position, viewForward, src)),
+      );
+
       this.onStateChange({
         hp: this.player.hp,
         maxHp: this.player.maxHp,
@@ -5107,6 +5326,18 @@ export class Game {
         radioLog: this.radioLog,
         scoreboard: this.getCachedScoreboard(),
         showScoreboard: this.tabHeld,
+        roundIsServerDriven: this.roundIsServerDriven,
+        roundNumber: this.roundNumber,
+        roundPhase: this.roundPhase,
+        roundTimeLeft: this.roundTimeLeft,
+        roundIntermission: this.roundIntermission,
+        roundDuration: this.roundDuration,
+        roundWins: this.roundWins,
+        roundWinner: this.roundWinner,
+        killfeed: this.killfeed,
+        damageIndicators,
+        pingMs: this.pingMs,
+        spawnProtected: this.spawnProtected,
       });
     }
   }

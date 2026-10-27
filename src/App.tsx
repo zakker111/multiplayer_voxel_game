@@ -2,6 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
 import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2 } from 'lucide-react';
 
+/** Round clock as m:ss (rounds are half an hour long, so no hour component). */
+function formatRoundClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const mins = Math.floor(total / 60);
+  return `${mins}:${String(total % 60).padStart(2, '0')}`;
+}
+
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gameRef = useRef<Game | null>(null);
@@ -15,6 +22,18 @@ function App() {
     isSpectating: false,
     spectatorMode: 'action',
     spectatorTrackedName: '',
+    roundIsServerDriven: false,
+    roundNumber: 1,
+    roundPhase: 'live',
+    roundTimeLeft: 0,
+    roundIntermission: 0,
+    roundDuration: 1800,
+    roundWins: { red: 0, blue: 0 },
+    roundWinner: null,
+    killfeed: [],
+    damageIndicators: [],
+    pingMs: 0,
+    spawnProtected: false,
   });
   const [started, setStarted] = useState(false);
   const [gameMode, setGameMode] = useState<'multiplayer' | 'singleplayer' | 'online' | null>(null);
@@ -565,6 +584,20 @@ function App() {
                     {gameState.transportName}
                   </span>
                 )}
+                {gameState.isNetworkConnected && gameState.pingMs > 0 && (
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
+                      gameState.pingMs < 80
+                        ? 'bg-emerald-950 text-emerald-300'
+                        : gameState.pingMs < 150
+                          ? 'bg-amber-950 text-amber-300'
+                          : 'bg-red-950 text-red-300'
+                    }`}
+                    title="Round-trip latency"
+                  >
+                    {gameState.pingMs}ms
+                  </span>
+                )}
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${selectedTeam === 'blue' ? 'bg-blue-950 text-blue-300 border border-blue-800' : 'bg-red-950 text-red-300 border border-red-800'}`}>
                   {selectedTeam} Team
                 </span>
@@ -587,6 +620,36 @@ function App() {
           {(gameMode === 'multiplayer' || gameMode === 'online') && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
               <div className="flex flex-col items-center gap-2">
+                {/* Round clock: server-driven only (offline modes have no rounds) */}
+                {gameState.roundIsServerDriven && (
+                  <div
+                    className="flex items-center gap-3 px-4 py-1.5 bg-gray-900/90 rounded-xl border border-gray-700 text-xs font-semibold"
+                    title="Round clock and rounds won this session"
+                  >
+                    <span className="text-gray-300">ROUND {gameState.roundNumber}</span>
+                    <span className="text-gray-600">|</span>
+                    {gameState.roundPhase === 'live' ? (
+                      <span className={`font-mono ${gameState.roundTimeLeft < 300 ? 'text-red-400' : 'text-gray-100'}`}>
+                        {formatRoundClock(gameState.roundTimeLeft)}
+                      </span>
+                    ) : (
+                      <span className="font-mono text-amber-300">
+                        INTERMISSION {formatRoundClock(gameState.roundIntermission)}
+                      </span>
+                    )}
+                    <span className="text-gray-600">|</span>
+                    <span className="text-blue-300">BLUE {gameState.roundWins.blue}</span>
+                    <span className="text-gray-500">–</span>
+                    <span className="text-red-300">{gameState.roundWins.red} RED</span>
+                  </div>
+                )}
+                {gameState.roundIsServerDriven && gameState.roundWinner && (
+                  <div className="px-4 py-1 rounded-lg bg-amber-900/80 border border-amber-500 text-amber-100 text-xs font-bold tracking-wide">
+                    {gameState.roundWinner === 'draw'
+                      ? 'ROUND DRAWN — NO WINNER'
+                      : `${gameState.roundWinner.toUpperCase()} WINS THE ROUND`}
+                  </div>
+                )}
                 <div className="flex items-center bg-gray-900/90 rounded-xl overflow-hidden border-2 border-gray-700">
                   <div className="px-5 py-2 bg-blue-900/40 flex flex-col items-center gap-1">
                     <span className="text-blue-300 font-bold text-sm">BLUE</span>
@@ -700,6 +763,44 @@ function App() {
           {/* First-person gameplay HUD (hidden during spectator mode) */}
           {!gameState.isSpectating && (
             <>
+              {/* Killfeed: who killed whom, with the weapon used */}
+              {gameState.killfeed && gameState.killfeed.length > 0 && (
+                <div className="absolute top-24 right-4 z-10 flex flex-col items-end gap-1 pointer-events-none">
+                  {gameState.killfeed.slice(-5).map((entry) => (
+                    <div
+                      key={entry.id}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold backdrop-blur-md border flex items-center gap-1.5 shadow-lg ${
+                        entry.killerId === gameState.localPlayerId || entry.victimId === gameState.localPlayerId
+                          ? 'bg-gray-900/95 border-white/40'
+                          : 'bg-gray-900/80 border-gray-700'
+                      }`}
+                    >
+                      <span className={entry.killerTeam === 'blue' ? 'text-blue-300' : entry.killerTeam === 'red' ? 'text-red-300' : 'text-gray-300'}>
+                        {entry.killerName}
+                      </span>
+                      <span className="text-gray-500 text-[10px] uppercase tracking-wide">
+                        {entry.weapon}
+                        {entry.isHeadshot ? ' · HS' : ''}
+                      </span>
+                      <span className="text-gray-300">☠</span>
+                      <span className={entry.victimTeam === 'blue' ? 'text-blue-300' : entry.victimTeam === 'red' ? 'text-red-300' : 'text-gray-300'}>
+                        {entry.victimName}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Damage direction: an arc on a ring around the crosshair */}
+              {gameState.damageIndicators && gameState.damageIndicators.map((deg, i) => (
+                <div key={i} className="absolute inset-0 pointer-events-none z-20 flex items-center justify-center">
+                  <div
+                    className="w-16 h-1.5 rounded-full bg-red-500 shadow-[0_0_14px_3px_rgba(239,68,68,0.55)]"
+                    style={{ transform: `rotate(${deg}deg) translateY(-130px)` }}
+                  />
+                </div>
+              ))}
+
               {/* Health */}
               <div className="absolute bottom-8 left-8 z-10">
                 <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl px-5 py-3 border-2 border-gray-700">
@@ -712,6 +813,12 @@ function App() {
                     </div>
                     <span className="text-white font-bold text-lg">{gameState.hp}</span>
                   </div>
+                  {gameState.spawnProtected && (
+                    <div className="mt-1.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-cyan-300">
+                      <span>🛡️</span>
+                      <span>Spawn Shield</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
