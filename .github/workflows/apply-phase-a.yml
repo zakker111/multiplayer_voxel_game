@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  workflows: write
 
 jobs:
   apply:
@@ -79,6 +80,6 @@ jobs:
           rm -rf report-repo && mkdir report-repo && cd report-repo
           git init -q
           cp "$GITHUB_WORKSPACE/report.txt" report.txt
-          git -c user.name=ci -c user.email=ci@local add report.txt
+          git -c user.name=ci -c user.email=ci@local git add report.txt
           git -c user.name=ci -c user.email=ci@local commit -qm "ci report"
           git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/buff/ci-report
