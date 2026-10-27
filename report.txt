@@ -1,0 +1,239 @@
+outcome: success
+
+ot_mvq5u0ux_6gp4ec name=🤖 Bishop team=blue total=9
+# 2026-10-27T04:03:01.977Z [INFO ] [game] bot spawned id=bot_mvq5u0ux_yd59yu name=🤖 Kite team=blue total=10
+# 2026-10-27T04:03:01.977Z [INFO ] [game] bot spawned id=bot_mvq5u0ux_09y08v name=🤖 Onyx team=red total=11
+# 2026-10-27T04:03:01.977Z [INFO ] [game] bot spawned id=bot_mvq5u0ux_hso0lk name=🤖 Pike team=red total=12
+# 2026-10-27T04:03:01.977Z [INFO ] [game] bot spawned id=bot_mvq5u0ux_bc5y8j name=🤖 Quill team=red total=13
+# 2026-10-27T04:03:01.978Z [INFO ] [game] bot spawned id=bot_mvq5u0uy_h5s42a name=🤖 Riven team=red total=14
+# 2026-10-27T04:03:01.978Z [INFO ] [game] bot spawned id=bot_mvq5u0uy_q9obxf name=🤖 Sable team=red total=15
+# 2026-10-27T04:03:01.978Z [INFO ] [game] bot spawned id=bot_mvq5u0uy_hyfdd8 name=🤖 Talon team=red total=16
+# 2026-10-27T04:03:01.978Z [INFO ] [game] bot spawned id=bot_mvq5u0uy_9qy1jb name=🤖 Umbra team=red total=17
+# 2026-10-27T04:03:01.978Z [INFO ] [game] bot spawned id=bot_mvq5u0uy_23b2gg name=🤖 Volt team=red total=18
+# 2026-10-27T04:03:01.978Z [INFO ] [game] bot spawned id=bot_mvq5u0uy_cso006 name=🤖 Wisp team=red total=19
+# 2026-10-27T04:03:01.978Z [INFO ] [game] bot spawned id=bot_mvq5u0uy_fq2okk name=🤖 Zephyr team=red total=20
+# 2026-10-27T04:03:01.978Z [INFO ] [game] player connected id=player_1793073781978_akhi7uf96 ip=127.0.0.1 name=unnamed total=21
+# 2026-10-27T04:03:01.979Z [INFO ] [game] player connected id=player_1793073781978_x9cqkq7s6 ip=127.0.0.1 name=unnamed total=22
+# Subtest: a round is at least 30 minutes long by default
+ok 27 - a round is at least 30 minutes long by default
+  ---
+  duration_ms: 665.725667
+  ...
+# Subtest: ROUND_MINUTES overrides the round length
+ok 28 - ROUND_MINUTES overrides the round length
+  ---
+  duration_ms: 744.296212
+  ...
+# Subtest: the clock ends the round and the leading team takes it
+ok 29 - the clock ends the round and the leading team takes it
+  ---
+  duration_ms: 603.520104
+  ...
+# Subtest: equal captures at the whistle is a draw and wins nobody a round
+ok 30 - equal captures at the whistle is a draw and wins nobody a round
+  ---
+  duration_ms: 637.036683
+  ...
+# Subtest: the objective is frozen between rounds
+ok 31 - the objective is frozen between rounds
+  ---
+  duration_ms: 576.401358
+  ...
+# Subtest: the next round resets captures, flags and returns everyone to spawn
+ok 32 - the next round resets captures, flags and returns everyone to spawn
+  ---
+  duration_ms: 679.801422
+  ...
+# Subtest: clients get the round clock at least once per second
+ok 33 - clients get the round clock at least once per second
+  ---
+  duration_ms: 603.720506
+  ...
+# Subtest: a late joiner receives the current round and clock in init
+ok 34 - a late joiner receives the current round and clock in init
+  ---
+  duration_ms: 592.121016
+  ...
+# Subtest: world half extent covers the spawn zones
+ok 35 - world half extent covers the spawn zones
+  ---
+  duration_ms: 1.082062
+  ...
+# Subtest: every possible spawn point is inside the world (not void-killed at spawn)
+ok 36 - every possible spawn point is inside the world (not void-killed at spawn)
+  ---
+  duration_ms: 0.240343
+  ...
+# Subtest: flag bases are inside the world
+ok 37 - flag bases are inside the world
+  ---
+  duration_ms: 0.089816
+  ...
+# Subtest: genuinely out-of-world positions are still detected
+ok 38 - genuinely out-of-world positions are still detected
+  ---
+  duration_ms: 1.062102
+  ...
+# Terrain generated
+# Server world initialized
+# Terrain generated
+# Server world initialized
+# Terrain generated
+# Server world initialized
+# Terrain generated
+# Server world initialized
+# Terrain generated
+# Server world initialized
+# Terrain generated
+# Server world initialized
+# Terrain generated
+# Server world initialized
+# Terrain generated
+# Server world initialized
+# Subtest: can place block on ground surface
+ok 39 - can place block on ground surface
+  ---
+  duration_ms: 670.324852
+  ...
+# Subtest: can stack blocks upward
+ok 40 - can stack blocks upward
+  ---
+  duration_ms: 729.029406
+  ...
+# Subtest: can bridge sideways off an existing block
+ok 41 - can bridge sideways off an existing block
+  ---
+  duration_ms: 617.799176
+  ...
+# Subtest: mid-air placement far from support is rejected
+ok 42 - mid-air placement far from support is rejected
+  ---
+  duration_ms: 620.109048
+  ...
+# Subtest: placement above build height limit is rejected
+ok 43 - placement above build height limit is rejected
+  ---
+  duration_ms: 644.284842
+  ...
+# Subtest: occupied cell cannot be built into
+ok 44 - occupied cell cannot be built into
+  ---
+  duration_ms: 401.226424
+  ...
+# Subtest: ground voxel can be mined with tool damage
+ok 45 - ground voxel can be mined with tool damage
+  ---
+  duration_ms: 413.783511
+  ...
+# Subtest: mining supports tower collapse check runs without error
+ok 46 - mining supports tower collapse check runs without error
+  ---
+  duration_ms: 518.792494
+  ...
+# Terrain generated
+# Server world initialized
+# 2026-10-27T04:03:02.469Z [INFO ] [game] initialized (ban file: /home/runner/work/multiplayer_voxel_game/multiplayer_voxel_game/bans.json, bans active: 0)
+# 2026-10-27T04:03:02.469Z [INFO ] [game] bot spawned id=bot_mvq5u18l_ac4loo name=🤖 Rook team=blue total=1
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_kihyct name=🤖 Vex team=blue total=2
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_tnezcj name=🤖 Milo team=blue total=3
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_epyqgz name=🤖 Dana team=blue total=4
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_2oy6nz name=🤖 Cinder team=blue total=5
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_qea94s name=🤖 Flint team=blue total=6
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_a6pnrz name=🤖 Echo team=blue total=7
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_x653mu name=🤖 Wren team=blue total=8
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_a0wbjj name=🤖 Bishop team=blue total=9
+# 2026-10-27T04:03:02.470Z [INFO ] [game] bot spawned id=bot_mvq5u18m_boor3h name=🤖 Kite team=blue total=10
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18m_1k3ube name=🤖 Onyx team=red total=11
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_q76wik name=🤖 Pike team=red total=12
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_r13v1h name=🤖 Quill team=red total=13
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_c1ono6 name=🤖 Riven team=red total=14
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_gxeglg name=🤖 Sable team=red total=15
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_dkodra name=🤖 Talon team=red total=16
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_tatofk name=🤖 Umbra team=red total=17
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_kt2zr3 name=🤖 Volt team=red total=18
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_vbvhst name=🤖 Wisp team=red total=19
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_xlzuf9 name=🤖 Zephyr team=red total=20
+# 2026-10-27T04:03:02.471Z [INFO ] [game] bot spawned id=bot_mvq5u18n_tif3ia name=MagCheck team=red total=21
+# Terrain generated
+# Server world initialized
+# 2026-10-27T04:03:03.016Z [INFO ] [game] initialized (ban file: /home/runner/work/multiplayer_voxel_game/multiplayer_voxel_game/bans.json, bans active: 0)
+# 2026-10-27T04:03:03.016Z [INFO ] [game] bot spawned id=bot_mvq5u1ns_t5cagr name=🤖 Rook team=blue total=1
+# 2026-10-27T04:03:03.016Z [INFO ] [game] bot spawned id=bot_mvq5u1ns_1fcaj0 name=🤖 Vex team=blue total=2
+# 2026-10-27T04:03:03.016Z [INFO ] [game] bot spawned id=bot_mvq5u1ns_9jtngk name=🤖 Milo team=blue total=3
+# 2026-10-27T04:03:03.016Z [INFO ] [game] bot spawned id=bot_mvq5u1ns_nyp6s0 name=🤖 Dana team=blue total=4
+# 2026-10-27T04:03:03.016Z [INFO ] [game] bot spawned id=bot_mvq5u1ns_23efse name=🤖 Cinder team=blue total=5
+# 2026-10-27T04:03:03.016Z [INFO ] [game] bot spawned id=bot_mvq5u1ns_5tjlrj name=🤖 Flint team=blue total=6
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1ns_aru8p9 name=🤖 Echo team=blue total=7
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_t8aaas name=🤖 Wren team=blue total=8
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_peeme6 name=🤖 Bishop team=blue total=9
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_l1td6v name=🤖 Kite team=blue total=10
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_gdzgjc name=🤖 Onyx team=red total=11
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_qdu2cx name=🤖 Pike team=red total=12
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_jpaz1u name=🤖 Quill team=red total=13
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_gyv83l name=🤖 Riven team=red total=14
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_t868v8 name=🤖 Sable team=red total=15
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_fcregj name=🤖 Talon team=red total=16
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_wiho2y name=🤖 Umbra team=red total=17
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_kah5vh name=🤖 Volt team=red total=18
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_1h9g34 name=🤖 Wisp team=red total=19
+# 2026-10-27T04:03:03.017Z [INFO ] [game] bot spawned id=bot_mvq5u1nt_6iectz name=🤖 Zephyr team=red total=20
+# 2026-10-27T04:03:03.018Z [INFO ] [game] player connected id=player_1793073783018_vydljuutp ip=127.0.0.1 name=unnamed total=21
+# Subtest: both guns are defined in the shared table with complete stats
+ok 47 - both guns are defined in the shared table with complete stats
+  ---
+  duration_ms: 0.953287
+  ...
+# Subtest: shared damage is used without falloff inside full range
+ok 48 - shared damage is used without falloff inside full range
+  ---
+  duration_ms: 0.143547
+  ...
+# Subtest: damage falls off monotonically between fullRange and falloffRange
+ok 49 - damage falls off monotonically between fullRange and falloffRange
+  ---
+  duration_ms: 0.145169
+  ...
+# Subtest: the two guns have distinct roles: SMG wins close, rifle wins far
+ok 50 - the two guns have distinct roles: SMG wins close, rifle wins far
+  ---
+  duration_ms: 0.142846
+  ...
+# Subtest: rifle is a two-body-shot kill, SMG needs sustained fire
+ok 51 - rifle is a two-body-shot kill, SMG needs sustained fire
+  ---
+  duration_ms: 0.126171
+  ...
+# Subtest: the client no longer re-declares gun stats (the desync that started this)
+ok 52 - the client no longer re-declares gun stats (the desync that started this)
+  ---
+  duration_ms: 1.073919
+  ...
+# Subtest: server player magazines and reload times come from the table
+ok 53 - server player magazines and reload times come from the table
+  ---
+  duration_ms: 658.860829
+  ...
+# Subtest: a rate-limited shot costs no ammo and cannot beat the fire rate
+ok 54 - a rate-limited shot costs no ammo and cannot beat the fire rate
+  ---
+  duration_ms: 547.634117
+  ...
+1..54
+# tests 54
+# suites 0
+# pass 54
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 10049.236077
+== commit ==
+[main 345e32e] Finish Phase A, fix bot objective commit, refresh docs, drop dead files
+ 16 files changed, 1380 insertions(+), 309 deletions(-)
+ delete mode 100644 metadata.json
+ create mode 100644 tests/feedback.test.mjs
+ create mode 100644 tests/roundLifecycle.test.mjs
+TREE=de245598806251fdff5157b1c638612dad2abf3c
+To https://github.com/zakker111/multiplayer_voxel_game
+   b6c3079..345e32e  HEAD -> main
+== done ==
