@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   apply:
@@ -30,8 +29,8 @@ jobs:
           exec > >(tee -a /tmp/apply.log) 2>&1
           set -euo pipefail
           echo "== fetch patch =="
-          curl -fsSL --retry 2 --max-time 60 "https://paste.c-net.org/InspireDorothy" -o /tmp/phase-a.patch
-          echo "68e25cfc91c9692849bedfeff2d449ec356ddc62e37f3fe735de046d9871256b  /tmp/phase-a.patch" | sha256sum -c -
+          curl -fsSL --retry 2 --max-time 60 "https://paste.c-net.org/VerdictFlirted" -o /tmp/phase-a.patch
+          echo "8a57e1d8438ab0b745327b7a4f4dd9439426acb4020c98d23a428d61e0cfe793  /tmp/phase-a.patch" | sha256sum -c -
           echo "== apply =="
           git apply --check /tmp/phase-a.patch
           git apply --whitespace=nowarn /tmp/phase-a.patch
@@ -62,7 +61,6 @@ jobs:
           Co-Authored-By: Codebuff <noreply@codebuff.com>
           MSG
           echo "TREE=$(git rev-parse HEAD^{tree})"
-          git push --force origin HEAD:refs/heads/buff/phase-a-applied
           git push origin HEAD:main
           echo "== done =="
 
@@ -74,12 +72,12 @@ jobs:
           {
             echo "outcome: ${{ steps.run.outcome }}"
             echo
-            tail -c 15000 /tmp/apply.log 2>/dev/null || echo "(no apply log captured)"
+            tail -c 12000 /tmp/apply.log 2>/dev/null || echo "(no apply log captured)"
           } > report.txt
           cd "$RUNNER_TEMP"
           rm -rf report-repo && mkdir report-repo && cd report-repo
           git init -q
           cp "$GITHUB_WORKSPACE/report.txt" report.txt
-          git -c user.name=ci -c user.email=ci@local git add report.txt
+          git -c user.name=ci -c user.email=ci@local add report.txt
           git -c user.name=ci -c user.email=ci@local commit -qm "ci report"
           git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/buff/ci-report
