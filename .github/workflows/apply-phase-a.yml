@@ -18,39 +18,32 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Fetch patch
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 3 "https://paste.c-net.org/InspireDorothy" -o /tmp/phase-a.patch
-          echo "68e25cfc91c9692849bedfeff2d449ec356ddc62e37f3fe735de046d9871256b  /tmp/phase-a.patch" | sha256sum -c -
-          wc -c /tmp/phase-a.patch
-
-      - name: Apply patch
-        run: |
-          set -euo pipefail
-          git apply --check /tmp/phase-a.patch
-          git apply --whitespace=nowarn /tmp/phase-a.patch
-          git status --short
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run lint
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
-        run: npm test
-
-      - name: Commit and update main
+      - name: Apply, verify, push
+        id: run
+        continue-on-error: true
         run: |
+          exec > >(tee -a /tmp/apply.log) 2>&1
           set -euo pipefail
+          echo "== fetch patch =="
+          curl -fsSL --retry 2 --max-time 60 "https://paste.c-net.org/InspireDorothy" -o /tmp/phase-a.patch
+          echo "68e25cfc91c9692849bedfeff2d449ec356ddc62e37f3fe735de046d9871256b  /tmp/phase-a.patch" | sha256sum -c -
+          echo "== apply =="
+          git apply --check /tmp/phase-a.patch
+          git apply --whitespace=nowarn /tmp/phase-a.patch
+          git status --short
+          echo "== install =="
+          npm ci
+          echo "== typecheck =="
+          npm run lint
+          echo "== build =="
+          npm run build
+          echo "== test =="
+          npm test
+          echo "== commit =="
           git config user.name "zakker111"
           git config user.email "2182664+zakker111@users.noreply.github.com"
           git add -A
@@ -70,3 +63,22 @@ jobs:
           echo "TREE=$(git rev-parse HEAD^{tree})"
           git push --force origin HEAD:refs/heads/buff/phase-a-applied
           git push origin HEAD:main
+          echo "== done =="
+
+      - name: Publish diagnostics
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "outcome: ${{ steps.run.outcome }}"
+            echo
+            tail -c 15000 /tmp/apply.log 2>/dev/null || echo "(no apply log captured)"
+          } > report.txt
+          cd "$RUNNER_TEMP"
+          rm -rf report-repo && mkdir report-repo && cd report-repo
+          git init -q
+          cp "$GITHUB_WORKSPACE/report.txt" report.txt
+          git -c user.name=ci -c user.email=ci@local add report.txt
+          git -c user.name=ci -c user.email=ci@local commit -qm "ci report"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/buff/ci-report
