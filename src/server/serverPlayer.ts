@@ -13,6 +13,8 @@ import {
   PLAYER_RADIUS,
   WORLD_SIZE,
   GROUND_LEVEL,
+  WEAPONS,
+  type WeaponId,
 } from '../shared/types';
 import { ServerWorld } from './serverWorld';
 
@@ -51,20 +53,13 @@ export class ServerPlayer {
   reloadStartTime: number = 0;
   reloadTime: number = 2.0; // seconds
   
-  // Weapon-specific magazine sizes
-  private static readonly MAGAZINE_SIZES = {
-    rifle: 10,
-    smg: 30,
-    pickaxe: 0,
-    spade: 0
-  };
-  
-  private static readonly RELOAD_TIMES = {
-    rifle: 2.0,
-    smg: 1.5,
-    pickaxe: 0,
-    spade: 0
-  };
+  /** Magazine size / reload time live in the shared weapon table (single
+   *  source of truth with the client). Tools have no magazine. */
+  private static gunStats(equipment: 'rifle' | 'smg' | 'pickaxe' | 'spade') {
+    return equipment === 'rifle' || equipment === 'smg'
+      ? WEAPONS[equipment as WeaponId]
+      : null;
+  }
 
   private input: PlayerInput = {
     moveX: 0,
@@ -233,17 +228,19 @@ export class ServerPlayer {
     this.hp = this.maxHp;
     this.isDead = false;
     // Reset magazine on respawn
-    this.currentAmmo = ServerPlayer.MAGAZINE_SIZES[this.equipment];
-    this.magazineSize = ServerPlayer.MAGAZINE_SIZES[this.equipment];
+    const stats = ServerPlayer.gunStats(this.equipment);
+    this.magazineSize = stats ? stats.magazineSize : 0;
+    this.currentAmmo = this.magazineSize;
     this.isReloading = false;
   }
 
   changeEquipment(equipment: 'rifle' | 'smg' | 'pickaxe' | 'spade'): void {
     this.equipment = equipment;
-    this.magazineSize = ServerPlayer.MAGAZINE_SIZES[equipment];
+    const stats = ServerPlayer.gunStats(equipment);
+    this.magazineSize = stats ? stats.magazineSize : 0;
     this.currentAmmo = this.magazineSize;
     this.isReloading = false;
-    this.reloadTime = ServerPlayer.RELOAD_TIMES[equipment];
+    this.reloadTime = stats ? stats.reloadTime : 0;
   }
 
   startReload(): boolean {

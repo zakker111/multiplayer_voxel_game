@@ -14,6 +14,9 @@ import {
   SPAWN_X_RANGE,
   BLUE_FLAG_POS,
   RED_FLAG_POS,
+  WEAPONS,
+  weaponDamage,
+  type WeaponStats,
 } from '../shared/types';
 
 /* ---------- Tab-held scoreboard data model ---------- */
@@ -234,17 +237,23 @@ interface Flag {
   light: THREE.PointLight;
 }
 
-interface Weapon {
-  fireRate: number;
+interface Weapon extends WeaponStats {
   lastFired: number;
-  damage: { head: number; body: number };
-  spread: number;
-  name: string;
-  magazineSize: number;
   currentAmmo: number;
-  reloadTime: number;
   isReloading: boolean;
   reloadStartTime: number;
+}
+
+/** Per-instance runtime state around the shared authoritative stats. */
+function makeWeapon(stats: WeaponStats): Weapon {
+  return {
+    ...stats,
+    damage: { ...stats.damage },
+    currentAmmo: stats.magazineSize,
+    lastFired: 0,
+    isReloading: false,
+    reloadStartTime: 0,
+  };
 }
 
 const TEAM_COLORS: Record<Team, { body: number; accent: number; legs: number; label: string }> = {
@@ -420,24 +429,23 @@ export class Game {
   private boundMouseMove: (e: MouseEvent) => void;
 
   weapons: Record<string, Weapon> = {
-    rifle: {
-      fireRate: 0.4, lastFired: 0, damage: { head: 100, body: 34 }, spread: 0.0005,
-      name: 'Rifle', magazineSize: 10, currentAmmo: 10, reloadTime: 2.0,
-      isReloading: false, reloadStartTime: 0
-    },
-    smg: {
-      fireRate: 0.1, lastFired: 0, damage: { head: 100, body: 34 }, spread: 0.04,
-      name: 'SMG', magazineSize: 30, currentAmmo: 30, reloadTime: 1.5,
-      isReloading: false, reloadStartTime: 0
-    },
+    // Gun stats come from the shared table (single source of truth with the
+    // server); only the mutable per-instance state is added here.
+    rifle: makeWeapon(WEAPONS.rifle),
+    smg: makeWeapon(WEAPONS.smg),
+    // Tools are not fireable weapons (voxel damage comes from TOOLS); these
+    // entries exist only for the ammo/reload UI, so the range fields are
+    // neutral.
     spade: {
       fireRate: 0.5, lastFired: 0, damage: { head: 40, body: 25 }, spread: 0,
       name: 'Spade', magazineSize: 0, currentAmmo: 0, reloadTime: 0,
+      fullRange: 0, falloffRange: 0, minMultiplier: 1,
       isReloading: false, reloadStartTime: 0
     },
     pickaxe: {
       fireRate: 0.5, lastFired: 0, damage: { head: 40, body: 25 }, spread: 0,
       name: 'Pickaxe', magazineSize: 0, currentAmmo: 0, reloadTime: 0,
+      fullRange: 0, falloffRange: 0, minMultiplier: 1,
       isReloading: false, reloadStartTime: 0
     },
   };
@@ -2701,15 +2709,18 @@ export class Game {
     let dir = this.player.getAimDirection();
     if (!this.isAiming) {
       // Pinpoint accurate rifle (near-zero spread), tighter and controlled SMG spread
-      const spreadAmount = this.equipment === 'rifle' ? 0.0006 : 0.0075;
+      // Hip fire cone comes straight from the shared weapon table.
+      const spreadAmount = weapon.spread;
       const spreadX = (Math.random() - 0.5) * spreadAmount;
       const spreadY = (Math.random() - 0.5) * spreadAmount;
       const right = this.player.getRight();
       const up = new THREE.Vector3(0, 1, 0);
       dir.addScaledVector(right, spreadX).addScaledVector(up, spreadY).normalize();
     } else if (this.equipment === 'smg') {
-      // ADS SMG gets a tiny precision spread; Rifle ADS has 0 spread (laser pinpoint)
-      const spreadAmount = 0.002;
+      // ADS tightens the SMG cone to ~1/6 of its hip fire; the rifle's ADS is
+      // pinpoint. Derived from the shared value so tuning the SMG cone in one
+      // place still tightens it here.
+      const spreadAmount = weapon.spread * 0.17;
       const spreadX = (Math.random() - 0.5) * spreadAmount;
       const spreadY = (Math.random() - 0.5) * spreadAmount;
       const right = this.player.getRight();
@@ -2810,7 +2821,9 @@ export class Game {
     }
 
     if (hitBot) {
-      const damage = hitBotHeadshot ? weapon.damage.head : weapon.damage.body;
+      // Shared damage model + range falloff, so the offline bot match hits for
+      // exactly what the server would deal for the same shot.
+      const damage = weaponDamage(weapon, hitBotHeadshot, closestTargetDist);
       hitBot.hp -= damage;
       hitBot.lastDamageTime = Date.now();
       hitBot.flinchTimer = 0.22;

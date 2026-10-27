@@ -80,17 +80,26 @@ GRAVITY = 20              // Gravity acceleration
 
 ## Weapons
 
-### Rifle
-- Fire rate: 0.4s
-- Headshot damage: 100 (1-shot kill)
-- Body damage: 34 (3-shot kill)
-- Spread: 0.01
+All weapon stats live in exactly one place: `WEAPONS` in `src/shared/types.ts`.
+The client, the server and the bots read that table, and `weaponDamage()` applies
+range falloff identically everywhere. Do not re-declare damage, fire-rate,
+magazine or reload values in another file.
 
-### SMG
-- Fire rate: 0.1s
-- Headshot damage: 100 (1-shot kill)
-- Body damage: 34 (3-shot kill)
-- Spread: 0.04
+### Rifle — marksman
+- Fire rate: 0.7s (semi-auto, one shot per click)
+- Headshot: 100 (one-shot kill on a player)
+- Body: 65 (two-shot kill; two shots also kill a 130 HP bot)
+- Spread: 0.0006 hip fire, 0 when aiming
+- Magazine 10, reload 2.0s
+- Full damage out to 140m, tapering to 0.8x at 260m
+
+### SMG — close quarters
+- Fire rate: 0.1s (hold to auto-fire)
+- Headshot: 34
+- Body: 20 (five-shot kill on a player)
+- Spread: 0.012 hip fire, ~1/6 of that when aiming
+- Magazine 30, reload 1.5s
+- Full damage out to 18m, falling to 0.35x at 50m — out-DPSed by the rifle past ~25m
 
 ## Tools
 

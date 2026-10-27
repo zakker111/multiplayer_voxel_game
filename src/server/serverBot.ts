@@ -27,6 +27,7 @@ import {
   PLAYER_SPEED,
   SPRINT_MULTIPLIER,
   WEAPONS,
+  type WeaponId,
   BLUE_FLAG_POS,
   RED_FLAG_POS,
   GROUND_LEVEL,
@@ -119,9 +120,11 @@ export class ServerBot extends ServerPlayer {
     this.name = name;
     this.isBotFlag = true; // scoreboard: mark AI combatants as bots
     this.equipment = Math.random() < 0.5 ? 'rifle' : 'smg';
-    this.magazineSize = WEAPONS[this.equipment as 'rifle' | 'smg'] ? (this.equipment === 'rifle' ? 10 : 30) : 10;
+    // Magazine/reload come from the shared weapon table (no hardcoded 10/30).
+    const gun = WEAPONS[this.equipment as WeaponId];
+    this.magazineSize = gun ? gun.magazineSize : 0;
     this.currentAmmo = this.magazineSize;
-    this.reloadTime = this.equipment === 'rifle' ? 2.0 : 1.5;
+    this.reloadTime = gun ? gun.reloadTime : 0;
     // Vicious: tougher than players (respawn() also honors maxHp)
     this.maxHp = BOT_MAX_HP;
     this.hp = BOT_MAX_HP;

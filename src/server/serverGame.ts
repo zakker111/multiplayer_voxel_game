@@ -13,6 +13,7 @@ import {
   Position,
   WEAPONS,
   TOOLS,
+  weaponDamage,
   VOXEL_AIR,
   BLUE_SPAWN_Z_MIN,
   BLUE_SPAWN_Z_MAX,
@@ -217,7 +218,7 @@ export class ServerGame {
     );
     // Headshot chance scales with accuracy distance
     const isHeadshot = dist < 25 && Math.random() < 0.18;
-    const damage = isHeadshot ? weapon.damage.head : weapon.damage.body;
+    const damage = weaponDamage(weapon, isHeadshot, dist);
 
     this.applyDamage(targetId, damage, botId);
   }
@@ -689,11 +690,15 @@ export class ServerGame {
 
     // Check magazine state
     if (player.isReloading) return;
-    if (!player.useAmmo()) return; // Returns false if no ammo or reloading
 
+    // Rate limit BEFORE consuming ammo: a shot rejected here must not cost a
+    // round (spamming the trigger under lag used to silently drain magazines).
     const lastTime = this.lastShootTime.get(playerId) || 0;
-    if (now - lastTime < weapon.fireRate * 0.75) return; // Allow slight tolerance for network timing
-    
+    // Tolerance is for network jitter only. It used to be 25%, which let a
+    // modified client fire a full 33% faster than the weapon's real fire rate.
+    if (now - lastTime < weapon.fireRate * 0.9) return;
+    if (!player.useAmmo()) return; // false when the magazine is empty
+
     this.lastShootTime.set(playerId, now);
     
     // Set shooting state for sound effects. The game loop clears this flag
@@ -741,7 +746,7 @@ export class ServerGame {
       }
     }
 
-    let confirmedTarget: { id: string; player: ServerPlayer; isHeadshot: boolean } | null = null;
+    let confirmedTarget: { id: string; player: ServerPlayer; isHeadshot: boolean; distance: number } | null = null;
 
     // 1. First priority: validate client-reported hit candidate if enemy was hit on shooter's screen
     if (clientTargetId && this.players.has(clientTargetId)) {
@@ -765,6 +770,7 @@ export class ServerGame {
               id: clientTargetId,
               player: target,
               isHeadshot: !!clientIsHeadshot,
+              distance: dist,
             };
           }
         }
@@ -797,7 +803,12 @@ export class ServerGame {
 
           if (horizDist < 0.85 && vertDist >= -0.3 && vertDist <= 2.3) {
             const isHeadshot = vertDist >= 1.45;
-            confirmedTarget = { id: targetId, player: target, isHeadshot };
+            confirmedTarget = {
+              id: targetId,
+              player: target,
+              isHeadshot,
+              distance: Math.hypot(toTarget.x, toTarget.y, toTarget.z),
+            };
             closestDist = dot;
           }
         }
@@ -805,7 +816,7 @@ export class ServerGame {
     }
 
     if (confirmedTarget) {
-      const damage = confirmedTarget.isHeadshot ? weapon.damage.head : weapon.damage.body;
+      const damage = weaponDamage(weapon, confirmedTarget.isHeadshot, confirmedTarget.distance);
       const target = confirmedTarget.player;
       const targetId = confirmedTarget.id;
 

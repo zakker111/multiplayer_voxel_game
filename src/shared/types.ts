@@ -163,10 +163,77 @@ export const PLAYER_HEIGHT = 1.7;
 export const CROUCH_HEIGHT = 1.2;
 export const PLAYER_RADIUS = 0.3;
 
-export const WEAPONS = {
-  rifle: { fireRate: 0.4, damage: { head: 100, body: 34 }, spread: 0.0005 },
-  smg: { fireRate: 0.1, damage: { head: 34, body: 20 }, spread: 0.04 },
+export type WeaponId = 'rifle' | 'smg';
+
+/** Authoritative weapon stats.
+ *
+ *  THIS IS THE ONLY DEFINITION. The client (`src/game/game.ts`), the server
+ *  (`serverGame` / `serverPlayer`) and the bots all read this table. The
+ *  client used to keep its own copy, which silently drifted to 34/100 damage
+ *  for the SMG while the server dealt 20/34 — the same gun, two different
+ *  numbers. Never re-declare a damage, fire-rate or magazine value anywhere
+ *  else; add it here. */
+export interface WeaponStats {
+  name: string;
+  /** Seconds between shots (semi-auto weapons are also click-gated). */
+  fireRate: number;
+  damage: { head: number; body: number };
+  /** Hip-fire cone in radians; 0 would be pinpoint. */
+  spread: number;
+  magazineSize: number;
+  reloadTime: number;
+  /** Full damage applies inside this many metres. */
+  fullRange: number;
+  /** Damage scales linearly from 1x at `fullRange` down to `minMultiplier`
+   *  at this range, then stays there. */
+  falloffRange: number;
+  minMultiplier: number;
+}
+
+export const WEAPONS: Record<WeaponId, WeaponStats> = {
+  // Marksman: slow cadence, pinpoint, two body shots (one headshot) to kill at
+  // any range. Beaten by the SMG inside ~18m, dominant past ~40m.
+  rifle: {
+    name: 'Rifle',
+    fireRate: 0.7,
+    damage: { head: 100, body: 65 },
+    spread: 0.0006,
+    magazineSize: 10,
+    reloadTime: 2.0,
+    fullRange: 140,
+    falloffRange: 260,
+    minMultiplier: 0.8,
+  },
+  // Close quarters: highest raw DPS in the game, but the damage collapses past
+  // 18m and it is a 10 shot/s spray with a 30-round magazine.
+  smg: {
+    name: 'SMG',
+    fireRate: 0.1,
+    damage: { head: 34, body: 20 },
+    spread: 0.012,
+    magazineSize: 30,
+    reloadTime: 1.5,
+    fullRange: 18,
+    falloffRange: 50,
+    minMultiplier: 0.35,
+  },
 };
+
+/** Range damage multiplier for a weapon (1 inside `fullRange`). */
+export function rangeMultiplier(weapon: WeaponStats, distance: number): number {
+  if (!Number.isFinite(distance) || distance <= weapon.fullRange) return 1;
+  if (distance >= weapon.falloffRange) return weapon.minMultiplier;
+  const t = (distance - weapon.fullRange) / (weapon.falloffRange - weapon.fullRange);
+  return 1 + (weapon.minMultiplier - 1) * t;
+}
+
+/** Authoritative damage for a single hit, including range falloff.
+ *  Server hits, bot hits and the offline bot match must all use this so a
+ *  weapon hits for identical numbers in every mode. */
+export function weaponDamage(weapon: WeaponStats, isHeadshot: boolean, distance: number): number {
+  const base = isHeadshot ? weapon.damage.head : weapon.damage.body;
+  return Math.max(1, Math.round(base * rangeMultiplier(weapon, distance)));
+}
 
 export const TOOLS = {
   pickaxe: { damage: 3, cooldown: 0.5, harvests: true },
