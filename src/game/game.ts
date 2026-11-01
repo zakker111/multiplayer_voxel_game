@@ -3912,10 +3912,13 @@ export class Game {
           Math.cos(this.spectatorAngle) * Math.cos(this.spectatorPitch)
         ).normalize();
 
+        // Screen-right is forward x world-up: with forward = (sin a, 0, cos a),
+        // right is (-cos a, 0, sin a). The old (+cos, 0, -sin) vector pointed
+        // left, so A/D strafing felt mirrored in free-fly mode.
         const right = new THREE.Vector3(
-          Math.cos(this.spectatorAngle),
+          -Math.cos(this.spectatorAngle),
           0,
-          -Math.sin(this.spectatorAngle)
+          Math.sin(this.spectatorAngle)
         ).normalize();
 
         if (this.spectatorMoveForward) this.spectatorPos.add(forward.clone().multiplyScalar(moveSpeed));
