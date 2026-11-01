@@ -16,6 +16,12 @@ function isVec3(value: unknown): value is Position {
   const v = value as { x?: unknown; y?: unknown; z?: unknown };
   return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
 }
+
+/** Team ids are a closed set. An unknown value from a client must never reach
+ *  spawn logic, scoring or spawn-protection lookups. */
+function isTeam(value: unknown): value is 'red' | 'blue' {
+  return value === 'red' || value === 'blue';
+}
 import { BanStore, normalizeIp } from './banStore';
 import {
   ClientMessage,
@@ -86,6 +92,10 @@ export class ServerGame {
 
   /** Per-combatant kill/death/capture tallies for the Tab scoreboard. */
   private playerStats: Map<string, PlayerStats> = new Map();
+  /** Opaque per-connection tokens for the HTTP/SSE transport. A WebSocket
+   *  frame is already bound to its socket; a POSTed message was not, so it
+   *  used to trust a client-supplied playerId (anyone could act as anyone). */
+  private sessionTokens: Map<string, string> = new Map();
   private lastShootTime: Map<string, number> = new Map();
   private lastToolTime: Map<string, number> = new Map();
   private inventories: Map<string, number> = new Map();
@@ -93,7 +103,12 @@ export class ServerGame {
   // Flag positions (must match client)
   private readonly BLUE_FLAG_POS = BLUE_FLAG_POS;
   private readonly RED_FLAG_POS = RED_FLAG_POS;
-  private readonly CAPTURE_DISTANCE = 7.0; // Unified capture radius (matches client)
+  private readonly CAPTURE_DISTANCE = 7.0; // Pickup radius (matches client)
+  /** Distance from home base that scores. One rule for the automatic and the
+   *  client-driven path; they used to disagree (6.5 vs 7.0). */
+  private readonly CAPTURE_SCORE_RADIUS = 7.0;
+  /** How far from the player's body a build request may target. */
+  private readonly BUILD_REACH = 6.5;
   
   // Flag state tracking
   private blueFlagAtBase: boolean = true;
@@ -213,6 +228,9 @@ export class ServerGame {
       },
       buildBlock: (bot, pos) => {
         this.botBuild(bot.id, pos);
+      },
+      digBlock: (bot, pos) => {
+        this.botDig(bot.id, pos);
       },
     };
     return ctx;
@@ -541,6 +559,25 @@ export class ServerGame {
     });
   }
 
+  /**
+   * Bot clears one voxel it is jammed against. Reach-limited and only used by
+   * stuck recovery, so it cannot be used to chew through the map remotely.
+   */
+  private botDig(botId: string, position: Position): void {
+    const bot = this.players.get(botId);
+    if (!bot || !(bot instanceof ServerBot) || bot.isDead || bot.isSpectating) return;
+    const x = Math.round(position.x);
+    const y = Math.round(position.y);
+    const z = Math.round(position.z);
+    if (!this.world.isSolid(x, y, z)) return;
+    if (Math.hypot(x - bot.position.x, z - bot.position.z) > 3.5) return;
+    this.world.setVoxel(x, y, z, VOXEL_AIR);
+    this.broadcast({
+      type: 'voxelChanged',
+      change: { x, y, z, type: VOXEL_AIR, durability: 0 },
+    });
+  }
+
   private updateBots(ctx: BotContext): void {
     for (const [id, player] of this.players) {
       if (!(player instanceof ServerBot)) continue;
@@ -555,6 +592,19 @@ export class ServerGame {
   }
 
   private readonly tickDt: number = 1 / 20;
+
+  /** Issue the opaque token the HTTP transport must present with messages. */
+  issueSessionToken(playerId: string): string {
+    const token = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+    this.sessionTokens.set(token, playerId);
+    return token;
+  }
+
+  /** Resolve a POSTed token back to its player; unknown tokens resolve to null. */
+  resolveSessionToken(token: unknown): string | null {
+    if (typeof token !== 'string' || token.length === 0) return null;
+    return this.sessionTokens.get(token) ?? null;
+  }
 
   addPlayer(ws: WebSocket | GameConnection, ip?: string): string {
     const playerId = `player_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
@@ -575,6 +625,7 @@ export class ServerGame {
     this.sendToPlayer(playerId, {
       type: 'init',
       playerId,
+      sessionToken: this.issueSessionToken(playerId),
       state: player.getState(),
       players: existingPlayersList,
       scores: this.scores,
@@ -622,6 +673,13 @@ export class ServerGame {
     this.connections.delete(playerId);
     this.inventories.delete(playerId);
     this.lastShootTime.delete(playerId);
+    // Scoreboard tallies and session tokens must not outlive the player: bots
+    // churn on every join/leave, so keeping them leaked memory (and bandwidth —
+    // broadcastStats ships the whole map on every death).
+    this.playerStats.delete(playerId);
+    for (const [token, id] of this.sessionTokens) {
+      if (id === playerId) this.sessionTokens.delete(token);
+    }
     this.lastToolTime.delete(playerId);
     this.respawnTimers.delete(playerId);
     this.spawnProtectedUntil.delete(playerId);
@@ -746,27 +804,33 @@ export class ServerGame {
 
     switch (message.type) {
       case 'join':
-        // Handle team selection and initial spawn position
-        player.team = message.team;
-        // Keep teams balanced: retire one bot from this team so the human
-        // takes their slot (e.g. stays 10v10 with bots filling the roster).
-        this.makeRoomForHuman(message.team);
-        if (message.name) {
-          player.name = message.name;
-          // Name-based ban check: kick + extend to an IP ban for this session.
-          const nameBan = this.bans.list().find(
-            (b) => b.kind === 'name' && b.value.toLowerCase() === message.name!.toLowerCase(),
-          );
-          if (nameBan) {
-            log.warn(`Rejected join by banned name "${message.name}" from ${player.ip ?? '?'}`);
-            this.kickPlayer(playerId, `Banned account: ${nameBan.reason}`, false);
-            return;
+        // Team selection and the display name come from the client, so both are
+        // validated here: an unknown team breaks every comparison downstream,
+        // and an unbounded name ends up in logs and on every scoreboard.
+        {
+          const team = isTeam(message.team) ? message.team : player.team;
+          player.team = team;
+          // Keep teams balanced: retire one bot from this team so the human
+          // takes their slot (e.g. stays 10v10 with bots filling the roster).
+          this.makeRoomForHuman(team);
+          if (typeof message.name === 'string' && message.name.trim()) {
+            const name = message.name.trim().slice(0, 24);
+            player.name = name;
+            // Name-based ban check: kick + extend to an IP ban for this session.
+            const nameBan = this.bans.list().find(
+              (b) => b.kind === 'name' && b.value.toLowerCase() === name.toLowerCase(),
+            );
+            if (nameBan) {
+              log.warn(`Rejected join by banned name "${name}" from ${player.ip ?? '?'}`);
+              this.kickPlayer(playerId, `Banned account: ${nameBan.reason}`, false);
+              return;
+            }
           }
-        }
-        if (message.position) {
-          player.position = { ...message.position };
-        } else {
-          player.position = this.getSpawnPosition(message.team);
+          if (isVec3(message.position)) {
+            player.position = { x: message.position.x, y: message.position.y, z: message.position.z };
+          } else {
+            player.position = this.getSpawnPosition(team);
+          }
         }
         // Rejoining connections must never start life dead/eliminated: clear any
         // stale death/spectate state and pending respawn timers from a previous
@@ -846,15 +910,20 @@ export class ServerGame {
         log.info(`player ${playerId} ${player.isSpectating ? 'entered' : 'exited'} spectator mode`);
         break;
 
-      case 'footstep':
-        // Broadcast footstep sound to all players except the sender
+      case 'footstep': {
+        // Cosmetic but still client-controlled: clamp so a crafted frame cannot
+        // broadcast NaN or an ear-splitting volume to everyone else.
+        const volume = Number(message.volume);
+        const pitch = Number(message.pitch);
+        if (!Number.isFinite(volume) || !Number.isFinite(pitch)) break;
         this.broadcastExcept(playerId, {
           type: 'footstep',
           playerId,
-          volume: message.volume,
-          pitch: message.pitch,
+          volume: Math.min(1, Math.max(0, volume)),
+          pitch: Math.min(2, Math.max(0.5, pitch)),
         });
         break;
+      }
 
       case 'requestRespawn':
         // Server-authoritative safe spawn. The client fires this right after
@@ -925,6 +994,18 @@ export class ServerGame {
   private handleShoot(playerId: string, origin: Position, direction: Position, clientTargetId?: string, clientIsHeadshot?: boolean): void {
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating) return;
+
+    // The muzzle position and direction are client-supplied. Require the shot
+    // to start at the shooter's own eye position (tolerance covers one tick of
+    // movement plus lag) so a crafted frame cannot raycast from inside a wall or
+    // from the far side of the map.
+    const eyeOffset = 1.6;
+    const originDx = origin.x - player.position.x;
+    const originDz = origin.z - player.position.z;
+    const originDy = origin.y - (player.position.y + eyeOffset);
+    if (Math.hypot(originDx, originDz) > 4.0 || Math.abs(originDy) > 2.5) return;
+    const dirLength = Math.hypot(direction.x, direction.y, direction.z);
+    if (!(dirLength > 0.9 && dirLength < 1.1)) return;
 
     const now = Date.now() / 1000;
     const weapon = WEAPONS[player.equipment as 'rifle' | 'smg'];
@@ -1259,7 +1340,17 @@ export class ServerGame {
     if (inventory <= 0) return;
 
     const { x, y, z } = position;
-    
+
+    // Reach check: the placement coordinate is client-supplied, so without this
+    // a modified client could build anywhere on the map (e.g. sealing a flag
+    // stand or a spawn from a distance).
+    const reach = Math.hypot(
+      x + 0.5 - player.position.x,
+      y + 0.5 - (player.position.y + 1.0),
+      z + 0.5 - player.position.z,
+    );
+    if (reach > this.BUILD_REACH) return;
+
     if (this.canBuildAt(x, y, z)) {
       this.world.setVoxel(x, y, z, 4, 3); // VOXEL_BUILT
       this.inventories.set(playerId, inventory - 1);
@@ -1325,6 +1416,11 @@ export class ServerGame {
       }
     }
 
+    // A base pickup ends this call. Without the early return the dropped-flag
+    // loop below could consume a second flag entry in the same tick (silently
+    // deleting it from every client's view) and overwrite the carrier id.
+    if (player.carryingFlag) return;
+
     // Check if player is near dropped flags
     const enemyFlagTeam = player.team === 'blue' ? 'red' : 'blue';
     for (let i = this.droppedFlags.length - 1; i >= 0; i--) {
@@ -1382,16 +1478,29 @@ export class ServerGame {
 
     const homeBase = player.team === 'blue' ? this.BLUE_FLAG_POS : this.RED_FLAG_POS;
     const distance = Math.hypot(player.position.x - homeBase.x, player.position.z - homeBase.z);
-    if (distance > 7.0) return; // Match the client's capture radius to avoid desyncs
+    if (distance > this.CAPTURE_SCORE_RADIUS) return; // matches the client radius
 
+    this.awardCapture(playerId, player);
+  }
+
+  /**
+   * The single place a capture is scored.
+   *
+   * Both entry points — the automatic proximity check in `checkFlagCaptures`
+   * and the client's optimistic `captureFlag` message — go through here, so the
+   * score, flag state, respawn timer and the per-player `captures` tally can
+   * never diverge again (the automatic path used to skip the tally entirely,
+   * which is why bot captures never appeared on the scoreboard).
+   */
+  private awardCapture(playerId: string, player: ServerPlayer): void {
     if (player.team === 'blue') {
       this.captures.blue++;
-      this.redFlagAtBase = false; // Disappears!
+      this.redFlagAtBase = false; // captured flag disappears while respawning
       this.redFlagCarrier = null;
       this.redFlagRespawnTimer = 8.0;
     } else {
       this.captures.red++;
-      this.blueFlagAtBase = false; // Disappears!
+      this.blueFlagAtBase = false;
       this.blueFlagCarrier = null;
       this.blueFlagRespawnTimer = 8.0;
     }
@@ -1405,7 +1514,7 @@ export class ServerGame {
       team: player.team,
       // The captured flag is the ENEMY flag (blue scores by carrying red home)
       flagTeam: player.team === 'blue' ? 'red' : 'blue',
-      playerId: playerId,
+      playerId,
       captures: this.captures,
     });
   }
@@ -1599,32 +1708,8 @@ export class ServerGame {
         const dz = player.position.z - homeBase.z;
         const distance = Math.hypot(dx, dz);
 
-        if (distance < 6.5) {
-          // SCORE A CAPTURE! Flag disappears on capture and enters respawn timer
-          if (player.team === 'blue') {
-            this.captures.blue++;
-            this.redFlagAtBase = false; // Disappears!
-            this.redFlagCarrier = null;
-            this.redFlagRespawnTimer = 8.0;
-          } else {
-            this.captures.red++;
-            this.blueFlagAtBase = false; // Disappears!
-            this.blueFlagCarrier = null;
-            this.blueFlagRespawnTimer = 8.0;
-          }
-          player.carryingFlag = false;
-          log.info(`FLAG CAPTURED by ${playerId} (${player.team}) — score blue:${this.captures.blue} red:${this.captures.red}`);
-
-          // Broadcast capture event (flag disappears across all clients).
-          // NOTE: the captured flag is the ENEMY flag. Team 'blue' scores by
-          // carrying the RED flag home, so we must send flagTeam:'red'.
-          this.broadcast({
-            type: 'flagCaptured',
-            team: player.team,
-            flagTeam: player.team === 'blue' ? 'red' : 'blue',
-            playerId: playerId,
-            captures: this.captures,
-          });
+        if (distance < this.CAPTURE_SCORE_RADIUS) {
+          this.awardCapture(playerId, player);
         }
       }
 

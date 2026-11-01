@@ -161,6 +161,10 @@ export interface GameState {
   pingMs: number;
   /** Spawn invulnerability is active right now. */
   spawnProtected: boolean;
+  /** Master audio muted (M key or the HUD audio control). */
+  audioMuted: boolean;
+  /** Master audio volume, 0..1. */
+  audioVolume: number;
 }
 
 interface Bot {
@@ -470,6 +474,7 @@ export class Game {
   private lastScoreboardJson = '';
   private cachedScoreboard: ScoreboardData | undefined = undefined;
   private boundBlur: () => void;
+  private boundContextMenu: (e: Event) => void;
   localPlayerId: string | null = null;
   lastInputSendTime: number = 0;
   inputSendRate: number = 50;
@@ -522,6 +527,8 @@ export class Game {
     this.canvas = canvas;
     this.clock = new THREE.Clock();
     this.sounds = new SoundManager();
+    // Keep the HUD audio control in sync with the M-key shortcut.
+    this.sounds.onSettingsChange(() => this.emitState());
     this.gameMode = mode;
     this.playerTeam = team;
     this.serverUrl = serverUrl;
@@ -630,6 +637,9 @@ export class Game {
     // clear the flag so the scoreboard can't get stuck open.
     this.boundBlur = () => { this.tabHeld = false; };
     this.boundMouseMove = this.onMouseMove.bind(this);
+    // Stored (not an inline arrow) so destroy() can remove it; the inline version
+    // leaked one listener per game instance.
+    this.boundContextMenu = (e) => e.preventDefault();
 
     window.addEventListener('resize', this.boundResize);
     canvas.addEventListener('mousedown', this.boundMouseDown);
@@ -639,7 +649,7 @@ export class Game {
     document.addEventListener('keyup', this.boundKeyUp);
     window.addEventListener('blur', this.boundBlur);
     document.addEventListener('mousemove', this.boundMouseMove);
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('contextmenu', this.boundContextMenu);
     } catch (error) {
       console.error('Error in game constructor:', error);
       throw error;
@@ -661,24 +671,8 @@ export class Game {
     redMarker.position.set(0, this.world.getOriginalGroundLevel() + 0.02, RED_FLAG_POS.z);
     this.scene.add(redMarker);
 
-    this.addTeamFlag(BLUE_FLAG_POS.x, BLUE_FLAG_POS.z, 0x2244cc, 'BLUE BASE');
-    this.addTeamFlag(RED_FLAG_POS.x, RED_FLAG_POS.z, 0xcc2222, 'RED BASE');
   }
 
-  private addTeamFlag(x: number, z: number, color: number, _label: string): void {
-    const groundY = this.world.getGroundHeight(x, z);
-    const poleGeo = new THREE.CylinderGeometry(0.05, 0.05, 4, 6);
-    const poleMat = new THREE.MeshLambertMaterial({ color: 0x888888 });
-    const pole = new THREE.Mesh(poleGeo, poleMat);
-    pole.position.set(x, groundY + 2, z);
-    this.scene.add(pole);
-
-    const flagGeo = new THREE.PlaneGeometry(1.5, 1);
-    const flagMat = new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide });
-    const flag = new THREE.Mesh(flagGeo, flagMat);
-    flag.position.set(x + 0.8, groundY + 3.5, z);
-    this.scene.add(flag);
-  }
 
   private getSafeSpawnPos(team: Team): THREE.Vector3 {
     const zMin = team === 'blue' ? BLUE_SPAWN_Z_MIN : RED_SPAWN_Z_MIN;
@@ -2583,6 +2577,11 @@ export class Game {
     }
     if (e.code === 'KeyP') {
       this.toggleSpectator();
+      return;
+    }
+    // M mutes/unmutes all game audio; works in spectator mode too.
+    if (e.code === 'KeyM' && !e.repeat) {
+      this.sounds.toggleMuted();
       return;
     }
 
@@ -5338,6 +5337,8 @@ export class Game {
         damageIndicators,
         pingMs: this.pingMs,
         spawnProtected: this.spawnProtected,
+        audioMuted: this.sounds.isMuted(),
+        audioVolume: this.sounds.getVolume(),
       });
     }
   }
@@ -5365,6 +5366,8 @@ export class Game {
     document.removeEventListener('keydown', this.boundKeyDown);
     document.removeEventListener('keyup', this.boundKeyUp);
     document.removeEventListener('mousemove', this.boundMouseMove);
+    window.removeEventListener('blur', this.boundBlur);
+    this.canvas.removeEventListener('contextmenu', this.boundContextMenu);
     this.renderer.dispose();
   }
 }

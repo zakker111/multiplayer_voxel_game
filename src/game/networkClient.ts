@@ -14,6 +14,11 @@ export class NetworkClient {
   
   public localPeerId: string;
   public assignedPlayerId: string | null = null;
+  /** Session token from `init`; the HTTP/SSE fallback must present it so the
+   *  server can bind a POSTed message to this connection's player. */
+  private sessionToken: string | null = null;
+  /** Messages sent before `init` (token) arrives, flushed once it does. */
+  private queuedMessages: ClientMessage[] = [];
   public transport: 'websocket' | 'sse' | 'broadcast' | 'connecting' = 'connecting';
   private lastKnownTeam: 'red' | 'blue' = 'blue';
   private lastKnownName: string = 'Soldier';
@@ -254,6 +259,10 @@ export class NetworkClient {
             const message: ServerMessage = JSON.parse(event.data);
             if (message.type === 'init') {
               this.assignedPlayerId = (message as any).playerId;
+              this.sessionToken = typeof (message as any).sessionToken === 'string'
+                ? (message as any).sessionToken
+                : null;
+              this.flushQueuedMessages();
             }
             this.handleMessage(message);
           } catch (error) {
@@ -340,22 +349,34 @@ export class NetworkClient {
     // 1. Send via WebSocket if open
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    } else if (this.sseConnected && this.sessionToken) {
+      // 2. Send via HTTP POST, authenticated by the session token from `init`.
+      this.postSse(message);
     } else if (this.sseConnected) {
-      // 2. Send via HTTP POST
-      fetch('/api/game/message', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          playerId: this.assignedPlayerId || this.localPeerId,
-          message,
-        }),
-      }).catch((err) => console.warn('HTTP game message send warning:', err));
+      // init has not landed yet — hold the message (bounded) until it does.
+      if (this.queuedMessages.length < 50) this.queuedMessages.push(message);
     }
 
     // 3. Always mirror to local browser tabs for immediate zero-latency peer sync
     if (this.channel) {
       this.mirrorToLocalPeers(message);
     }
+  }
+
+  private postSse(message: ClientMessage): void {
+    if (!this.sessionToken) return;
+    fetch('/api/game/message', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: this.sessionToken, message }),
+    }).catch((err) => console.warn('HTTP game message send warning:', err));
+  }
+
+  private flushQueuedMessages(): void {
+    if (!this.sessionToken || !this.sseConnected || this.queuedMessages.length === 0) return;
+    const queued = this.queuedMessages;
+    this.queuedMessages = [];
+    for (const message of queued) this.postSse(message);
   }
 
   private mirrorToLocalPeers(message: ClientMessage): void {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
-import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2 } from 'lucide-react';
+import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX } from 'lucide-react';
 
 /** Round clock as m:ss (rounds are half an hour long, so no hour component). */
 function formatRoundClock(seconds: number): string {
@@ -34,6 +34,8 @@ function App() {
     damageIndicators: [],
     pingMs: 0,
     spawnProtected: false,
+    audioMuted: false,
+    audioVolume: 1,
   });
   const [started, setStarted] = useState(false);
   const [gameMode, setGameMode] = useState<'multiplayer' | 'singleplayer' | 'online' | null>(null);
@@ -244,8 +246,8 @@ function App() {
               </div>
               <div className="mt-3 pt-3 border-t border-gray-700">
                 <p className="text-gray-300"><b>Left Click</b> — Shoot / Use tool</p>
-                <p className="text-gray-300"><b>Right Click</b> — Toggle iron sights / Place block (instant)</p>
-                <p className="text-gray-300"><b>R</b> — Reload weapon</p>
+                <p className="text-gray-300"><b>Right Click</b> — Toggle iron sights / Place block (instant)</p>                  <p className="text-gray-300"><b>R</b> — Reload weapon</p>
+                  <p className="text-gray-300"><b>M</b> — Mute / unmute audio</p>
                 <p className="text-gray-300"><b>Mouse Wheel</b> — Switch equipment</p>
                 <div className="mt-2 text-xs text-gray-400 space-y-1">
                   <p>🎯 1 headshot / 3 body shots to kill</p>
@@ -503,6 +505,33 @@ function App() {
               <span>🎥</span>
               <span>{gameState.isSpectating ? 'Exit Spectator (P)' : 'Spectate AI (P)'}</span>
             </button>
+
+            {/* Master audio: mute toggle + volume slider (mirrors the M key) */}
+            <div className="bg-gray-900/90 backdrop-blur-md pl-2 pr-3 py-1.5 rounded-xl border border-gray-700 shadow-lg flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => gameRef.current?.sounds.toggleMuted()}
+                className={`px-2 py-1 rounded-lg transition-colors cursor-pointer ${gameState.audioMuted ? 'bg-red-600/80 hover:bg-red-500 text-white' : 'bg-gray-800 hover:bg-gray-700 text-emerald-300 border border-gray-700'}`}
+                title={gameState.audioMuted ? 'Unmute game audio (M)' : 'Mute game audio (M)'}
+                aria-label={gameState.audioMuted ? 'Unmute game audio' : 'Mute game audio'}
+              >
+                {gameState.audioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={Math.round(gameState.audioVolume * 100)}
+                onChange={(e) => gameRef.current?.sounds.setVolume(Number(e.target.value) / 100)}
+                className="w-20 accent-[#00ff88] cursor-pointer"
+                title="Master volume"
+                aria-label="Master volume"
+              />
+              <span className={`text-[10px] font-mono w-8 text-right ${gameState.audioMuted ? 'text-red-300' : 'text-gray-300'}`}>
+                {gameState.audioMuted ? 'MUTE' : `${Math.round(gameState.audioVolume * 100)}%`}
+              </span>
+            </div>
 
             {gameMode === 'online' && (
               <div className="bg-gray-900/90 backdrop-blur-md px-3 py-2 rounded-xl border border-emerald-500/40 text-xs text-gray-300 flex items-center gap-2 shadow-lg">

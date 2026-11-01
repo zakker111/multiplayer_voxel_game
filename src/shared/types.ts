@@ -117,7 +117,7 @@ export interface RoundSnapshot {
 export type RoundWinner = 'red' | 'blue' | 'draw';
 
 export type ServerMessage =
-  | { type: 'init'; playerId: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
+  | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
   | { type: 'roundUpdate'; round: RoundSnapshot }
   | { type: 'roundEnded'; round: number; winner: RoundWinner; captures: { red: number; blue: number }; wins: { red: number; blue: number } }
   | { type: 'gameState'; state: GameState }
@@ -238,6 +238,18 @@ export const CROUCH_HEIGHT = 1.2;
 export const PLAYER_RADIUS = 0.3;
 
 export type WeaponId = 'rifle' | 'smg';
+
+/** Everything a player can hold. Equipment ids arrive from the network, so the
+ *  server validates them with `isEquipment()` before they reach game state —
+ *  an unknown string used to sit in `equipment`, break HUD lookups and leave
+ *  the player unable to shoot. */
+export type EquipmentId = WeaponId | 'pickaxe' | 'spade';
+
+export const EQUIPMENT_IDS: readonly EquipmentId[] = ['rifle', 'smg', 'pickaxe', 'spade'];
+
+export function isEquipment(value: unknown): value is EquipmentId {
+  return typeof value === 'string' && (EQUIPMENT_IDS as readonly string[]).includes(value);
+}
 
 /** Authoritative weapon stats.
  *

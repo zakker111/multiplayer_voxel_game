@@ -1,6 +1,11 @@
 // End-to-end bot TRENCH-building regression test.
 // Bundles the real ServerBot + ServerWorld and runs a headless bot through its
 // FSM, asserting that it actually places trench wall voxels in the world.
+//
+// The trigger moved when bot roles landed: defenders now dig in on their post
+// in front of their own flag (midfield digging is no longer part of the support
+// role), and attackers dig a forward firebase short of the enemy stand. This
+// test drives the defender path, which is the one that must always work.
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
@@ -28,23 +33,20 @@ function makeCtx(world, builtCells) {
   };
 }
 
-test('bot enters TRENCH state and builds wall voxels end-to-end', () => {
+test('a pinned defender enters TRENCH and builds wall voxels end-to-end', () => {
   const world = new ServerWorld();
   const built = [];
   const ctx = makeCtx(world, built);
 
-  // Spawn a blue bot near midfield so the trench trigger (midDist < 35) fires
-  const midZ = (types.BLUE_FLAG_POS.z + types.RED_FLAG_POS.z) / 2;
-  const spawn = { x: 32, y: GROUND_Y, z: midZ };
-  const bot = new ServerBot('bot-test', spawn, 'blue', 'TestBot');
-
-  // Deterministic trench entry: RNG is consumed by the constructor's bias
-  // rolls first, then per-decision-gate. Fresh sequence per tick: value #1
-  // fails the flag-grab coin flip (0.9 > 0.55), value #2 passes the TRENCH
-  // gate (0.1 < buildBias*0.8). Near-base BUILD can't fire at midfield
-  // distance anyway. The state timer is expired at construction so a decision
-  // runs on the very first tick.
-  const origRandom = Math.random;
+  // Blue defender standing on its post (26m in front of the home stand).
+  const post = { x: 8, y: GROUND_Y, z: types.BLUE_FLAG_POS.z + 26 };
+  const bot = new ServerBot('bot-test', post, 'blue', 'TestBot');
+  bot.role = 'support'; // runtime field; support holds and digs
+  bot.pinnedDownUntil = 1e6; // "someone is shooting at us" -> dig in
+  bot.lastTrenchAt = -100;
+  // The builder now picks from a structure pool; pin the straight trench here so
+  // the shape assertions below stay meaningful.
+  bot.startStructure(ctx, 'trench');
 
   let sawTrench = false;
   let t = 0;
@@ -52,19 +54,12 @@ test('bot enters TRENCH state and builds wall voxels end-to-end', () => {
   for (let i = 0; i < 1200; i++) {
     t += dt;
     ctx.serverTime = t;
-    let k = 0;
-    const seq = [0.9, 0.1];
-    Math.random = () => seq[Math.min(k++, seq.length - 1)];
-    if (!sawTrench) {
-      bot.position = { ...spawn }; // keep trigger condition (midDist<35) stable
-    }
     bot.botUpdate(dt, ctx);
     if (bot.stateName === 'TRENCH') sawTrench = true;
     if (sawTrench && built.length >= 10) break;
   }
-  Math.random = origRandom;
 
-  assert.ok(sawTrench, 'bot should transition into TRENCH state at midfield');
+  assert.ok(sawTrench, 'pinned defender should transition into TRENCH on its post');
   assert.ok(built.length >= 8, `trench should place multiple wall voxels, got ${built.length}`);
 
   // All placed cells must be solid in the world now
@@ -78,8 +73,40 @@ test('bot enters TRENCH state and builds wall voxels end-to-end', () => {
   assert.equal(zs.size, 1, 'trench wall should lie on a single Z row');
   const xs = built.map((c) => c.x);
   assert.ok(Math.max(...xs) - Math.min(...xs) >= 4, 'wall should span several blocks along X');
+  // Terrain undulates (~7-10), so compare each column against its own base
+  // cell instead of a single arena constant.
+  const baseYByX = new Map();
+  for (const c of built) baseYByX.set(c.x, Math.min(baseYByX.get(c.x) ?? Infinity, c.y));
   for (const c of built) {
-    assert.ok(c.y >= GROUND_Y, `trench cell ${JSON.stringify(c)} at or above base ground level`);
-    assert.ok(c.y <= GROUND_Y + 3, 'trench cells stay within wall height');
+    const baseY = baseYByX.get(c.x);
+    assert.ok(c.y >= baseY, `trench cell ${JSON.stringify(c)} at or above its column base`);
+    assert.ok(c.y <= baseY + 3, `trench cell ${JSON.stringify(c)} stays within wall height`);
+  }
+});
+
+test('the trench wall is built between the defender and the enemy', () => {
+  const world = new ServerWorld();
+  const built = [];
+  const ctx = makeCtx(world, built);
+
+  const postZ = types.BLUE_FLAG_POS.z + 26;
+  const bot = new ServerBot('bot-facing', { x: 0, y: GROUND_Y, z: postZ }, 'blue', 'Facing');
+  bot.role = 'support';
+  bot.pinnedDownUntil = 1e6;
+  bot.lastTrenchAt = -100;
+  bot.startStructure(ctx, 'trench');
+
+  let t = 0;
+  for (let i = 0; i < 600; i++) {
+    t += 1 / 20;
+    ctx.serverTime = t;
+    bot.botUpdate(1 / 20, ctx);
+    if (built.length >= 4) break;
+  }
+
+  assert.ok(built.length > 0, 'defender should place blocks');
+  // Blue defends toward +Z (the red side), so the wall belongs north of the post.
+  for (const c of built) {
+    assert.ok(c.z > postZ - 1, `wall cell ${JSON.stringify(c)} should sit toward the enemy (+Z)`);
   }
 });

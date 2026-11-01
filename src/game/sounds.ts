@@ -1,11 +1,49 @@
+export interface AudioSettings {
+  muted: boolean;
+  /** Master volume, 0..1. */
+  volume: number;
+}
+
+const AUDIO_SETTINGS_KEY = 'voxel-fps.audio-settings';
+
+function clampVolume(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(1, Math.max(0, value));
+}
+
+function loadAudioSettings(): AudioSettings {
+  const defaults: AudioSettings = { muted: false, volume: 1 };
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(AUDIO_SETTINGS_KEY) : null;
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<AudioSettings> | null;
+    return {
+      muted: parsed?.muted === true,
+      volume: clampVolume(Number(parsed?.volume ?? 1)),
+    };
+  } catch {
+    // Private browsing / sandboxed storage can throw; defaults are fine.
+    return defaults;
+  }
+}
+
 export class SoundManager {
   private audioContext: AudioContext | null = null;
+  private masterGain: GainNode | null = null;
   private enabled: boolean = true;
+  private muted: boolean = false;
+  private volume: number = 1;
+  private listeners = new Set<(settings: AudioSettings) => void>();
 
   constructor() {
+    const stored = loadAudioSettings();
+    this.muted = stored.muted;
+    this.volume = stored.volume;
+
     const initAudio = () => {
       if (!this.audioContext) {
         this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        this.ensureMasterGain();
         // Resume audio context if it's suspended
         if (this.audioContext.state === 'suspended') {
           this.audioContext.resume();
@@ -16,6 +54,83 @@ export class SoundManager {
     };
     document.addEventListener('click', initAudio);
     document.addEventListener('keydown', initAudio);
+  }
+
+  /**
+   * Every sound routes through this gain node instead of straight to the
+   * speakers, so mute/volume apply to one-shot tones, spatial effects and
+   * remote footsteps alike.
+   */
+  private ensureMasterGain(): void {
+    if (!this.audioContext || this.masterGain) return;
+    this.masterGain = this.audioContext.createGain();
+    this.masterGain.connect(this.masterGain!);
+    this.applyVolume();
+  }
+
+  private applyVolume(): void {
+    if (!this.masterGain || !this.audioContext) return;
+    const target = this.muted ? 0 : this.volume;
+    // A short ramp avoids an audible click when toggling mute.
+    this.masterGain.gain.setTargetAtTime(target, this.audioContext.currentTime, 0.015);
+  }
+
+  private save(): void {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(
+          AUDIO_SETTINGS_KEY,
+          JSON.stringify({ muted: this.muted, volume: this.volume }),
+        );
+      }
+    } catch {
+      // Storage is optional; the controls still work for this session.
+    }
+  }
+
+  private notify(): void {
+    const settings = this.getSettings();
+    for (const listener of this.listeners) listener(settings);
+  }
+
+  /** Subscribe to mute/volume changes; returns an unsubscribe function. */
+  onSettingsChange(listener: (settings: AudioSettings) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  getSettings(): AudioSettings {
+    return { muted: this.muted, volume: this.volume };
+  }
+
+  isMuted(): boolean {
+    return this.muted;
+  }
+
+  getVolume(): number {
+    return this.volume;
+  }
+
+  setMuted(muted: boolean): void {
+    if (this.muted === muted) return;
+    this.muted = muted;
+    this.applyVolume();
+    this.save();
+    this.notify();
+  }
+
+  toggleMuted(): boolean {
+    this.setMuted(!this.muted);
+    return this.muted;
+  }
+
+  setVolume(volume: number): void {
+    this.volume = clampVolume(volume);
+    // Raising the slider while muted means the player wants to hear the game.
+    if (this.volume > 0) this.muted = false;
+    this.applyVolume();
+    this.save();
+    this.notify();
   }
 
   setEnabled(enabled: boolean) {
@@ -29,7 +144,7 @@ export class SoundManager {
     const gainNode = this.audioContext.createGain();
 
     oscillator.connect(gainNode);
-    gainNode.connect(this.audioContext.destination);
+    gainNode.connect(this.masterGain!);
 
     oscillator.frequency.value = frequency;
     oscillator.type = type;
@@ -57,7 +172,7 @@ export class SoundManager {
 
     source.buffer = buffer;
     source.connect(gainNode);
-    gainNode.connect(this.audioContext.destination);
+    gainNode.connect(this.masterGain!);
 
     gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + duration);
@@ -193,7 +308,7 @@ export class SoundManager {
       
       osc.connect(gain);
       gain.connect(panner);
-      panner.connect(this.audioContext.destination);
+      panner.connect(this.masterGain!);
       
       osc.frequency.value = 120;
       osc.type = 'sawtooth';
@@ -213,7 +328,7 @@ export class SoundManager {
       
       osc.connect(gain);
       gain.connect(panner);
-      panner.connect(this.audioContext.destination);
+      panner.connect(this.masterGain!);
       
       osc.frequency.value = 180;
       osc.type = 'square';
@@ -248,7 +363,7 @@ export class SoundManager {
     source.buffer = buffer;
     source.connect(gain);
     gain.connect(panner);
-    panner.connect(this.audioContext.destination);
+    panner.connect(this.masterGain!);
     
     panner.pan.value = Math.max(-1, Math.min(1, pan));
     
@@ -280,7 +395,7 @@ export class SoundManager {
     
     osc.connect(gain);
     gain.connect(panner);
-    panner.connect(this.audioContext.destination);
+    panner.connect(this.masterGain!);
     
     // Frequency sweep for whizzing effect
     osc.frequency.setValueAtTime(2000, this.audioContext.currentTime);
@@ -327,7 +442,7 @@ export class SoundManager {
     source.buffer = buffer;
     source.connect(gain);
     gain.connect(panner);
-    panner.connect(this.audioContext.destination);
+    panner.connect(this.masterGain!);
     
     gain.gain.setValueAtTime(volume, this.audioContext.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.08);
@@ -372,7 +487,7 @@ export class SoundManager {
     const gain = this.audioContext.createGain();
     osc.connect(gain);
     gain.connect(panner);
-    panner.connect(this.audioContext.destination);
+    panner.connect(this.masterGain!);
 
     // Fast Doppler sonic snap/whiz
     osc.frequency.setValueAtTime(2400, this.audioContext.currentTime);
@@ -399,7 +514,7 @@ export class SoundManager {
     
     osc.connect(gain);
     gain.connect(panner);
-    panner.connect(this.audioContext.destination);
+    panner.connect(this.masterGain!);
     
     osc.frequency.value = 100 + pitch * 50;
     osc.type = 'triangle';

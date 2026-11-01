@@ -5,7 +5,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
-![Tests](https://img.shields.io/badge/tests-54%2F54%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-83%2F83%20passing-brightgreen.svg)
 
 ---
 
@@ -17,11 +17,12 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 - **⏱️ Timed Rounds**: Every match is split into rounds (30 minutes by default, `ROUND_MINUTES` to override). The clock is authoritative and mirrored to the HUD; when it hits zero the team with more captures takes the round, flags return to their stands, scoring freezes for a 20s intermission, and everyone respawns for a clean next round. Rounds won are tracked per team for the session.
 - **🌐 Real-Time Multiplayer**: A single Node.js process serves both the web client and an authoritative WebSocket game server at 20Hz. Join via the in-game lobby (official or custom `wss://` server URL, custom callsign, team pick) or share invite links (`?mode=online&team=red`).
 - **⚖️ Always 10v10**: The server runs a full 10-vs-10 bot battle by default. When a human joins, one bot is retired from *that human's team*; when a human leaves/disconnects/is kicked, a replacement bot respawns on the same team. Matches never go short-sided.
-- **🤖 Vicious FSM Bots**: 20 server-side AI bots (130 HP each, tunable via env) driven by a finite-state machine: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `BUILD`, `TRENCH`, `RETREAT`. They revenge-target killers, prioritize enemy flag carriers, shoot with line-of-sight checks and aim error, harvest blocks, build cover/rush towers, and dig fortified midfield trench walls.
+- **🤖 Vicious FSM Bots**: 20 server-side AI bots (130 HP each, tunable via env) driven by a finite-state machine: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `ESCORT`, `DEFEND`, `BUILD`, `TRENCH`, `RETREAT`. They revenge-target killers, prioritize enemy flag carriers, escort their own runner, hold defensive posts, shoot with line-of-sight checks, aim error, distance falloff and a short target-acquisition reaction delay, harvest blocks, kite and drop panic cover, and build trenches, L-trenches, bunkers or firing-port bunkers.
 - **🧱 Destructible & Buildable Voxel World**: Procedural terrain; gunfire blasts voxels (3 hits), spade digs trenches, pickaxe harvests blocks into inventory. Building supports stacking, bridging, and tower play — placement validated by a unified client/server `canBuild()` flood-fill (structural support + adjacency), so what you see is what the server accepts.
 - **🏗️ One Click, One Block**: Right-click places exactly one block per click (no hold-spam). With rifle/SMG equipped, right-click toggles iron sights instead.
 - **🔫 WW2 Arsenal**: M1 Garand rifle (semi-auto — one shot per click, true single-fire), Thompson SMG (hold to auto-fire), Trench Spade, Pickaxe. Iron sights, recoil, muzzle flash, hit markers.
 - **👁️ Spectator Mode & Accessibility**: Press `P` for the cinematic orbiting spectator camera (follows firefights and flag carriers). Drag-to-look and arrow-key steering work without pointer lock (iframe/AI-harness friendly). Spectators are hard-blocked server-side from shooting, building, capturing, and pickups.
+- **🔊 Master Audio Controls**: Mute instantly with `M` or the in-game speaker button, and set master volume from the HUD slider. Every procedural effect (gunfire, footsteps, spatial shots, cues) routes through one master gain, and the setting persists across reloads.
 - **📡 Structured Server Logs + Admin CLI**: Timestamped `[INFO]/[WARN]` logs tagged by subsystem. Kick or ban players live from the command line (`npm run admin -- ...`) via a localhost-only (or `ADMIN_TOKEN`-protected) admin API. Bans persist to `bans.json` and are enforced at WebSocket connect time.
 - **✅ Test-Ready**: Automated regression suite (`npm test`) covering voxel place/stack/bridge/mine rules and end-to-end bot trench construction, wired into GitHub Actions CI.
 
@@ -41,6 +42,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 | **Jump** | `Space` | Jump over obstacles and climb terrain |
 | **Sprint** | `Shift` | High-speed dash |
 | **Crouch** | `C` or `Ctrl` | Lowers profile, tightens spread, speeds up footsteps interval |
+| **Mute Audio** | `M` | Toggles all game audio; HUD slider sets master volume (persisted) |
 | **Spectate** | `P` | Cinematic battle-tracking camera |
 
 ---
@@ -60,7 +62,8 @@ npm run dev
 
 # Full verification pipeline (used by CI)
 npm run lint      # tsc --noEmit
-npm test          # node --test tests/  (54 regression tests)
+npm test          # node --test tests/  (83 regression tests)
+npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)
 ```
@@ -121,7 +124,8 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
 
 ## 🧪 Testing & Playtesting
 
-- **Automated**: `npm test` runs 54 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
+- **Automated**: `npm test` runs 83 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
+- **Bot simulation**: `npm run measure:bots -- 30` runs a headless 30-minute bot-only round against the real server. It reports pickups, captures, deaths, structure starts and completions, blocks placed and stuck recoveries. Recent runs: 0–12 captures, 16–63 pickups, 519–1422 blocks placed, 6–18 completed structures, with trenches, L-trenches, bunkers and firing-port bunkers all appearing across runs.
 - **Manual playtest checklist**:
   1. Open the site → Multiplayer → join Blue. Verify one blue bot disappears (log: `human joined blue — retiring bot …`).
   2. Take damage — HP bar updates once (no double-apply flashes).
@@ -152,7 +156,7 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
 │   │   │                      #   server-authoritative respawn flag, spectator guards
 │   │   ├── player.ts          # Local player physics, 9-point collision, weapons
 │   │   ├── world.ts           # Client voxel world + canBuild() flood-fill
-│   │   ├── sounds.ts          # Procedural Web Audio synthesis (no assets)
+│   │   ├── sounds.ts          # Procedural Web Audio: master mute/volume, no assets
 │   │   └── networkClient.ts   # WebSocket client, keepalive, wss:// autodetect
 │   ├── server/                # AUTHORITATIVE SERVER
 │   │   ├── serverGame.ts      # 20Hz tick loop, CTF state machines, respawn timers,

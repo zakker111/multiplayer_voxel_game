@@ -49,12 +49,12 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
     │   │                     # network handlers, server-authoritative respawn flag, spectator guards
     │   ├── networkClient.ts  # Client-side WebSocket manager for multiplayer synchronization
     │   ├── player.ts         # Player physics, camera controls, 9-point collision, weapon sway
-    │   ├── sounds.ts         # Procedural Web Audio API sound synthesizer (3D spatial audio)
+    │   ├── sounds.ts         # Procedural Web Audio: master gain, mute/volume persistence, 3D panning
     │   └── world.ts          # Procedural 3D voxel terrain, raycasting, block damage & placement
     ├── server/
     │   ├── serverGame.ts     # Authoritative 20Hz tick loop, CTF state machines, respawn timers,
     │   │                     # ghost-input rejection, join/leave bot rebalancing, kick/ban hooks
-    │   ├── serverBot.ts      # Server FSM bots (ENGAGE/FLANK/CAMP/ADVANCE/GRABFLAG/RETURN/BUILD/TRENCH/RETREAT)
+    │   ├── serverBot.ts      # Server FSM bots (roles + ENGAGE/FLANK/CAMP/ADVANCE/GRABFLAG/RETURN/ESCORT/DEFEND/BUILD/TRENCH/RETREAT)
     │   ├── serverPlayer.ts   # Server player state, throttled footsteps, inventories
     │   ├── serverWorld.ts    # Server voxel storage, delta sync, unified canBuild() flood-fill
     │   ├── logger.ts         # Structured timestamped [INFO]/[WARN] logging with subsystem tags
@@ -77,6 +77,14 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
    - Player can play as either team or enter Spectator mode (`P`).
 3. **🧪 Free Sandbox (`'singleplayer'` client mode)**:
    - No bots or enemies; used for free building, terrain destruction testing, and weapon mechanics.
+
+### Audio controls
+`sounds.ts` routes every procedural effect through one master `GainNode`.
+`M` (or the HUD speaker button) toggles mute; the HUD slider sets 0–100%
+volume. Raising the slider while muted unmutes, and both values persist in
+`localStorage` under `voxel-fps.audio-settings` (storage failures fall back to
+defaults). The HUD mirrors the state from `GameState.audioMuted` /
+`audioVolume`, so the `M` shortcut and the on-screen controls never disagree.
 
 ---
 
@@ -158,32 +166,84 @@ Located in `src/game/game.ts`:
 
 Bots are authoritative server entities running a finite-state machine. Defaults: **10 per team** (`SERVER_BOT_COUNT`), **130 HP** (`SERVER_BOT_HP`), **36-block** build budget (`SERVER_BOT_BLOCKS`), 4s respawn (same as humans).
 
+### Roles
+Every bot gets a role for life, derived deterministically from its id (no RNG draw):
+- **`assault` (~60%)** — commits to the enemy flag. Ignores contacts beyond
+  `ASSAULT_IGNORE_RANGE` (9m) instead of duelling, runs a personal lane
+  (`laneSeed`) up to ±90m wide and converges near the stand.
+- **`support` (~40%)** — holds `DEFEND` on a post ~26m in front of its own flag,
+  digs in when shot at, and intercepts carriers. It does not join the attack.
+
 ### States
-- **`ENGAGE`** — strafe & shoot visible enemies (LOS raycast checks, aim error, combat reaction throttle).
+- **`ENGAGE`** — strafe & shoot visible enemies (LOS raycast checks, aim error, combat reaction throttle). Kites while reloading (`breakContact()`) and drops panic cover below 60% HP under fire.
 - **`FLANK`** — swing wide around the enemy line before pushing in.
 - **`CAMP`** — hold a spot, crouch, pre-aim common lanes, snipe on sight.
 - **`ADVANCE`** — push toward the enemy half along lane offsets.
 - **`GRABFLAG`** — navigate to the enemy flag and take it (server validates pickup at radius 7.0).
-- **`RETURN`** — carry the flag home; may build cover when pinned mid-field.
-- **`BUILD`** — harvest/place blocks for near-base cover or rush towers (respects `canBuild()` + entity clearance).
-- **`TRENCH`** — dig and wall a fortified fighting trench on the midfield approach lane (progressive plan of ~9-cell wall, 2 high, one cell placed every other tick; blocked-transition guard refreshes `stateUntil` so a half-built wall still completes cleanly).
-- **`RETREAT`** — fall back when low HP, out of ammo, or surrounded.
+- **`RETURN`** — carry the flag home: jinks every `CARRIER_JINK_SECONDS` toward a
+  waypoint scored by terrain cover from the nearest threat, and walls off
+  pursuers up to 80m away.
+- **`ESCORT`** — any teammate within 120m of our carrier screens it: follows ~4.5m
+  behind, fires out to 55m and builds cover between carrier and chaser.
+- **`DEFEND`** — support holds its post, faces the approach, digs a trench when
+  pinned, and chases a carrier heading for our flag.
+- **`BUILD`** — bastion + ramp near the enemy base (respects `canBuild()` + entity clearance).
+- **`TRENCH`** — dig one structure from the defensive pool **between the bot
+  and the enemy** (one cell every other tick; attackers dig a forward firebase
+  40-95m short of the stand, defenders dig on their post).
+- **`RETREAT`** — fall back on low HP or a close-range beating. A dry magazine is
+  **not** a retreat: bots reload and keep moving.
+
+### Defensive structure pool
+`STRUCTURE_KINDS` in `serverBot.ts` offers four plans; builders pick randomly
+from the ones that are affordable and viable for the ground:
+- **`trench`** — adaptive-width 2-high wall (parapets, roof when pinned).
+- **`l-trench`** — short front wall plus a perpendicular return arm.
+- **`bunker`** — 3-wide front wall, short side walls, open back, roofed front row.
+- **`bunker-ports`** — 5-wide, 3-high front wall with two head-height firing slits.
+
+Viability checks `world.canBuild()` coverage (roof cells excluded until supported)
+and, for bunkers, a roughly flat footprint (ground spread ≤ 2). Selection skips
+anything costing more than the bot's remaining blocks; with nothing affordable
+the bot re-plans instead of pretending to dig. `BUILD` uses the same pool.
+
+### Stuck detection & recovery
+`checkProgress()` samples displacement once per second (CAMP/TRENCH/BUILD/DEFEND
+are allowed to stand still). Two dead samples call `recoverFromStuck()`, which is
+rate-limited to one action per 2.5s and capped at four attempts:
+1. mine the blocking voxel ahead (`ctx.digBlock` → `botDig()`, 3.5m reach check),
+2. otherwise re-route to a fresh sideways waypoint,
+3. after four failures, clear trench/build plans and the defend post and re-plan.
 
 ### Intelligence Behaviors
 - **Revenge targeting**: last damager gets short-term priority.
 - **Flag-carrier priority**: bots hunt the enemy carrier and defend their own.
-- Transition guard protects multi-tick jobs (TRENCH) from random re-decisions while keeping legitimate exits (RETURN/RETREAT) open.
+- **Escorts**: a pickup flips nearby teammates into `ESCORT` (this is what turned
+  pickups into captures — solo carriers died in the first seconds of the run).
+- **Kiting**: weapon-aware spacing (rifle holds ~34m, SMG closes to ~9m), break
+  contact while reloading, and panic cover when caught in the open.
+- **Humanisation**: switching to a new target costs a randomised 0.25–0.55s
+  reaction beat before the first shot; aim must settle inside an ~8° cone; hit
+  chance falls off with distance (rifle 92% / SMG 80% at close range); strafe
+  direction flips occasionally; and bots reload/kite instead of duelling on an
+  empty magazine.
+- Transition guard protects multi-tick jobs (TRENCH/BUILD) from random re-decisions while keeping legitimate exits (RETURN/RETREAT) open.
 - Bots respect the same anti-clipping pipeline as players (`canPlaceBlock`, de-penetration, step-up limits).
 - **Objective commit**: a bot in `GRABFLAG` only abandons the run for enemies inside
   `OBJECTIVE_COMMIT_RANGE` (24m) and only retreats below `OBJECTIVE_RETREAT_HP` (15%),
   and it fires on the move. Before this, any visible enemy (75m) cancelled the run.
-- **Known limitation (measured, not fixed)**: bot-only matches rarely complete flag
-  runs — a 10-minute headless match (20 bots) produced zero pickups and no bot got
-  closer than ~50m to an enemy stand, because every attacker crosses 300m of open
-  ground against an equal number of defenders with no cover play or push coordination.
-  CTF scoring therefore depends on human players or a future AI pass (roles, cover
-  usage, respawn-wave timing). Don't assume the objective is exercised just because
-  `GRABFLAG`/`RETURN` exist in the state machine.
+- **Measured objective activity**: `npm run measure:bots -- 30` runs a headless
+  bot-only round with the real `ServerGame` and reports captures, pickups,
+  deaths, structure starts/completions, blocks placed and stuck recoveries.
+  Before the role pass a 10-minute match produced **0 pickups / 0 captures**
+  (20 bots, 296 deaths). Recent 30-minute runs produce **0–12 captures and
+  16–63 pickups** with roughly 450–560 deaths; construction runs at **519–1422
+  blocks placed** and **6–18 completed structures**, with all four kinds
+  appearing across runs. Use that script when touching movement, roles,
+  structures or flag logic — it is the only way to notice that the objective or
+  construction silently stopped being exercised. `ServerBot` exposes
+  `blocksPlaced` / `structuresCompleted` for this report (diagnostics only; no
+  gameplay side effects).
 
 ### Rounds (`serverGame.ts`)
 - A round is a fixed-length window of CTF: `ROUND_MINUTES` (default 30) → `roundSeconds`. Rounds are long on purpose (448m arena, ~320m flag runs).
@@ -228,6 +288,10 @@ Bots are authoritative server entities running a finite-state machine. Defaults:
 ## 7. Multiplayer WebSocket Protocol
 
 The WebSocket protocol uses lightweight JSON messages over `ws://` (or `wss://` in SSL environments).
+Any frame is untrusted input: `server.ts` rejects non-JSON and missing `type`, and `ServerGame`
+shape-checks every payload (vectors, team ids, equipment ids, audio values) before it reaches
+state. The HTTP/SSE fallback (`POST /api/game/message`) is not bound to a socket, so it must
+present the `sessionToken` from `init`; a client-supplied `playerId` is rejected with 401.
 
 All messages are JSON. The server REJECTS `playerInput`/`shoot`/`build`/`useTool`/`pickupFlag` from dead or spectating clients (ghost-update protection) and validates every voxel edit through `serverWorld.canBuild()` / mining rules.
 
@@ -251,9 +315,10 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 
 ### Server -> Client Messages
 `ServerMessage` in `src/shared/types.ts` is authoritative; summary:
-- `init`: assigned `playerId`, own `state`, all `players`, `scores`, `captures`,
-  `stats`, `inventory`, modified `voxelChanges`, full `flags` snapshot and the
-  current `round` — so a late joiner is immediately in sync.
+- `init`: assigned `playerId`, the HTTP transport `sessionToken`, own `state`, all
+  `players`, `scores`, `captures`, `stats`, `inventory`, modified `voxelChanges`,
+  full `flags` snapshot and the current `round` — so a late joiner is immediately
+  in sync.
 - `playerJoined` / `playerUpdated` / `playerLeft`: roster and per-player state
   (positions, rotation, HP, equipment, ammo, `carryingFlag`, `spawnProtected`, `isBot`).
 - `playerShot`: `{ playerId, origin, direction, weapon }` for tracers/muzzle flash.
@@ -281,8 +346,13 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 54 regression tests (voxel rules, bots, rounds, spawn shield/regen, feedback)
+npm test            # node --test tests/ — 83 regression tests (voxel rules, bots, rounds,
+                    # spawn shield/regen, feedback, protocol/state integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
+npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):
+                    # WS join/input/respawn, malformed frames, HTTP token auth, SSE init
+npm run measure:bots -- 30   # headless bot-only round: captures, pickups, deaths,
+                    #   structure starts/completions, blocks placed, recoveries
 npm run dev         # tsx server.ts with Vite middleware (PORT, default 3000)
 npm run build       # vite bundle + dist/server.cjs + dist/admin.cjs (esbuild)
 npm start           # production server (reads process.env.PORT)
@@ -301,4 +371,9 @@ npm run admin -- status|players|kick|ban|unban|bans [--url ... --token ...]
 6. **Server Authority Is Non-Negotiable**: New combat/objective/inventory features must be validated server-side first; clients mirror state only. Keep `canBuild()` logic byte-identical between `src/game/world.ts` and `src/server/serverWorld.ts`.
 7. **Input Contract**: Right-click builds exactly ONE block per click (never shoot/mine); rifle fires once per left-click; SMG/tools auto-fire while held. Preserve separate `isLeftDown`/`isRightDown` tracking.
 8. **Balance Invariant**: Any code path that removes a player (leave, kick, ban) MUST trigger same-team bot backfill; any join MUST retire a bot from that team. Update `tests/` when changing these rules.
-9. **Weapon Stats Have One Home**: Damage, fire rate, spread, magazine, reload and range falloff live ONLY in `WEAPONS` (`src/shared/types.ts`). Both the client (`src/game/game.ts`, via `makeWeapon`) and the server (`serverGame` / `serverPlayer` / `serverBot`) must read it, and every hit must go through `weaponDamage()` so range falloff matches. Re-declaring a stat is what made the client's SMG hit for 34/100 while the server dealt 20/34. `tests/weaponBalance.test.mjs` fails if a gun literal reappears in the client.
+9. **Validate Untrusted Input At The Boundary**: team ids, equipment ids, names, positions,
+   audio values and build/shot coordinates all arrive from clients. Validate them in
+   `ServerGame.handleMessage` / `ServerPlayer.applyInput` (never inside the tick loop), keep
+   reach/aim checks server-side, and add a case to `tests/integrity.test.mjs` when you add a
+   message field. `captureFlag` is only a hint: `awardCapture()` is the single scoring path.
+10. **Weapon Stats Have One Home**: Damage, fire rate, spread, magazine, reload and range falloff live ONLY in `WEAPONS` (`src/shared/types.ts`). Both the client (`src/game/game.ts`, via `makeWeapon`) and the server (`serverGame` / `serverPlayer` / `serverBot`) must read it, and every hit must go through `weaponDamage()` so range falloff matches. Re-declaring a stat is what made the client's SMG hit for 34/100 while the server dealt 20/34. `tests/weaponBalance.test.mjs` fails if a gun literal reappears in the client.

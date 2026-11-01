@@ -74,11 +74,24 @@ timings) live in `src/shared/types.ts` — do not re-declare them here.
 
 ## Bot AI (`serverBot.ts`)
 
-States: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `BUILD`,
-`TRENCH`, `RETREAT`. Bots check line of sight before firing, revenge-target their
-last attacker, prioritize enemy flag carriers, harvest and place blocks through
-the same `canBuild()` / entity-clearance rules as players, and build midfield
-trench walls with a multi-tick plan guarded from re-decision.
+States: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `ESCORT`,
+`DEFEND`, `BUILD`, `TRENCH`, `RETREAT`. Roles split roughly 60% assault (commit
+to the enemy flag on a wide lane) and 40% support (hold a defensive post and
+intercept carriers). Bots check line of sight before firing, revenge-target
+their last attacker, prioritize enemy flag carriers, escort their own runner,
+and harvest/place blocks through the same `canBuild()` / entity-clearance rules
+as players.
+
+Every bot is humanised: a 0.25–0.55s target-acquisition delay, an ~8° aim cone,
+distance-based hit falloff, weapon-aware kiting, reload-and-reposition instead of
+duelling dry, panic cover, and stuck recovery (dig the blocker, re-route, then
+re-plan; rate-limited and capped). Construction picks randomly from four viable
+plans — `trench`, `l-trench`, `bunker`, `bunker-ports` — filtered by terrain and
+the 36-block budget.
+
+`npm run measure:bots -- 30` reports objective and construction activity
+(captures, pickups, deaths, structure starts/completions, blocks placed,
+recoveries) from a headless round; use it before and after AI changes.
 
 ## Protocol
 
@@ -109,7 +122,7 @@ Client → server: `join`, `playerInput`, `shoot`, `useTool`, `build`, `reload`,
 
 ## Tests
 
-From the repository root: `npm test` (54 `node:test` cases). The suites load the
+From the repository root: `npm test` (83 `node:test` cases). The suites load the
 real `serverGame` / `serverWorld` / `serverBot` bundles from `dist/tests/`, so
 they exercise real behaviour: voxel build/mine rules, bot trench building and
 stuck-state handling, CTF flag drops, spawn bounds, weapon balance, the round

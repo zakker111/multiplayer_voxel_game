@@ -14,7 +14,9 @@ import {
   WORLD_SIZE,
   GROUND_LEVEL,
   WEAPONS,
+  isEquipment,
   type WeaponId,
+  type EquipmentId,
 } from '../shared/types';
 import { ServerWorld } from './serverWorld';
 
@@ -100,7 +102,10 @@ export class ServerPlayer {
     this.rotation.pitch = this.input.pitch;
     this.isCrouching = !!this.input.crouch;
     this.isSprinting = !!this.input.sprint;
-    if (input.equipment && input.equipment !== this.equipment) {
+    // Whitelist the item id: equipment is client-supplied, and an unknown
+    // string would otherwise land in `equipment`, break every HUD lookup and
+    // silently disable shooting for that player.
+    if (isEquipment(input.equipment) && input.equipment !== this.equipment) {
       this.changeEquipment(input.equipment);
     }
     if (input.isAiming !== undefined) this.isAiming = input.isAiming;
@@ -238,7 +243,7 @@ export class ServerPlayer {
     this.isReloading = false;
   }
 
-  changeEquipment(equipment: 'rifle' | 'smg' | 'pickaxe' | 'spade'): void {
+  changeEquipment(equipment: EquipmentId): void {
     this.equipment = equipment;
     const stats = ServerPlayer.gunStats(equipment);
     this.magazineSize = stats ? stats.magazineSize : 0;

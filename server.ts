@@ -179,12 +179,21 @@ async function startServer() {
   });
 
   app.post('/api/game/message', (req, res) => {
-    const { playerId, message } = req.body || {};
-    if (playerId && message) {
-      game.handleMessage(playerId, message);
-      res.json({ ok: true });
-    } else {
-      res.status(400).json({ error: 'Missing playerId or message' });
+    // The HTTP fallback is not bound to a socket, so it must present the session
+    // token issued in `init`. Trusting a client-supplied playerId let anyone act
+    // as any player (spoof captures, rejoin, respawn someone else).
+    const { token, message } = req.body || {};
+    const playerId = game.resolveSessionToken(token);
+    if (!playerId) return res.status(401).json({ error: 'Invalid or missing session token' });
+    if (!message || typeof message !== 'object') {
+      return res.status(400).json({ error: 'Missing message' });
+    }
+    try {
+      game.handleMessage(playerId, message as ClientMessage);
+      return res.json({ ok: true });
+    } catch (error) {
+      log.error('error handling HTTP message', (error as Error).message);
+      return res.status(500).json({ error: 'Message failed' });
     }
   });
 

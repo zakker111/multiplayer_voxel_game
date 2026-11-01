@@ -9,8 +9,9 @@ How to get the game live for developers and playtesters. **Render is the primary
 - **Single process**: `server.ts` serves the built client (`dist/`) AND the authoritative WebSocket game server on `process.env.PORT`. No separate frontend hosting needed.
 - **Always 10v10**: Server boots with `SERVER_BOT_COUNT` bots per team (default 10 → 20 total). A human joining retires one bot from *their* team; a human leaving/disconnecting/kicked triggers an instant backfill bot on that team.
 - **Server-authoritative gameplay**: damage/death/respawn/inventory, voxel edits (`canBuild()` flood-fill identical to client), and all CTF events (pickup/drop/return/capture at unified 7.0m radius) are validated server-side. Dead/spectating players' inputs are rejected (no ghost meshes). Respawn restores 20 blocks.
-- **Bots**: FSM AI (ENGAGE / FLANK / CAMP / ADVANCE / GRABFLAG / RETURN / BUILD / TRENCH / RETREAT), 130 HP, 36-block budget, revenge targeting, flag-carrier priority, LOS-checked fire, and midfield trench wall construction.
+- **Bots**: FSM AI (ENGAGE / FLANK / CAMP / ADVANCE / GRABFLAG / RETURN / ESCORT / DEFEND / BUILD / TRENCH / RETREAT), 130 HP, 36-block budget, revenge targeting, flag-carrier priority, LOS-checked fire with aim error and a human reaction delay, kiting/panic cover, and a four-plan defensive structure pool (trench, L-trench, bunker, firing-port bunker).
 - **Rounds & survivability**: 30-minute rounds (`ROUND_MINUTES`) with a 20s intermission that resets captures, flags and spawns; 2.5s spawn shields (cancelled by your own shot) and out-of-combat regeneration (6 HP/s after 6s). All server-authoritative.
+- **Audio controls**: `M` or the HUD speaker button mutes all procedural sound; the HUD slider sets master volume. Settings persist in `localStorage`.
 - **Admin API + CLI**: structured logs, live kick/ban/unban, persistent bans enforced at WS connect.
 
 ### Environment Variables (see `.env.example`)
