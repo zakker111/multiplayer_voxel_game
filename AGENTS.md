@@ -174,6 +174,13 @@ Every bot gets a role for life, derived deterministically from its id (no RNG dr
 - **`support` (~40%)** — holds `DEFEND` on a post ~26m in front of its own flag,
   digs in when shot at, and intercepts carriers. It does not join the attack.
 
+Firebase engineers are assigned separately from the role split. `ServerGame.addBot()`
+makes the first two bots on each team engineers, and gives a newly spawned bot the
+engineer flag whenever its team has fewer than two. Only those engineers start the
+assault/support firebases (panic cover remains universal), so the squad still
+fights while the engineers prepare cover. Standalone/test bots fall back to a
+deterministic id hash when no engineer flag is supplied.
+
 ### States
 - **`ENGAGE`** — strafe & shoot visible enemies (LOS raycast checks, aim error, combat reaction throttle). Kites while reloading (`breakContact()`) and drops panic cover below 60% HP under fire.
 - **`FLANK`** — swing wide around the enemy line before pushing in.
@@ -185,12 +192,14 @@ Every bot gets a role for life, derived deterministically from its id (no RNG dr
   pursuers up to 80m away.
 - **`ESCORT`** — any teammate within 120m of our carrier screens it: follows ~4.5m
   behind, fires out to 55m and builds cover between carrier and chaser.
-- **`DEFEND`** — support holds its post, faces the approach, digs a trench when
-  pinned, and chases a carrier heading for our flag.
+- **`DEFEND`** — support holds its post, faces the approach, and chases a carrier
+  heading for our flag; an engineer builds the post's main structure and annex.
 - **`BUILD`** — bastion + ramp near the enemy base (respects `canBuild()` + entity clearance).
 - **`TRENCH`** — dig one structure from the defensive pool **between the bot
-  and the enemy** (one cell every other tick; attackers dig a forward firebase
-  40-95m short of the stand, defenders dig on their post).
+  and the enemy** (one cell every other tick). An assault engineer may dig one
+  forward firebase 40-95m short of the stand; a support engineer digs its main
+  position, then a side annex 10m away when the site is quiet. Non-engineers
+  keep attacking or holding the post.
 - **`RETREAT`** — fall back on low HP or a close-range beating. A dry magazine is
   **not** a retreat: bots reload and keep moving.
 
@@ -232,18 +241,25 @@ rate-limited to one action per 2.5s and capped at four attempts:
 - **Objective commit**: a bot in `GRABFLAG` only abandons the run for enemies inside
   `OBJECTIVE_COMMIT_RANGE` (24m) and only retreats below `OBJECTIVE_RETREAT_HP` (15%),
   and it fires on the move. Before this, any visible enemy (75m) cancelled the run.
+- **Rally staging**: a `GRABFLAG` runner with no teammate within 18m and no enemy
+  within 25m pauses for up to 2.5s when 25–90m from the stand, letting the next
+  wave form up. The timer is capped and resets on respawn.
 - **Measured objective activity**: `npm run measure:bots -- 30` runs a headless
   bot-only round with the real `ServerGame` and reports captures, pickups,
   deaths, structure starts/completions, blocks placed and stuck recoveries.
   Before the role pass a 10-minute match produced **0 pickups / 0 captures**
-  (20 bots, 296 deaths). Recent 30-minute runs produce **0–12 captures and
-  16–63 pickups** with roughly 450–560 deaths; construction runs at **519–1422
-  blocks placed** and **6–18 completed structures**, with all four kinds
-  appearing across runs. Use that script when touching movement, roles,
-  structures or flag logic — it is the only way to notice that the objective or
-  construction silently stopped being exercised. `ServerBot` exposes
-  `blocksPlaced` / `structuresCompleted` for this report (diagnostics only; no
-  gameplay side effects).
+  (20 bots, 296 deaths). The latest 30-minute run produced **1 capture, 12
+  pickups, 450 deaths, 585 blocks and 17 completed structures** (5 trench,
+  10 L-trench, 2 bunker, 0 firing-port) with **84 recoveries**; starts matched
+  completions exactly. Recent 30-minute runs produce 0–12 captures and 12–63
+  pickups with roughly 450–560 deaths; construction runs at 519–1422 blocks
+  and 6–18 completed structures, with all four kinds appearing across runs.
+  Use that script when touching movement, roles, structures or flag logic — it
+  is the only way to notice that the objective or construction silently stopped
+  being exercised. `ServerBot` exposes `blocksPlaced`, `structuresStarted` and
+  `structuresCompleted` for this report (diagnostics only; no gameplay side
+  effects). Both `startStructure()` and the `BUILD` blueprint increment
+  `structuresStarted`, so back-to-back plans are not collapsed into one.
 
 ### Rounds (`serverGame.ts`)
 - A round is a fixed-length window of CTF: `ROUND_MINUTES` (default 30) → `roundSeconds`. Rounds are long on purpose (448m arena, ~320m flag runs).
@@ -346,13 +362,13 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 83 regression tests (voxel rules, bots, rounds,
+npm test            # node --test tests/ — 88 regression tests (voxel rules, bots, rounds,
                     # spawn shield/regen, feedback, protocol/state integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):
                     # WS join/input/respawn, malformed frames, HTTP token auth, SSE init
 npm run measure:bots -- 30   # headless bot-only round: captures, pickups, deaths,
-                    #   structure starts/completions, blocks placed, recoveries
+                    #   structure starts (structuresStarted)/completions, blocks, recoveries
 npm run dev         # tsx server.ts with Vite middleware (PORT, default 3000)
 npm run build       # vite bundle + dist/server.cjs + dist/admin.cjs (esbuild)
 npm start           # production server (reads process.env.PORT)

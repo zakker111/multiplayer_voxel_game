@@ -82,6 +82,14 @@ their last attacker, prioritize enemy flag carriers, escort their own runner,
 and harvest/place blocks through the same `canBuild()` / entity-clearance rules
 as players.
 
+Engineers are assigned separately: `ServerGame.addBot()` makes the first two
+bots on each team engineers and fills that quota whenever a bot spawns. Assault
+engineers may dig one forward firebase 40–95m short of the enemy stand. Support
+engineers build a main structure on their post, then a 10m side annex when the
+site is quiet and blocks remain. Non-engineers keep attacking or holding the
+post; panic cover remains available to everyone. A `GRABFLAG` runner alone at
+25–90m pauses up to 2.5s for a teammate before pushing.
+
 Every bot is humanised: a 0.25–0.55s target-acquisition delay, an ~8° aim cone,
 distance-based hit falloff, weapon-aware kiting, reload-and-reposition instead of
 duelling dry, panic cover, and stuck recovery (dig the blocker, re-route, then
@@ -90,8 +98,11 @@ plans — `trench`, `l-trench`, `bunker`, `bunker-ports` — filtered by terrain
 the 36-block budget.
 
 `npm run measure:bots -- 30` reports objective and construction activity
-(captures, pickups, deaths, structure starts/completions, blocks placed,
-recoveries) from a headless round; use it before and after AI changes.
+(captures, pickups, deaths, structure starts (`structuresStarted`) and
+completions (`structuresCompleted`), blocks placed, recoveries) from a headless
+round; use it before and after AI changes. The latest 30-minute run produced
+1 capture, 12 pickups, 450 deaths, 585 blocks, 17 completed structures and
+84 recoveries; starts matched completions.
 
 ## Protocol
 
@@ -122,11 +133,12 @@ Client → server: `join`, `playerInput`, `shoot`, `useTool`, `build`, `reload`,
 
 ## Tests
 
-From the repository root: `npm test` (83 `node:test` cases). The suites load the
+From the repository root: `npm test` (88 `node:test` cases). The suites load the
 real `serverGame` / `serverWorld` / `serverBot` bundles from `dist/tests/`, so
 they exercise real behaviour: voxel build/mine rules, bot trench building and
-stuck-state handling, CTF flag drops, spawn bounds, weapon balance, the round
-lifecycle and the spawn-shield/regen/feedback layer.
+stuck-state handling, engineer assignment and forward-base/annex construction,
+rally staging, structure telemetry, CTF flag drops, spawn bounds, weapon balance,
+the round lifecycle and the spawn-shield/regen/feedback layer.
 
 ## License
 

@@ -169,7 +169,12 @@ export class ServerGame {
   addBot(team: 'red' | 'blue', name: string): string {
     const botId = `bot_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const spawnPos = this.getSpawnPosition(team);
-    const bot = new ServerBot(botId, spawnPos, team, name);
+    const teamBots = [...this.players.values()].filter(
+      (p): p is ServerBot => p instanceof ServerBot && p.team === team,
+    );
+    const engineerCount = teamBots.filter((p) => p.isEngineer).length;
+    // Guarantee two firebase engineers per team, regardless of id hashes.
+    const bot = new ServerBot(botId, spawnPos, team, name, engineerCount < 2);
     this.players.set(botId, bot);
     // No connection entry: broadcasts/sendToPlayer naturally skip bots,
     // and their state flows to clients via playerUpdated/broadcastState.

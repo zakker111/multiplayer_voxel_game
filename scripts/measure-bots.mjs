@@ -16,9 +16,7 @@ const ticks = Math.round((minutes * 60) / (1 / 20));
 
 const game = new ServerGame();
 const stats = { pickups: 0, captures: 0, returns: 0, deaths: 0, byTeam: { red: 0, blue: 0 } };
-// Structure pool usage + stuck recoveries, observed per bot.
-const structureChoices = {};
-const activePlanByBot = new Map();
+// Structure starts/usage + stuck recoveries, observed per bot.
 let recoveries = 0;
 const lastRecoveryByBot = new Map();
 const carriers = new Set();
@@ -49,14 +47,6 @@ for (let tick = 1; tick <= ticks; tick++) {
   }
 
   for (const [id, player] of game.players) {
-    // Count real plan starts (idle -> active), not kind changes: two bunkers
-    // back-to-back are two starts and must not collapse into one.
-    const hasPlan = Boolean(player.trenchPlan?.length || player.buildPlan?.length);
-    if (hasPlan && !activePlanByBot.get(id)) {
-      const kind = player.lastStructure;
-      if (kind) structureChoices[kind] = (structureChoices[kind] || 0) + 1;
-    }
-    activePlanByBot.set(id, hasPlan);
     const recoveryAt = player.lastRecoveryAt;
     if (typeof recoveryAt === 'number' && (lastRecoveryByBot.get(id) ?? -100) !== recoveryAt) {
       lastRecoveryByBot.set(id, recoveryAt);
@@ -78,9 +68,11 @@ for (let tick = 1; tick <= ticks; tick++) {
 // Actual construction, not just plans: blocks placed and plans completed.
 const blocksPlaced = [...game.players.values()].reduce((n, p) => n + (p.blocksPlaced || 0), 0);
 const structuresCompleted = { trench: 0, 'l-trench': 0, bunker: 0, 'bunker-ports': 0 };
+const structureChoices = { trench: 0, 'l-trench': 0, bunker: 0, 'bunker-ports': 0 };
 for (const player of game.players.values()) {
   for (const kind of Object.keys(structuresCompleted)) {
     structuresCompleted[kind] += player.structuresCompleted?.[kind] || 0;
+    structureChoices[kind] += player.structuresStarted?.[kind] || 0;
   }
 }
 

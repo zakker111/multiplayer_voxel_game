@@ -153,6 +153,10 @@ export class ServerBot extends ServerPlayer {
   private escortCarrierPos: Position | null = null;
   /** Where this support bot holds the line (in front of our own flag). */
   private defendPost: Position | null = null;
+  /** Support engineers build a main structure plus one annex (0 = main, 1 = annex). */
+  private fortifyStage: number = 0;
+  /** Dedicated engineer: only these bots start firebases (panic cover stays universal). */
+  private readonly engineer: boolean;
   /** Last structure this bot started (for tests / diagnostics). */
   private lastStructureKind: StructureKind | null = null;
   // Stuck detection: sampled once per second, needs two strikes to act.
@@ -164,6 +168,12 @@ export class ServerBot extends ServerPlayer {
   /** Diagnostics for headless simulations/tests (not used for gameplay). */
   blocksPlaced: number = 0;
   structuresCompleted: Record<StructureKind, number> = {
+    trench: 0,
+    'l-trench': 0,
+    bunker: 0,
+    'bunker-ports': 0,
+  };
+  structuresStarted: Record<StructureKind, number> = {
     trench: 0,
     'l-trench': 0,
     bunker: 0,
@@ -183,7 +193,13 @@ export class ServerBot extends ServerPlayer {
   private campBias: number;
   private buildBias: number;
 
-  constructor(id: string, position: Position, team: 'red' | 'blue', name: string) {
+  constructor(
+    id: string,
+    position: Position,
+    team: 'red' | 'blue',
+    name: string,
+    engineer?: boolean,
+  ) {
     super(id, position, team);
     this.name = name;
     this.isBotFlag = true; // scoreboard: mark AI combatants as bots
@@ -207,6 +223,10 @@ export class ServerBot extends ServerPlayer {
     // every bot on attack meant both waves collided in midfield and neither
     // stand was ever reached (measured: 0 captures in 10 simulated minutes).
     this.role = hash % 100 < 60 ? 'assault' : 'support';
+    // The server normally assigns a guaranteed two engineers per team; the
+    // hash is the fallback for standalone/test bots. Engineers build the
+    // firebase while the rest of the squad fights and screens it.
+    this.engineer = engineer ?? (hash % 5 === 0);
     this.laneSeed = (hash % 97) / 48.5 - 1; // -1..1, stable per bot
   }
 
@@ -222,6 +242,11 @@ export class ServerBot extends ServerPlayer {
   /** Kind of the last defensive structure this bot started. */
   get lastStructure(): StructureKind | null {
     return this.lastStructureKind;
+  }
+
+  /** Whether this bot is one of the team's dedicated firebase engineers. */
+  get isEngineer(): boolean {
+    return this.engineer;
   }
 
   /** Called by serverGame when this bot takes damage — enables revenge targeting. */
@@ -485,6 +510,8 @@ export class ServerBot extends ServerPlayer {
     // 40-95m short of the stand, so the last push starts from cover.
     if (this.role === 'assault') {
       if (
+        this.engineer &&
+        this.fortifyStage === 0 &&
         distToEnemyFlag > 40 && distToEnemyFlag < 95 &&
         this.remainingBlocks >= 12 &&
         t - this.lastTrenchAt > 22 &&
@@ -659,6 +686,29 @@ export class ServerBot extends ServerPlayer {
     t: number,
   ): void {
     const startDist = Math.hypot(enemyFlag.x - this.position.x, enemyFlag.z - this.position.z);
+    // Don't trickle into the stand alone: if no teammate is nearby and no
+    // enemy is already in our face, pause briefly at the rally point so the
+    // next wave can form up. The timer is capped, so a lone bot still attacks.
+    const mateNear = ctx.targets.some((mate) =>
+      mate.id !== this.id &&
+      !mate.isDead &&
+      mate.team === this.team &&
+      Math.hypot(mate.position.x - this.position.x, mate.position.z - this.position.z) < 18,
+    );
+    const threatNear = enemy !== null && dist < 25;
+    if (!mateNear && !threatNear && startDist > 25 && startDist < 90) {
+      if (this.stagingSince === null) this.stagingSince = t;
+      if (t - this.stagingSince < 2.5) {
+        this.velocity.x = 0;
+        this.velocity.z = 0;
+        this.snapToGround(ctx);
+        this.faceToward(enemyFlag.x, enemyFlag.z);
+        if (enemy && dist < 45) this.aimAndShoot(enemy, ctx, t);
+        return;
+      }
+    } else {
+      this.stagingSince = null;
+    }
     // Spread the approach: assault bots run their own lane far out and converge
     // near the stand, so several arrive at once instead of single file.
     // Wide lanes (±90m) keep runners out of the midfield meat grinder and
@@ -785,11 +835,17 @@ export class ServerBot extends ServerPlayer {
       this.velocity.z = 0;
       this.snapToGround(ctx);
       this.faceToward(homeBase.x, homeBase.z + towardEnemy * 100);
-      // Dig in on the post once there is a lull (wall faces the approach).
+      // Build before contact, not only after being shot. A prepared engineer
+      // turns the post into cover; waiting for `pinnedDownUntil` meant most
+      // support bots died before placing more than a couple of blocks.
+      const quietPost = !enemy || dist > 32;
+      const underFire = t < this.pinnedDownUntil;
       if (
+        this.engineer &&
+        this.fortifyStage === 0 &&
         this.remainingBlocks >= 14 &&
-        t - this.lastTrenchAt > 25 &&
-        t < this.pinnedDownUntil
+        t - this.lastTrenchAt > 20 &&
+        (quietPost || underFire)
       ) {
         this.startStructure(ctx);
         return;
@@ -811,6 +867,7 @@ export class ServerBot extends ServerPlayer {
       this.buildPlan = plan ? plan.cells : [];
       if (plan) {
         this.lastStructureKind = plan.kind;
+        this.structuresStarted[plan.kind] += 1;
         this.structureBlocksPlaced = 0;
       }
       if (this.buildPlan.length === 0) {
@@ -895,10 +952,14 @@ export class ServerBot extends ServerPlayer {
    * Picks randomly from the structures that are affordable and valid for the
    * terrain here; a `forced` kind is used by tests and diagnostics.
    */
-  private startStructure(ctx: BotContext, forced?: StructureKind): void {
+  private startStructure(
+    ctx: BotContext,
+    forced?: StructureKind,
+    centerOverride?: { x: number; z: number },
+  ): void {
     const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
     const towardEnemy = enemyFlag.z > this.position.z ? 1 : -1;
-    const center = { x: Math.round(this.position.x), z: Math.round(this.position.z) };
+    const center = centerOverride ?? { x: Math.round(this.position.x), z: Math.round(this.position.z) };
     const plan = this.chooseStructure(ctx, center, towardEnemy, forced);
     this.lastTrenchAt = ctx.serverTime;
     if (!plan) {
@@ -907,12 +968,13 @@ export class ServerBot extends ServerPlayer {
       return;
     }
     this.lastStructureKind = plan.kind;
+    this.structuresStarted[plan.kind]++;
     this.structureBlocksPlaced = 0;
     this.trenchPlan = plan.cells;
     this.lastTrenchCell = 0;
     this.trenchPaceTick = 0;
     this.trenchDoneAt = null;
-    this.trenchCenter = { x: this.position.x, y: GROUND_LEVEL, z: this.position.z };
+    this.trenchCenter = { x: center.x, y: GROUND_LEVEL, z: center.z };
     this.transition('TRENCH', ctx.serverTime, 14);
   }
 
@@ -1094,12 +1156,19 @@ export class ServerBot extends ServerPlayer {
     );
     this.progressPos = { x: this.position.x, y: this.position.y, z: this.position.z };
 
-    // These states are supposed to stand still (digging, holding a post).
+    // These states are supposed to stand still (digging, holding a post, or
+    // waiting at the enemy stand for the automatic flag pickup). Treating the
+    // stand wait as "stuck" made runners abandon a flag they were touching.
+    const objectiveStand = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    const waitingAtStand =
+      this.botState === 'GRABFLAG' &&
+      Math.hypot(objectiveStand.x - this.position.x, objectiveStand.z - this.position.z) < 4;
     const stationaryByDesign =
       this.botState === 'CAMP' ||
       this.botState === 'TRENCH' ||
       this.botState === 'BUILD' ||
-      this.botState === 'DEFEND';
+      this.botState === 'DEFEND' ||
+      waitingAtStand;
     if (stationaryByDesign || moved > 0.6) {
       this.stuckStrikes = 0;
       if (moved > 0.6) this.recoveryAttempts = 0;
@@ -1221,6 +1290,28 @@ export class ServerBot extends ServerPlayer {
     this.trenchPlan = null;
     this.trenchCenter = null;
     const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+
+    // A support engineer's job is a position, not a single wall. When the
+    // first structure is finished and the site is quiet, add an annex 10m to
+    // the side using the remaining blocks. This turns a single small wall
+    // into a real two-part firebase instead of one shed.
+    if (
+      this.engineer &&
+      this.role === 'support' &&
+      this.fortifyStage === 0 &&
+      this.remainingBlocks >= 10 &&
+      !this.hasNearbyEnemy(ctx, 28)
+    ) {
+      this.fortifyStage = 1;
+      this.startStructure(ctx, undefined, {
+        x: Math.round(this.position.x) + 10,
+        z: Math.round(this.position.z),
+      });
+      return;
+    }
+    // One firebase per life: never let an engineer chain-build across the map.
+    this.fortifyStage = 2;
+
     const spot = this.findCampSpot(ctx, { x: enemyFlag.x, y: GROUND_LEVEL, z: enemyFlag.z });
     if (spot && this.remainingBlocks > 0) {
       // Hold our own new trench as a camp first — don't wander off cover
@@ -1509,6 +1600,14 @@ export class ServerBot extends ServerPlayer {
     return ctx.world.getGroundHeightBelow(x, this.position.y, z);
   }
 
+  private hasNearbyEnemy(ctx: BotContext, range: number): boolean {
+    return ctx.targets.some((cand) =>
+      !cand.isDead &&
+      cand.team !== this.team &&
+      Math.hypot(cand.position.x - this.position.x, cand.position.z - this.position.z) < range,
+    );
+  }
+
   private findCampSpot(ctx: BotContext, threat: Position): Position | null {
     // Look for a solid block within 12m that has clear LOS toward the threat
     const ix = Math.round(this.position.x);
@@ -1555,6 +1654,8 @@ export class ServerBot extends ServerPlayer {
     this.trenchPlan = null; // drop any half-built trench on death/respawn
     this.buildPlan = null; // ...and any unfinished bastion blueprint
     this.structureBlocksPlaced = 0;
+    this.fortifyStage = 0;
+    this.stagingSince = null;
     this.trenchCenter = null;
     this.trenchDoneAt = null;
   }
