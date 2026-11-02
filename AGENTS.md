@@ -77,13 +77,18 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
    - Player can play as either team or enter Spectator mode (`P`).
 3. **🧪 Free Sandbox (`'singleplayer'` client mode)**:
    - No bots or enemies; used for free building, terrain destruction testing, and weapon mechanics.
+4. **🧪 Beta Development Mode (`'beta'` client mode)**:
+   - A separate menu entry and `?mode=beta` URL; the HUD shows a Beta badge.
+   - Internally it runs the same authoritative `'online'` code path (server-side bots, workshops, jeeps and logistics included) while keeping the Beta label — it is a **development-only** slice that must never replace standard CTF as the main game.
 
 ### Audio controls
 `sounds.ts` routes every procedural effect through one master `GainNode`.
 `M` (or the HUD speaker button) toggles mute; the HUD slider sets 0–100%
 volume. Raising the slider while muted unmutes, and both values persist in
 `localStorage` under `voxel-fps.audio-settings` (storage failures fall back to
-defaults). The HUD mirrors the state from `GameState.audioMuted` /
+defaults). Because browsers only allow audio after user interaction, the
+`AudioContext` is created lazily on the first click/keypress, then resumed if
+suspended. The HUD mirrors the state from `GameState.audioMuted` /
 `audioVolume`, so the `M` shortcut and the on-screen controls never disagree.
 
 ---
@@ -97,6 +102,7 @@ The application supports direct URL launch parameters:
 - `?mode=spectator`: Automatically starts a bot match and enters the cinematic AI tracking spectator camera.
 - `?mode=bots`: Automatically starts a local bot match on the Blue team.
 - `?mode=online`: Automatically connects to the local WebSocket multiplayer server.
+- `?mode=beta`: Connects to the same authoritative server with the Beta (development) HUD badge.
 - `?mode=sandbox`: Starts free sandbox mode.
 - `&team=red` or `&team=blue`: Preselects team side (default: `blue`).
 - `&server=<ws_url>`: Specifies custom WebSocket endpoint.
@@ -362,8 +368,8 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 88 regression tests (voxel rules, bots, rounds,
-                    # spawn shield/regen, feedback, protocol/state integrity)
+npm test            # node --test tests/ — 96 regression tests (voxel rules, bots, rounds,
+                    # workshop/jeep/logistics, spawn shield/regen, feedback, integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):
                     # WS join/input/respawn, malformed frames, HTTP token auth, SSE init

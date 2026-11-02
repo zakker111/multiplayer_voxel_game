@@ -10,7 +10,8 @@ How to get the game live for developers and playtesters. **Render is the primary
 - **Always 10v10**: Server boots with `SERVER_BOT_COUNT` bots per team (default 10 → 20 total). A human joining retires one bot from *their* team; a human leaving/disconnecting/kicked triggers an instant backfill bot on that team.
 - **Server-authoritative gameplay**: damage/death/respawn/inventory, voxel edits (`canBuild()` flood-fill identical to client), and all CTF events (pickup/drop/return/capture at unified 7.0m radius) are validated server-side. Dead/spectating players' inputs are rejected (no ghost meshes). Respawn restores 20 blocks.
 - **Bots**: FSM AI (ENGAGE / FLANK / CAMP / ADVANCE / GRABFLAG / RETURN / ESCORT / DEFEND / BUILD / TRENCH / RETREAT), 130 HP, 36-block budget, revenge targeting, flag-carrier priority, LOS-checked fire with aim error and a human reaction delay, kiting/panic cover, and a four-plan defensive structure pool (trench, L-trench, bunker, firing-port bunker).
-- **Rounds & survivability**: 30-minute rounds (`ROUND_MINUTES`) with a 20s intermission that resets captures, flags and spawns; 2.5s spawn shields (cancelled by your own shot) and out-of-combat regeneration (6 HP/s after 6s). All server-authoritative.
+- **Rounds & survivability**: 30-minute rounds (`ROUND_MINUTES`) with a 20s intermission that resets captures, flags, workshops and spawns; 2.5s spawn shields (cancelled by your own shot) and out-of-combat regeneration (6 HP/s after 6s). All server-authoritative.
+- **Workshops & jeeps (online & Beta)**: Each team has a protected workshop; mine blocks with the pickaxe and deposit with `E` (40 blocks buys a jeep with `G`, max 2 per team). One logistics bot per team mines and keeps its workshop stocked. Press `F` to enter/exit and WASD to drive. Flag carriers cannot ride.
 - **Audio controls**: `M` or the HUD speaker button mutes all procedural sound; the HUD slider sets master volume. Settings persist in `localStorage`.
 - **Admin API + CLI**: structured logs, live kick/ban/unban, persistent bans enforced at WS connect.
 
@@ -46,7 +47,7 @@ How to get the game live for developers and playtesters. **Render is the primary
 
 **Playtesters must hard-refresh** (Ctrl/Cmd+Shift+R) after each deploy to load the new client bundle.
 
-**Share invite links:** in-game Multiplayer menu → **Copy Link**, or append `?mode=online&team=red` / `?mode=online&team=blue` to your URL. Anyone clicking joins your live server on that team (a bot steps aside automatically).
+**Share invite links:** in-game Multiplayer menu → **Copy Link**, or append `?mode=online&team=red` / `?mode=online&team=blue` to your URL. Developers can use `?mode=beta` for the development build (identical authoritative server, Beta HUD badge). Anyone clicking joins your live server on that team (a bot steps aside automatically).
 
 ---
 
@@ -170,6 +171,7 @@ Checklist:
 | Symptom | Fix |
 | :--- | :--- |
 | "Failed to connect to server" | Check `/api/status`; Render free tier may be sleeping — wait ~30s and retry |
+| No audio | Browsers only start audio after your first interaction — click the canvas once, then press `M` or use the HUD speaker/slider to check mute and volume |
 | Old behavior after redeploy | Hard-refresh (Ctrl/Cmd+Shift+R); old bundles cache in tabs left open |
 | Build failed on Render | Read deploy logs; run `npm run lint && npm run build` locally — CI enforces the same pipeline |
 | WebSocket closes immediately | Reverse proxy missing `Upgrade`/`Connection` headers (see Nginx config above) |

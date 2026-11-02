@@ -74,6 +74,8 @@ timings) live in `src/shared/types.ts` — do not re-declare them here.
 
 ## Bot AI (`serverBot.ts`)
 
+Assault bots can request and drive team jeeps; one bot per team is assigned at a time, leaving engineers and defenders on foot. Separately, one **workshop logistics** bot per team mines natural terrain and deposits blocks into its team's workshop (12-block carries, departs below a 30-block stock, mines terrain near its own team's base), keeping the jeep supply flowing without touching the two firebase engineers. Nearby humans get garage priority. Drivers evaluate reachable steering arcs against vehicle collision and ground checks, reverse and detour when blocked, and abandon after bounded retries. Movement collision uses the jeep's exact oriented rectangle — the same footprint bullets raycast — rather than a circumscribed circle. Across nine consecutive 10-minute bot matches there were no stuck abandonments; remaining exits were damage exits from enemy fire. Browser playtesting is still pending.
+
 States: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `ESCORT`,
 `DEFEND`, `BUILD`, `TRENCH`, `RETREAT`. Roles split roughly 60% assault (commit
 to the enemy flag on a wide lane) and 40% support (hold a defensive post and
@@ -133,10 +135,11 @@ Client → server: `join`, `playerInput`, `shoot`, `useTool`, `build`, `reload`,
 
 ## Tests
 
-From the repository root: `npm test` (88 `node:test` cases). The suites load the
+From the repository root: `npm test` (96 `node:test` cases). The suites load the
 real `serverGame` / `serverWorld` / `serverBot` bundles from `dist/tests/`, so
 they exercise real behaviour: voxel build/mine rules, bot trench building and
 stuck-state handling, engineer assignment and forward-base/annex construction,
+workshop deposits/jeep economics, bot jeep driving and workshop logistics bots,
 rally staging, structure telemetry, CTF flag drops, spawn bounds, weapon balance,
 the round lifecycle and the spawn-shield/regen/feedback layer.
 

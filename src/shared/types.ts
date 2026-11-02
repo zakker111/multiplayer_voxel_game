@@ -63,6 +63,11 @@ export type ClientMessage =
   | { type: 'shoot'; origin: Position; direction: Position; targetId?: string; isHeadshot?: boolean }
   | { type: 'useTool'; tool: 'pickaxe' | 'spade'; target: Position }
   | { type: 'build'; position: Position }
+  | { type: 'depositWorkshop'; team: 'red' | 'blue' }
+  | { type: 'buildJeep' }
+  | { type: 'enterJeep'; vehicleId: string }
+  | { type: 'exitJeep' }
+  | { type: 'driveJeep'; throttle: number; steering: number; brake: boolean }
   | { type: 'reload' }
   | { type: 'pickupFlag' }
   | { type: 'captureFlag'; team: 'red' | 'blue' }
@@ -116,11 +121,31 @@ export interface RoundSnapshot {
 
 export type RoundWinner = 'red' | 'blue' | 'draw';
 
+export interface WorkshopSnapshot {
+  position: Position;
+  stock: number;
+  capacity: number;
+}
+
+export type Workshops = Record<'red' | 'blue', WorkshopSnapshot>;
+
+export interface JeepSnapshot {
+  id: string;
+  team: 'red' | 'blue';
+  position: Position;
+  yaw: number;
+  speed: number;
+  hp: number;
+  driverId: string | null;
+  wreck: boolean;
+}
+
 export type ServerMessage =
-  | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
+  | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; depositable?: number; workshops?: Workshops; jeeps?: JeepSnapshot[]; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
   | { type: 'roundUpdate'; round: RoundSnapshot }
   | { type: 'roundEnded'; round: number; winner: RoundWinner; captures: { red: number; blue: number }; wins: { red: number; blue: number } }
   | { type: 'gameState'; state: GameState }
+  | { type: 'joined'; state: PlayerState }
   | { type: 'playerJoined'; playerId: string; state: PlayerState }
   | { type: 'playerLeft'; playerId: string }
   | { type: 'playerUpdated'; playerId: string; state: PlayerState }
@@ -135,6 +160,11 @@ export type ServerMessage =
   | { type: 'playerRespawned'; playerId: string; position: Position }
   | { type: 'hitConfirmed'; targetId: string; damage: number; isHeadshot: boolean }
   | { type: 'inventoryUpdated'; inventory: number }
+  | { type: 'resourcesUpdated'; depositable: number }
+  | { type: 'workshopsUpdated'; workshops: Workshops }
+  | { type: 'jeepsUpdated'; jeeps: JeepSnapshot[] }
+  | { type: 'jeepExited'; position: Position }
+  | { type: 'jeepMessage'; message: string }
   | { type: 'flagCaptured'; team: 'red' | 'blue'; flagTeam?: 'red' | 'blue'; playerId: string; captures: { red: number; blue: number } }
   | { type: 'flagPickedUp'; playerId: string; flagTeam: 'red' | 'blue' }
   | { type: 'flagDropped'; position: Position; flagTeam: 'red' | 'blue'; playerId?: string }
@@ -181,6 +211,29 @@ export const VOXEL_DIRT = 1;
 export const VOXEL_STONE = 2;
 export const VOXEL_GRASS = 3;
 export const VOXEL_BUILT = 4;
+
+// The garage is a protected visual structure, not a destructible voxel entity.
+// A fixed footprint keeps its floor and future vehicle pad clear of edits.
+export const WORKSHOP_CENTERS = {
+  blue: { x: 45, z: -185 },
+  red: { x: 45, z: 185 },
+} as const;
+export const WORKSHOP_START_STOCK = 50;
+export const WORKSHOP_CAPACITY = 200;
+export const WORKSHOP_REACH = 8;
+export const JEEP_COST = 40;
+export const JEEP_TEAM_LIMIT = 2;
+export const JEEP_MAX_HP = 250;
+export const JEEP_ENTER_REACH = 4;
+export const JEEP_HALF_WIDTH = 1.3;
+export const JEEP_HALF_LENGTH = 2;
+export const JEEP_HEIGHT = 2;
+
+export function isWorkshopProtectedCell(x: number, z: number): boolean {
+  return Object.values(WORKSHOP_CENTERS).some(
+    center => x >= center.x - 5 && x <= center.x + 17 && Math.abs(z - center.z) <= 7,
+  );
+}
 
 /** Round length in minutes. Both teams are already 320m apart at the start of a
  *  round and a flag run crosses the whole arena, so rounds are long by design;

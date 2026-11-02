@@ -64,6 +64,9 @@ export class NetworkClient {
 
   private handleBroadcastMessage(data: any): void {
     if (!data || !data.senderId || data.senderId === this.localPeerId) return;
+    // When a server is active it owns player and vehicle state. BroadcastChannel
+    // peer duplicates otherwise appear as ghost on-foot players beside jeeps.
+    if (this.wsConnected || this.sseConnected) return;
 
     switch (data.type) {
       case 'peer_join':
@@ -154,13 +157,6 @@ export class NetworkClient {
         } as any);
         break;
 
-      case 'peer_voxel':
-        this.handleMessage({
-          type: 'voxelChanged',
-          change: data.change,
-        } as any);
-        break;
-
       case 'peer_flag_picked':
         this.handleMessage({
           type: 'flagPickedUp',
@@ -233,6 +229,11 @@ export class NetworkClient {
             this.onConnectCallback();
           }
           resolve();
+        } else if (transportType === 'sse' && !this.wsConnected) {
+          // A fallback that opens after the initial connection has ended is a
+          // fresh server session and must send join again.
+          this.transport = 'sse';
+          this.onConnectCallback?.();
         }
       };
 
@@ -314,7 +315,7 @@ export class NetworkClient {
         this.sseConnected = true;
         this.transport = 'sse';
         if (onSuccess) onSuccess('sse');
-        if (this.onConnectCallback) this.onConnectCallback();
+        else if (this.onConnectCallback) this.onConnectCallback();
       };
 
       this.sse.onmessage = (event) => {
@@ -322,7 +323,9 @@ export class NetworkClient {
           if (!event.data || event.data.startsWith(':')) return;
           const message: ServerMessage = JSON.parse(event.data);
           if (message.type === 'init') {
-            this.assignedPlayerId = (message as any).playerId;
+            this.assignedPlayerId = message.playerId;
+            this.sessionToken = typeof message.sessionToken === 'string' ? message.sessionToken : null;
+            this.flushQueuedMessages();
           }
           this.handleMessage(message);
         } catch (err) {
@@ -411,36 +414,6 @@ export class NetworkClient {
           origin: message.origin,
           direction: message.direction,
         });
-        break;
-
-      case 'build':
-        this.channel?.postMessage({
-          type: 'peer_voxel',
-          senderId: this.localPeerId,
-          change: {
-            x: message.position.x,
-            y: message.position.y,
-            z: message.position.z,
-            type: 4,
-            durability: 3,
-          },
-        });
-        break;
-
-      case 'useTool':
-        if (message.tool === 'spade') {
-          this.channel?.postMessage({
-            type: 'peer_voxel',
-            senderId: this.localPeerId,
-            change: {
-              x: message.target.x,
-              y: message.target.y,
-              z: message.target.z,
-              type: 0,
-              durability: 0,
-            },
-          });
-        }
         break;
 
       case 'pickupFlag':

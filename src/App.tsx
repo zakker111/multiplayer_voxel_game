@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
+import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP } from './shared/types';
 import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX } from 'lucide-react';
 
 /** Round clock as m:ss (rounds are half an hour long, so no hour component). */
@@ -14,6 +15,8 @@ function App() {
   const gameRef = useRef<Game | null>(null);
   const [gameState, setGameState] = useState<GameState>({
     hp: 100, maxHp: 100, equipment: 'rifle', inventory: 0,
+    depositable: 0, workshopStock: 0, workshopCapacity: 0, workshopDistance: null,
+    jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
     blueKills: 0, redKills: 0, blueCaptures: 0, redCaptures: 0, isAiming: false,
@@ -38,7 +41,7 @@ function App() {
     audioVolume: 1,
   });
   const [started, setStarted] = useState(false);
-  const [gameMode, setGameMode] = useState<'multiplayer' | 'singleplayer' | 'online' | null>(null);
+  const [gameMode, setGameMode] = useState<'multiplayer' | 'singleplayer' | 'online' | 'beta' | null>(null);
   const [selectedTeam, setSelectedTeam] = useState<'red' | 'blue'>('blue');
   const [isPointerLocked, setIsPointerLocked] = useState(false);
 
@@ -74,6 +77,9 @@ function App() {
       } else if (modeParam === 'sandbox' || modeParam === 'singleplayer') {
         setSelectedTeam(teamParam);
         setGameMode('singleplayer');
+      } else if (modeParam === 'beta') {
+        setSelectedTeam(teamParam);
+        setGameMode('beta');
       }
     } catch {
       // Ignore URL parsing errors in restricted sandbox environments
@@ -125,7 +131,7 @@ function App() {
     };
   }, [gameMode, selectedTeam, serverUrl, playerName]);
 
-  const handleStart = (mode: 'multiplayer' | 'singleplayer' | 'online', team: 'red' | 'blue' = 'blue', targetServer?: string) => {
+  const handleStart = (mode: 'multiplayer' | 'singleplayer' | 'online' | 'beta', team: 'red' | 'blue' = 'blue', targetServer?: string) => {
     setSelectedTeam(team);
     setServerUrl(targetServer);
     setGameMode(mode);
@@ -181,7 +187,7 @@ function App() {
           <div className="text-center max-w-3xl px-4">
             <h1 className="text-5xl font-bold text-white mb-1">🎮 Voxel FPS</h1>
             <div className="text-xs text-gray-500 font-mono mb-3">Version 1.4.0</div>
-            <p className="text-lg text-gray-300 mb-1">Red vs Blue — Capture the Flag</p>
+            <p className="text-lg text-gray-300 mb-1">Standard CTF — Red vs Blue</p>
             <p className="text-sm text-gray-400 mb-6">You are <span className="text-blue-400 font-bold">BLUE</span> team. Push to the <span className="text-red-400 font-bold">RED</span> flag!</p>
             <div className="flex flex-wrap gap-3 justify-center mb-6">
               <button
@@ -189,6 +195,13 @@ function App() {
                 className="px-6 py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold text-lg rounded-xl hover:from-blue-500 hover:to-indigo-500 transition-all shadow-lg shadow-blue-600/30 cursor-pointer flex items-center gap-2.5"
               >
                 <Globe className="w-5 h-5" /> <span>Multiplayer (Choose Server & Team)</span>
+              </button>
+              <button
+                onClick={() => handleStart('beta', 'blue')}
+                className="px-6 py-3.5 bg-amber-600 text-white font-bold text-lg rounded-xl hover:bg-amber-500 transition-colors shadow-lg cursor-pointer"
+                title="Development build for testing the workshop and vehicle roadmap"
+              >
+                🧪 Beta Development Mode
               </button>
               <button
                 onClick={() => {
@@ -224,7 +237,7 @@ function App() {
             </div>
             
             <p className="text-xs text-purple-300/80 mb-2">
-              💡 <b>Multiplayer Testing:</b> Click <b>Multiplayer</b> to select your server and team, or open in 2 tabs (one Blue, one Red) to test real-time CTF!
+              💡 <b>Standard CTF</b> remains the main game. Use <b>Beta Development Mode</b> to test workshop and vehicle roadmap changes separately.
             </p>
             <div className="mt-6 bg-gray-900/60 rounded-xl p-5 text-left max-w-xl mx-auto text-sm">
               <div className="grid grid-cols-2 gap-4">
@@ -646,7 +659,7 @@ function App() {
             </div>
           )}
           {/* Scoreboard - only in multiplayer */}
-          {(gameMode === 'multiplayer' || gameMode === 'online') && (
+          {(gameMode === 'multiplayer' || gameMode === 'online' || gameMode === 'beta') && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
               <div className="flex flex-col items-center gap-2">
                 {/* Round clock: server-driven only (offline modes have no rounds) */}
@@ -677,6 +690,11 @@ function App() {
                     {gameState.roundWinner === 'draw'
                       ? 'ROUND DRAWN — NO WINNER'
                       : `${gameState.roundWinner.toUpperCase()} WINS THE ROUND`}
+                  </div>
+                )}
+                {gameMode === 'beta' && (
+                  <div className="px-2 py-0.5 rounded bg-amber-500 text-black text-[10px] font-bold tracking-widest shadow">
+                    🧪 BETA DEV — workshop & vehicle testing
                   </div>
                 )}
                 <div className="flex items-center bg-gray-900/90 rounded-xl overflow-hidden border-2 border-gray-700">
@@ -894,6 +912,32 @@ function App() {
                       </div>
                     )}
                   </div>
+                </div>
+              )}
+
+              {(gameMode === 'online' || gameMode === 'beta') && gameState.workshopDistance !== null && (
+                <div className="absolute bottom-8 left-8 z-10 bg-gray-900/90 rounded-xl px-4 py-3 border border-amber-500/50 text-sm text-gray-200 max-w-xs">
+                  <div className="font-bold text-amber-300">{selectedTeam.toUpperCase()} WORKSHOP</div>
+                  <div>Team stock: {gameState.workshopStock} / {gameState.workshopCapacity}</div>
+                  <div>Carried mined blocks: {gameState.depositable}</div>
+                  <div className="text-xs text-gray-400 mt-1">
+                    {gameState.workshopDistance <= WORKSHOP_REACH
+                      ? 'Press E to deposit mined blocks'
+                      : `Workshop ${Math.round(gameState.workshopDistance)}m away · east of base`}
+                  </div>
+                  {gameState.workshopDistance <= WORKSHOP_REACH && (
+                    <div className="text-xs text-gray-400 mt-1 border-t border-gray-700 pt-1">
+                      Press G to build a jeep · {JEEP_COST} blocks (max 2 per team)
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {(gameMode === 'online' || gameMode === 'beta') && (gameState.jeepDriving || gameState.jeepNearby) && (
+                <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-amber-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
+                  {gameState.jeepDriving
+                    ? `JEEP ${Math.ceil(gameState.jeepHp)}/${JEEP_MAX_HP} HP · ${Math.round(Math.abs(gameState.jeepSpeed))} m/s · WASD drive · Space brake · F exit`
+                    : 'Press F to enter your team’s jeep (no flag carriers)'}
                 </div>
               )}
 

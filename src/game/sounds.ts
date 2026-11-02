@@ -64,7 +64,9 @@ export class SoundManager {
   private ensureMasterGain(): void {
     if (!this.audioContext || this.masterGain) return;
     this.masterGain = this.audioContext.createGain();
-    this.masterGain.connect(this.masterGain!);
+    // All effects connect into this gain; it must terminate at the output, not
+    // at itself (a self-connection routes every sound straight into silence).
+    this.masterGain.connect(this.audioContext.destination);
     this.applyVolume();
   }
 

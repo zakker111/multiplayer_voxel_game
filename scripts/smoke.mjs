@@ -113,11 +113,18 @@ async function main() {
       const timer = setTimeout(resolve, 4000);
       res.on('data', (chunk) => {
         buffer += chunk.toString();
-        const match = buffer.split('\n\n').find((part) => part.startsWith('data: ') && part.includes('"init"'));
-        if (match && !sse.init) {
-          try { sse.init = JSON.parse(match.slice(6)); } catch { /* keep waiting */ }
-          clearTimeout(timer);
-          resolve();
+        const events = buffer.split('\n\n');
+        buffer = events.pop() ?? ''; // A large init event may span multiple chunks.
+        for (const event of events) {
+          if (!event.startsWith('data: ')) continue;
+          let message;
+          try { message = JSON.parse(event.slice(6)); } catch { continue; }
+          if (message.type === 'init') {
+            sse.init = message;
+            clearTimeout(timer);
+            resolve();
+            break;
+          }
         }
       });
     });

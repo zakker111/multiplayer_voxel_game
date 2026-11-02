@@ -48,6 +48,17 @@ import {
   SPAWN_X_RANGE,
   BLUE_FLAG_POS,
   RED_FLAG_POS,
+  VOXEL_BUILT,
+  WORKSHOP_CENTERS,
+  WORKSHOP_START_STOCK,
+  WORKSHOP_CAPACITY,
+  WORKSHOP_REACH,
+  GROUND_LEVEL,
+  isWorkshopProtectedCell,
+  Workshops,
+  JeepSnapshot,
+  JEEP_COST, JEEP_TEAM_LIMIT, JEEP_MAX_HP, JEEP_ENTER_REACH,
+  JEEP_HALF_WIDTH, JEEP_HALF_LENGTH, JEEP_HEIGHT, WORLD_HALF,
 } from '../shared/types';
 
 export interface GameConnection {
@@ -56,6 +67,59 @@ export interface GameConnection {
   readyState?: number;
   /** Optional close hook — SSE connections use this to end the HTTP response. */
   close?(code?: number, reason?: string): void;
+}
+
+type BotJeepTask = {
+  phase: 'approach' | 'drive' | 'reverse' | 'detour';
+  jeepId: string | null;
+  startedAt: number;
+  lastProgressAt: number;
+  lastPosition: Position;
+  recoveries: number;
+  recoveryUntil: number;
+  detour: Position | null;
+  nextSteeringAt: number;
+  plannedSteering: number;
+  plannedThrottle: number;
+};
+
+const BOT_JEEP_MAX_DRIVERS_PER_TEAM = 1;
+const BOT_JEEP_HUMAN_PRIORITY_RADIUS = 24;
+const BOT_JEEP_COOLDOWN = 25;
+const BOT_LOGISTICS_PER_TEAM = 1;
+const BOT_LOGISTICS_CAPACITY = 12;
+const BOT_LOGISTICS_MIN_STOCK = 30;
+const BOT_LOGISTICS_MINE_RADIUS = 8;
+
+interface ServerJeep extends JeepSnapshot {
+  throttle: number;
+  steering: number;
+  brake: boolean;
+  lastInput: number;
+  wreckUntil: number;
+}
+
+/** Separating-axis test for two oriented jeep rectangles on the XZ plane.
+ *  Touching edges count as clear, so parked vehicles can be adjacent. */
+function jeepRectsOverlap(
+  ax: number, az: number, ayaw: number,
+  bx: number, bz: number, byaw: number,
+): boolean {
+  const rect = (yaw: number) => ({
+    f: { x: -Math.sin(yaw), z: -Math.cos(yaw) },
+    s: { x: Math.cos(yaw), z: -Math.sin(yaw) },
+  });
+  const a = rect(ayaw), b = rect(byaw);
+  for (const axis of [a.f, a.s, b.f, b.s]) {
+    const pa = ax * axis.x + az * axis.z;
+    const pb = bx * axis.x + bz * axis.z;
+    const ha = JEEP_HALF_LENGTH * Math.abs(a.f.x * axis.x + a.f.z * axis.z) +
+      JEEP_HALF_WIDTH * Math.abs(a.s.x * axis.x + a.s.z * axis.z);
+    const hb = JEEP_HALF_LENGTH * Math.abs(b.f.x * axis.x + b.f.z * axis.z) +
+      JEEP_HALF_WIDTH * Math.abs(b.s.x * axis.x + b.s.z * axis.z);
+    if (Math.abs(pa - pb) >= ha + hb) return false;
+  }
+  return true;
 }
 
 export class ServerGame {
@@ -99,6 +163,267 @@ export class ServerGame {
   private lastShootTime: Map<string, number> = new Map();
   private lastToolTime: Map<string, number> = new Map();
   private inventories: Map<string, number> = new Map();
+  /** Natural blocks carried for deposit (and optionally ordinary building). */
+  private depositableBlocks = new Map<string, number>();
+  private joinedPlayers = new Set<string>();
+  private workshopStock = { red: WORKSHOP_START_STOCK, blue: WORKSHOP_START_STOCK };
+  private jeeps = new Map<string, ServerJeep>();
+  private jeepSequence = 0;
+  private jeepSync = 0;
+  private botJeepTasks = new Map<string, BotJeepTask>();
+  private botJeepCooldown = new Map<string, number>();
+  private botJeepVehicleCooldown = new Map<string, number>();
+  private botLogisticsTasks = new Map<string, { target: Position | null; phase: 'gather' | 'return'; nextMineAt: number }>();
+  /** Cumulative diagnostics used by the headless match measurement. */
+  readonly botJeepStats = { built: 0, entered: 0, arrived: 0, damagedExits: 0, recoveries: 0, abandoned: 0, humanYields: 0 };
+
+  private jeepSnapshots(): JeepSnapshot[] {
+    return [...this.jeeps.values()].map(({ id, team, position, yaw, speed, hp, driverId, wreck }) =>
+      ({ id, team, position: { ...position }, yaw, speed, hp, driverId, wreck }));
+  }
+
+  private broadcastJeeps(): void {
+    this.broadcast({ type: 'jeepsUpdated', jeeps: this.jeepSnapshots() });
+  }
+
+  private driverJeep(playerId: string): ServerJeep | undefined {
+    return [...this.jeeps.values()].find(jeep => jeep.driverId === playerId && !jeep.wreck);
+  }
+
+  private jeepMessage(playerId: string, message: string): void {
+    this.sendToPlayer(playerId, { type: 'jeepMessage', message });
+  }
+
+  /** Exact oriented-box footprint: movement collision uses the same 1.3×2m
+   *  rectangle bullets already raycast, rather than a circumscribed circle
+   *  (radius ≈2.4m) that rejected gaps the jeep physically fits through. */
+  private jeepClear(position: Position, yaw: number, ignoreId?: string, ignorePlayerId?: string): boolean {
+    const sin = Math.sin(yaw), cos = Math.cos(yaw);
+    // Heading used by the movement equation; side is perpendicular to it.
+    const forward = { x: -sin, z: -cos };
+    const side = { x: cos, z: -sin };
+    const extentX = JEEP_HALF_LENGTH * Math.abs(forward.x) + JEEP_HALF_WIDTH * Math.abs(side.x);
+    const extentZ = JEEP_HALF_LENGTH * Math.abs(forward.z) + JEEP_HALF_WIDTH * Math.abs(side.z);
+    if (Math.abs(position.x) + extentX >= WORLD_HALF || Math.abs(position.z) + extentZ >= WORLD_HALF) return false;
+    const axes = [forward, side, { x: 1, z: 0 }, { x: 0, z: 1 }];
+    // Separating-axis test of the jeep rectangle against each candidate cell
+    // (a 1×1 square centred on integer coordinates).
+    const cellOverlaps = (x: number, z: number): boolean => axes.every(axis => {
+      const jeepAt = position.x * axis.x + position.z * axis.z;
+      const jeepHalf = JEEP_HALF_LENGTH * Math.abs(forward.x * axis.x + forward.z * axis.z) +
+        JEEP_HALF_WIDTH * Math.abs(side.x * axis.x + side.z * axis.z);
+      const cellAt = x * axis.x + z * axis.z;
+      const cellHalf = 0.5 * (Math.abs(axis.x) + Math.abs(axis.z));
+      return Math.abs(jeepAt - cellAt) <= jeepHalf + cellHalf;
+    });
+    for (let x = Math.floor(position.x - extentX - 0.5); x <= Math.ceil(position.x + extentX + 0.5); x++) {
+      for (let z = Math.floor(position.z - extentZ - 0.5); z <= Math.ceil(position.z + extentZ + 0.5); z++) {
+        if (!cellOverlaps(x, z)) continue;
+        for (let y = Math.floor(position.y + 0.5); y <= Math.ceil(position.y + JEEP_HEIGHT - 0.5); y++) {
+          if (this.world.isSolid(x, y, z)) return false;
+        }
+      }
+    }
+    for (const other of this.jeeps.values()) {
+      if (other.id === ignoreId || Math.abs(other.position.y - position.y) >= JEEP_HEIGHT) continue;
+      if (jeepRectsOverlap(position.x, position.z, yaw, other.position.x, other.position.z, other.yaw)) return false;
+    }
+    for (const p of this.players.values()) {
+      if (p.id === ignorePlayerId || p.isDead || p.isSpectating) continue;
+      if (Math.abs(p.position.y - position.y) >= JEEP_HEIGHT) continue;
+      // Infantry capsule (0.5m radius) against the jeep rectangle.
+      const dx = p.position.x - position.x, dz = p.position.z - position.z;
+      const localForward = dx * forward.x + dz * forward.z;
+      const localSide = dx * side.x + dz * side.z;
+      const clampedForward = Math.max(-JEEP_HALF_LENGTH, Math.min(JEEP_HALF_LENGTH, localForward));
+      const clampedSide = Math.max(-JEEP_HALF_WIDTH, Math.min(JEEP_HALF_WIDTH, localSide));
+      if (Math.hypot(localForward - clampedForward, localSide - clampedSide) < 0.5) return false;
+    }
+    return true;
+  }
+
+  private jeepGround(x: number, z: number, currentY: number): number | null {
+    const heights: number[] = [];
+    for (const [ox, oz] of [[0, 0], [-1, -1], [-1, 1], [1, -1], [1, 1], [-2, 0], [2, 0], [0, -2], [0, 2]]) {
+      const gx = Math.round(x + ox), gz = Math.round(z + oz);
+      let top: number | null = null;
+      for (let y = Math.floor(currentY + 0.5); y >= Math.floor(currentY - 2.5); y--) {
+        if (this.world.isSolid(gx, y, gz)) { top = y + 0.5; break; }
+      }
+      if (top === null) return null;
+      heights.push(top);
+    }
+    const high = Math.max(...heights), low = Math.min(...heights);
+    return high - low <= 1 && Math.abs(high - currentY) <= 1 ? high : null;
+  }
+
+  private buildJeep(playerId: string): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId) || this.roundPhase !== 'live') return;
+    const workshop = this.getWorkshops()[player.team];
+    if (Math.hypot(player.position.x - workshop.position.x, player.position.y - workshop.position.y, player.position.z - workshop.position.z) > WORKSHOP_REACH) return;
+    if (this.workshopStock[player.team] < JEEP_COST) return this.jeepMessage(playerId, 'Not enough workshop blocks');
+    if ([...this.jeeps.values()].filter(v => v.team === player.team && !v.wreck).length >= JEEP_TEAM_LIMIT) return this.jeepMessage(playerId, 'Team jeep limit reached');
+    const position = { x: workshop.position.x + 11, y: workshop.position.y, z: workshop.position.z };
+    const yaw = player.team === 'blue' ? Math.PI : 0;
+    if (this.jeepGround(position.x, position.z, position.y) === null || !this.jeepClear(position, yaw)) return this.jeepMessage(playerId, 'Garage pad is blocked');
+    const jeep: ServerJeep = { id: `jeep_${++this.jeepSequence}`, team: player.team, position, yaw, speed: 0, hp: JEEP_MAX_HP, driverId: null, wreck: false, throttle: 0, steering: 0, brake: false, lastInput: this.world.serverTime, wreckUntil: 0 };
+    this.workshopStock[player.team] -= JEEP_COST;
+    this.jeeps.set(jeep.id, jeep);
+    this.broadcastWorkshops();
+    this.broadcastJeeps();
+  }
+
+  private humanNearJeep(team: 'red' | 'blue', position: Position): boolean {
+    return [...this.players.values()].some(p => !(p instanceof ServerBot) && p.team === team && !p.isDead && !p.isSpectating &&
+      Math.hypot(p.position.x - position.x, p.position.y - position.y, p.position.z - position.z) <= BOT_JEEP_HUMAN_PRIORITY_RADIUS);
+  }
+
+  private enterJeep(playerId: string, vehicleId: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || player.carryingFlag || this.blueFlagCarrier === playerId || this.redFlagCarrier === playerId || this.driverJeep(playerId) || typeof vehicleId !== 'string') return;
+    if (!(player instanceof ServerBot) && !this.joinedPlayers.has(playerId)) return;
+    const jeep = this.jeeps.get(vehicleId);
+    if (!jeep || jeep.wreck || jeep.team !== player.team || Math.hypot(player.position.x - jeep.position.x, player.position.y - jeep.position.y, player.position.z - jeep.position.z) > JEEP_ENTER_REACH) return;
+    if (jeep.driverId && !(player instanceof ServerBot)) {
+      const occupant = this.players.get(jeep.driverId);
+      const workshop = this.getWorkshops()[player.team].position;
+      if (occupant instanceof ServerBot && Math.hypot(jeep.position.x - workshop.x, jeep.position.z - workshop.z) <= BOT_JEEP_HUMAN_PRIORITY_RADIUS && Math.abs(jeep.speed) < 1) {
+        this.finishBotJeepTask(occupant, 'human');
+      }
+    }
+    if (jeep.driverId) return;
+    jeep.driverId = playerId;
+    jeep.lastInput = this.world.serverTime;
+    jeep.throttle = 0; jeep.steering = 0; jeep.brake = false; jeep.speed = 0;
+    player.position = { ...jeep.position };
+    this.clearSpawnProtection(playerId);
+    this.broadcastJeeps();
+  }
+
+  private safeJeepExit(jeep: ServerJeep, playerId: string): Position | null {
+    const player = this.players.get(playerId);
+    if (!player) return null;
+    for (const radius of [3.5, 4.5, 6]) {
+      for (let i = 0; i < 8; i++) {
+        const angle = jeep.yaw + i * Math.PI / 4;
+        const x = jeep.position.x + Math.cos(angle) * radius, z = jeep.position.z + Math.sin(angle) * radius;
+        const y = this.jeepGround(x, z, jeep.position.y);
+        if (y === null || Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) continue;
+        let clear = true;
+        for (const dx of [-0.45, 0.45]) for (const dz of [-0.45, 0.45]) for (const dy of [0.3, 1, 1.8]) {
+          if (this.world.isSolid(Math.round(x + dx), Math.round(y + dy), Math.round(z + dz))) clear = false;
+        }
+        if (!clear || [...this.players.values()].some(p => p.id !== playerId && !p.isDead && !p.isSpectating && Math.abs(p.position.y - y) < 2 && Math.hypot(p.position.x - x, p.position.z - z) < 1)) continue;
+        if ([...this.jeeps.values()].some(v => v.id !== jeep.id && Math.abs(v.position.y - y) < 2 && Math.hypot(v.position.x - x, v.position.z - z) < 3)) continue;
+        return { x, y, z };
+      }
+    }
+    return null;
+  }
+
+  private exitJeep(playerId: string, forced = false): boolean {
+    const jeep = this.driverJeep(playerId);
+    if (!jeep) return false;
+    const player = this.players.get(playerId);
+    const exit = this.safeJeepExit(jeep, playerId);
+    if (!exit && !forced) { this.jeepMessage(playerId, 'No safe exit: move the jeep first'); return false; }
+    jeep.driverId = null;
+    jeep.speed = 0;
+    jeep.throttle = 0;
+    if (player && !player.isDead) {
+      player.position = exit ?? this.getSpawnPosition(player.team);
+      this.sendToPlayer(playerId, { type: 'jeepExited', position: { ...player.position } });
+      this.broadcast({ type: 'playerUpdated', playerId, state: player.getState() });
+    }
+    this.broadcastJeeps();
+    return true;
+  }
+
+  private updateJeeps(dt: number): void {
+    if (this.jeeps.size === 0) return;
+    const step = Math.min(dt, 0.05);
+    let removed = false;
+    for (const jeep of this.jeeps.values()) {
+      if (jeep.wreck) { if (this.world.serverTime >= jeep.wreckUntil) { this.jeeps.delete(jeep.id); this.botJeepVehicleCooldown.delete(jeep.id); removed = true; } continue; }
+      const driver = jeep.driverId ? this.players.get(jeep.driverId) : undefined;
+      if (!driver || driver.isDead || driver.isSpectating) { if (jeep.driverId) this.exitJeep(jeep.driverId, true); continue; }
+      if (this.world.serverTime - jeep.lastInput > 0.5) { jeep.throttle = 0; jeep.steering = 0; jeep.brake = true; }
+      const targetSpeed = jeep.brake ? 0 : jeep.throttle * (jeep.throttle < 0 ? 5 : 12);
+      jeep.speed += Math.max(-10 * step, Math.min(10 * step, targetSpeed - jeep.speed));
+      const turn = jeep.steering * Math.min(Math.abs(jeep.speed) / 4, 1) * (jeep.speed < 0 ? -1 : 1) * 1.4 * step;
+      const yaw = jeep.yaw + turn;
+      const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
+      const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
+      const y = this.jeepGround(x, z, jeep.position.y);
+      if (y !== null && this.jeepClear({ x, y, z }, yaw, jeep.id, driver.id)) {
+        jeep.position = { x, y, z }; jeep.yaw = yaw;
+      } else jeep.speed = 0;
+      driver.position = { ...jeep.position };
+    }
+    this.jeepSync += dt;
+    if (removed || this.jeepSync >= 0.1) { this.jeepSync = 0; this.broadcastJeeps(); }
+  }
+
+  private damageJeep(jeep: ServerJeep, damage: number): void {
+    if (jeep.wreck) return;
+    jeep.hp = Math.max(0, jeep.hp - damage);
+    if (jeep.hp === 0) {
+      if (jeep.driverId) this.exitJeep(jeep.driverId, true);
+      jeep.wreck = true; jeep.speed = 0; jeep.wreckUntil = this.world.serverTime + 4;
+    }
+    this.broadcastJeeps();
+  }
+
+  /** Ray versus a rotated jeep bounding box; terrain still occludes hits. */
+  private hitJeep(origin: Position, direction: Position, maxDist: number, team: 'red' | 'blue'): { jeep: ServerJeep; distance: number } | null {
+    let best: { jeep: ServerJeep; distance: number } | null = null;
+    for (const jeep of this.jeeps.values()) {
+      if (jeep.wreck || jeep.team === team) continue;
+      let near = 0, far = maxDist;
+      const dx = origin.x - jeep.position.x, dz = origin.z - jeep.position.z;
+      const cos = Math.cos(jeep.yaw), sin = Math.sin(jeep.yaw);
+      const localX = cos * dx - sin * dz, localZ = sin * dx + cos * dz;
+      const localDirX = cos * direction.x - sin * direction.z, localDirZ = sin * direction.x + cos * direction.z;
+      for (const [o, d, low, high] of [[localX, localDirX, -JEEP_HALF_WIDTH, JEEP_HALF_WIDTH], [origin.y, direction.y, jeep.position.y, jeep.position.y + JEEP_HEIGHT], [localZ, localDirZ, -JEEP_HALF_LENGTH, JEEP_HALF_LENGTH]]) {
+        if (Math.abs(d) < 1e-8) { if (o < low || o > high) { far = -1; break; } continue; }
+        const a = (low - o) / d, b = (high - o) / d;
+        near = Math.max(near, Math.min(a, b)); far = Math.min(far, Math.max(a, b));
+      }
+      if (near <= far && near <= maxDist && (!best || near < best.distance)) best = { jeep, distance: near };
+    }
+    return best;
+  }
+
+  private getWorkshops(): Workshops {
+    const make = (team: 'red' | 'blue') => {
+      const { x, z } = WORKSHOP_CENTERS[team];
+      return { position: { x, y: GROUND_LEVEL + 0.5, z }, stock: this.workshopStock[team], capacity: WORKSHOP_CAPACITY };
+    };
+    return { red: make('red'), blue: make('blue') };
+  }
+
+  private broadcastWorkshops(): void {
+    this.broadcast({ type: 'workshopsUpdated', workshops: this.getWorkshops() });
+  }
+
+  private resetResources(playerId: string): void {
+    this.depositableBlocks.set(playerId, 0);
+    this.sendToPlayer(playerId, { type: 'resourcesUpdated', depositable: 0 });
+  }
+
+  private depositWorkshop(playerId: string, team: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || !isTeam(team) || player.team !== team) return;
+    const position = this.getWorkshops()[team].position;
+    if (Math.hypot(player.position.x - position.x, player.position.y - position.y, player.position.z - position.z) > WORKSHOP_REACH) return;
+    const amount = Math.min(this.depositableBlocks.get(playerId) ?? 0, WORKSHOP_CAPACITY - this.workshopStock[team]);
+    if (amount <= 0) return;
+    this.depositableBlocks.set(playerId, (this.depositableBlocks.get(playerId) ?? 0) - amount);
+    this.workshopStock[team] += amount;
+    this.sendToPlayer(playerId, { type: 'resourcesUpdated', depositable: this.depositableBlocks.get(playerId)! });
+    this.broadcastWorkshops();
+  }
   
   // Flag positions (must match client)
   private readonly BLUE_FLAG_POS = BLUE_FLAG_POS;
@@ -173,9 +498,12 @@ export class ServerGame {
       (p): p is ServerBot => p instanceof ServerBot && p.team === team,
     );
     const engineerCount = teamBots.filter((p) => p.isEngineer).length;
-    // Guarantee two firebase engineers per team, regardless of id hashes.
-    const bot = new ServerBot(botId, spawnPos, team, name, engineerCount < 2);
+    const logisticsCount = teamBots.filter((p) => p.isLogistics).length;
+    // Keep logistics assignment separate from the two firebase engineers.
+    const bot = new ServerBot(botId, spawnPos, team, name, engineerCount < 2, engineerCount >= 2 && logisticsCount < 1);
     this.players.set(botId, bot);
+    this.inventories.set(botId, 0);
+    this.depositableBlocks.set(botId, 0);
     // No connection entry: broadcasts/sendToPlayer naturally skip bots,
     // and their state flows to clients via playerUpdated/broadcastState.
     this.broadcast({
@@ -189,12 +517,17 @@ export class ServerGame {
 
   removeBot(botId: string): void {
     if (!this.players.has(botId)) return;
+    this.botJeepTasks.delete(botId);
+    this.botJeepCooldown.delete(botId);
     this.handlePlayerDeath(botId); // drops any carried flag properly
     this.players.delete(botId);
     this.respawnTimers.delete(botId);
     this.lastShootTime.delete(botId);
     this.lastToolTime.delete(botId);
     this.inventories.delete(botId);
+    this.depositableBlocks.delete(botId);
+    this.botLogisticsTasks.delete(botId);
+    this.depositableBlocks.delete(botId);
     this.spawnProtectedUntil.delete(botId);
     this.lastDamagedAt.delete(botId);
     this.lastHpBroadcast.delete(botId);
@@ -293,7 +626,9 @@ export class ServerGame {
     const damage = weaponDamage(weapon, isHeadshot, dist);
 
     this.clearSpawnProtection(botId);
-    this.applyDamage(targetId, damage, botId, isHeadshot);
+    const occupiedJeep = this.driverJeep(targetId);
+    if (occupiedJeep) this.damageJeep(occupiedJeep, weaponDamage(weapon, false, dist));
+    else this.applyDamage(targetId, damage, botId, isHeadshot);
   }
 
   private damageAndBroadcastVoxel(pos: Position): void {
@@ -487,6 +822,14 @@ export class ServerGame {
     this.roundSyncAccumulator = 0;
 
     this.resetFlags();
+    this.botJeepTasks.clear();
+    this.botJeepCooldown.clear();
+    this.botJeepVehicleCooldown.clear();
+    for (const jeep of this.jeeps.values()) if (jeep.driverId) this.exitJeep(jeep.driverId, true);
+    this.jeeps.clear();
+    this.broadcastJeeps();
+    this.workshopStock = { red: WORKSHOP_START_STOCK, blue: WORKSHOP_START_STOCK };
+    this.broadcastWorkshops();
     this.resetPlayersForRound();
     this.broadcastRound();
     log.info(`ROUND ${this.roundNumber} STARTED — ${Math.round(this.roundSeconds / 60)} minute round`);
@@ -510,6 +853,7 @@ export class ServerGame {
   /** Every combatant restarts the round alive at their own spawn. */
   private resetPlayersForRound(): void {
     for (const player of this.players.values()) {
+      this.resetResources(player.id);
       if (player.isSpectating) continue; // spectators keep watching
       this.respawnTimers.delete(player.id);
       const spawnPos = this.getSpawnPosition(player.team);
@@ -574,7 +918,7 @@ export class ServerGame {
     const x = Math.round(position.x);
     const y = Math.round(position.y);
     const z = Math.round(position.z);
-    if (!this.world.isSolid(x, y, z)) return;
+    if (!this.world.isSolid(x, y, z) || isWorkshopProtectedCell(x, z)) return;
     if (Math.hypot(x - bot.position.x, z - bot.position.z) > 3.5) return;
     this.world.setVoxel(x, y, z, VOXEL_AIR);
     this.broadcast({
@@ -583,10 +927,282 @@ export class ServerGame {
     });
   }
 
+  private finishBotJeepTask(bot: ServerBot, reason: 'arrived' | 'damaged' | 'stuck' | 'human' | 'unavailable'): void {
+    const task = this.botJeepTasks.get(bot.id);
+    if (!task) return;
+    if (this.driverJeep(bot.id) && !this.exitJeep(bot.id)) {
+      // Try to move to a safe exit first. After bounded retries, forced cleanup
+      // uses the existing safe team-spawn fallback rather than trapping the bot.
+      if (reason === 'human' || task.recoveries >= 3) this.exitJeep(bot.id, true);
+      else {
+        task.recoveries++;
+        task.phase = 'reverse';
+        task.recoveryUntil = this.world.serverTime + 2;
+        return;
+      }
+    }
+    this.botJeepTasks.delete(bot.id);
+    this.botJeepCooldown.set(bot.id, this.world.serverTime + BOT_JEEP_COOLDOWN);
+    if (reason === 'stuck' && task.jeepId) this.botJeepVehicleCooldown.set(task.jeepId, this.world.serverTime + 60);
+    if (reason === 'arrived') this.botJeepStats.arrived++;
+    else if (reason === 'damaged') this.botJeepStats.damagedExits++;
+    else if (reason === 'human') this.botJeepStats.humanYields++;
+    else if (reason === 'stuck') this.botJeepStats.abandoned++;
+    bot.resumeAfterJeep(this.world.serverTime);
+  }
+
+  private assignBotJeepTasks(): void {
+    if (this.roundPhase !== 'live') return;
+    for (const team of ['blue', 'red'] as const) {
+      if ([...this.botJeepTasks.keys()].filter(id => this.players.get(id)?.team === team).length >= BOT_JEEP_MAX_DRIVERS_PER_TEAM) continue;
+      const workshop = this.getWorkshops()[team].position;
+      if (this.humanNearJeep(team, workshop)) continue;
+      const available = [...this.jeeps.values()].find(j => j.team === team && !j.wreck && j.hp > JEEP_MAX_HP * 0.3 && !j.driverId && this.world.serverTime >= (this.botJeepVehicleCooldown.get(j.id) ?? 0) &&
+        Math.hypot(j.position.x - workshop.x, j.position.z - workshop.z) <= 35 && !this.humanNearJeep(team, j.position));
+      if (!available && (this.workshopStock[team] < JEEP_COST || [...this.jeeps.values()].some(j => j.team === team && !j.wreck && !j.driverId &&
+        Math.hypot(j.position.x - workshop.x, j.position.z - workshop.z) <= 35))) continue;
+      const target = available?.position ?? workshop;
+      const candidates = [...this.players.values()].filter((p): p is ServerBot =>
+        p instanceof ServerBot && p.team === team && p.roleName === 'assault' && !p.isEngineer && !p.isLogistics && !p.isDead && !p.isSpectating &&
+        !p.carryingFlag && !this.botJeepTasks.has(p.id) && this.world.serverTime >= (this.botJeepCooldown.get(p.id) ?? 0) &&
+        p.hp > p.maxHp * 0.5 && p.stateName !== 'TRENCH' && p.stateName !== 'BUILD' && p.stateName !== 'ESCORT' &&
+        Math.hypot(p.position.x - target.x, p.position.z - target.z) < 90);
+      candidates.sort((a, b) => Math.hypot(a.position.x - target.x, a.position.z - target.z) - Math.hypot(b.position.x - target.x, b.position.z - target.z));
+      const bot = candidates[0];
+      if (!bot) continue;
+      this.botJeepTasks.set(bot.id, { phase: 'approach', jeepId: available?.id ?? null, startedAt: this.world.serverTime,
+        lastProgressAt: this.world.serverTime, lastPosition: { ...bot.position }, recoveries: 0, recoveryUntil: 0, detour: null,
+        nextSteeringAt: 0, plannedSteering: 0, plannedThrottle: 1 });
+    }
+  }
+
+  /** Evaluate reachable turning arcs using the same ground and collision checks as driving. */
+  private planBotJeepSteering(jeep: ServerJeep, target: { x: number; z: number }): { steering: number; throttle: number } {
+    let bestScore = -Infinity;
+    let best = { steering: 0, throttle: 1 };
+    const initialDistance = Math.hypot(target.x - jeep.position.x, target.z - jeep.position.z);
+    for (const steering of [0, -0.5, 0.5, -1, 1]) {
+      for (const throttle of [1, 0.45]) {
+        let { x, y, z } = jeep.position;
+        let yaw = jeep.yaw, speed = jeep.speed, travelled = 0;
+        let blocked = false;
+        // The physics runs at 20 Hz; use the same steps to avoid skipping obstacles.
+        for (let step = 0; step < 40; step++) {
+          speed += Math.max(-0.5, Math.min(0.5, throttle * 12 - speed));
+          yaw += steering * Math.min(Math.abs(speed) / 4, 1) * (speed < 0 ? -1 : 1) * 1.4 * 0.05;
+          const nx = x - Math.sin(yaw) * speed * 0.05;
+          const nz = z - Math.cos(yaw) * speed * 0.05;
+          const ground = this.jeepGround(nx, nz, y);
+          if (ground === null || !this.jeepClear({ x: nx, y: ground, z: nz }, yaw, jeep.id, jeep.driverId ?? undefined)) { blocked = true; break; }
+          travelled += Math.hypot(nx - x, nz - z);
+          x = nx; y = ground; z = nz;
+        }
+        const progress = initialDistance - Math.hypot(target.x - x, target.z - z);
+        const score = progress + travelled * 0.08 - (blocked ? 7 : 0) - Math.abs(steering) * 0.15;
+        if (score > bestScore) { bestScore = score; best = { steering, throttle }; }
+      }
+    }
+    return best;
+  }
+
+  private updateBotJeepTask(bot: ServerBot, ctx: BotContext): boolean {
+    const task = this.botJeepTasks.get(bot.id);
+    if (!task) return false;
+    const now = this.world.serverTime;
+    const workshop = this.getWorkshops()[bot.team].position;
+    const nearHuman = this.humanNearJeep(bot.team, workshop);
+    if (task.phase === 'approach') {
+      if (this.roundPhase !== 'live' || bot.carryingFlag || bot.hp <= bot.maxHp * 0.5 || nearHuman || now - task.startedAt > 22) {
+        this.finishBotJeepTask(bot, nearHuman ? 'human' : 'unavailable'); return false;
+      }
+      let jeep = task.jeepId ? this.jeeps.get(task.jeepId) : undefined;
+      if (!jeep && task.jeepId) { this.finishBotJeepTask(bot, 'unavailable'); return false; }
+      if (!jeep) {
+        if (Math.hypot(bot.position.x - workshop.x, bot.position.z - workshop.z) > WORKSHOP_REACH - 1) {
+          bot.approachJeep(workshop, ctx, this.tickDt); return true;
+        }
+        const before = new Set(this.jeeps.keys());
+        this.buildJeep(bot.id);
+        jeep = [...this.jeeps.values()].find(j => !before.has(j.id));
+        if (!jeep) { this.finishBotJeepTask(bot, 'unavailable'); return false; }
+        this.botJeepStats.built++;
+        task.jeepId = jeep.id;
+      }
+      if (jeep.wreck || jeep.hp <= JEEP_MAX_HP * 0.3 || jeep.driverId || this.humanNearJeep(bot.team, jeep.position)) {
+        this.finishBotJeepTask(bot, 'unavailable'); return false;
+      }
+      const distance = Math.hypot(bot.position.x - jeep.position.x, bot.position.y - jeep.position.y, bot.position.z - jeep.position.z);
+      if (distance <= JEEP_ENTER_REACH - 0.25) {
+        this.enterJeep(bot.id, jeep.id);
+        if (jeep.driverId === bot.id) {
+          this.botJeepStats.entered++;
+          task.phase = 'drive'; task.lastPosition = { ...jeep.position }; task.lastProgressAt = now;
+        }
+      } else bot.approachJeep(jeep.position, ctx, this.tickDt);
+      return true;
+    }
+
+    const jeep = task.jeepId ? this.jeeps.get(task.jeepId) : undefined;
+    if (!jeep || jeep.driverId !== bot.id || jeep.wreck) {
+      this.finishBotJeepTask(bot, 'unavailable'); return false;
+    }
+    const enemyFlag = bot.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    const distance = Math.hypot(jeep.position.x - enemyFlag.x, jeep.position.z - enemyFlag.z);
+    if (distance < 75 || jeep.hp <= JEEP_MAX_HP * 0.3 || this.roundPhase !== 'live') {
+      this.finishBotJeepTask(bot, distance < 75 ? 'arrived' : 'damaged'); return this.botJeepTasks.has(bot.id);
+    }
+    if (nearHuman && Math.hypot(jeep.position.x - workshop.x, jeep.position.z - workshop.z) < BOT_JEEP_HUMAN_PRIORITY_RADIUS && Math.abs(jeep.speed) < 1) {
+      this.finishBotJeepTask(bot, 'human'); return this.botJeepTasks.has(bot.id);
+    }
+    if (now - task.startedAt > 80) { this.finishBotJeepTask(bot, 'stuck'); return this.botJeepTasks.has(bot.id); }
+
+    if (now - task.lastProgressAt >= 2) {
+      const moved = Math.hypot(jeep.position.x - task.lastPosition.x, jeep.position.z - task.lastPosition.z);
+      task.lastPosition = { ...jeep.position }; task.lastProgressAt = now;
+      if (moved < 1 && task.phase !== 'reverse') {
+        task.recoveries++;
+        if (task.recoveries > 3) { this.finishBotJeepTask(bot, 'stuck'); return this.botJeepTasks.has(bot.id); }
+        this.botJeepStats.recoveries++;
+        task.phase = 'reverse'; task.recoveryUntil = now + 2; task.detour = null;
+      }
+    }
+    if (task.phase === 'reverse') {
+      jeep.throttle = -1; jeep.steering = task.recoveries % 2 ? 1 : -1; jeep.brake = false; jeep.lastInput = now;
+      if (now >= task.recoveryUntil) {
+        const side = task.recoveries % 2 ? 1 : -1;
+        task.detour = { x: jeep.position.x + Math.cos(jeep.yaw) * side * 14, y: jeep.position.y, z: jeep.position.z - Math.sin(jeep.yaw) * side * 14 };
+        task.phase = 'detour'; task.recoveryUntil = now + 6;
+      }
+      return true;
+    }
+    if (task.phase === 'detour' && (now >= task.recoveryUntil || (task.detour && Math.hypot(task.detour.x - jeep.position.x, task.detour.z - jeep.position.z) < 4))) {
+      task.phase = 'drive'; task.detour = null;
+    }
+    const target = task.detour ?? enemyFlag;
+    if (now >= task.nextSteeringAt) {
+      const plan = this.planBotJeepSteering(jeep, target);
+      task.plannedSteering = plan.steering; task.plannedThrottle = plan.throttle;
+      task.nextSteeringAt = now + 0.25;
+    }
+    jeep.steering = task.plannedSteering;
+    jeep.throttle = task.plannedThrottle;
+    jeep.brake = false; jeep.lastInput = now;
+    return true;
+  }
+
+  private assignBotLogisticsTasks(): void {
+    if (this.roundPhase !== 'live') return;
+    for (const team of ['blue', 'red'] as const) {
+      const active = [...this.botLogisticsTasks.keys()].filter(id => this.players.get(id)?.team === team).length;
+      if (active >= BOT_LOGISTICS_PER_TEAM || this.workshopStock[team] >= BOT_LOGISTICS_MIN_STOCK) continue;
+      const candidate = [...this.players.values()].find((p): p is ServerBot =>
+        p instanceof ServerBot && p.team === team && p.isLogistics && !p.isDead && !p.isSpectating &&
+        !p.carryingFlag && !this.botJeepTasks.has(p.id) && !this.botLogisticsTasks.has(p.id) &&
+        !p.stateName.match(/^(TRENCH|BUILD|RETURN|RETREAT|ESCORT)$/),
+      );
+      if (candidate) this.botLogisticsTasks.set(candidate.id, { target: null, phase: 'gather', nextMineAt: 0 });
+    }
+  }
+
+  private updateBotLogisticsTask(bot: ServerBot, ctx: BotContext): boolean {
+    const task = this.botLogisticsTasks.get(bot.id);
+    if (!task) return false;
+    const stock = this.workshopStock[bot.team];
+    const carried = this.depositableBlocks.get(bot.id) ?? 0;
+    const workshop = this.getWorkshops()[bot.team].position;
+    const enemies = ctx.targets.filter(target => !target.isDead && target.team !== bot.team);
+    const threat = enemies.some(enemy => Math.hypot(enemy.position.x - bot.position.x, enemy.position.z - bot.position.z) < 18);
+    if (this.roundPhase !== 'live' || bot.carryingFlag || threat) {
+      this.botLogisticsTasks.delete(bot.id);
+      return false;
+    }
+    if (stock >= BOT_LOGISTICS_MIN_STOCK && carried === 0) {
+      this.botLogisticsTasks.delete(bot.id);
+      return false;
+    }
+    if (carried >= BOT_LOGISTICS_CAPACITY || stock >= BOT_LOGISTICS_MIN_STOCK) task.phase = 'return';
+    if (stock >= WORKSHOP_CAPACITY) {
+      this.botLogisticsTasks.delete(bot.id);
+      return false;
+    }
+    if (task.phase === 'return' && !task.target) task.target = { ...workshop };
+    if (task.phase === 'gather' && carried >= BOT_LOGISTICS_CAPACITY) {
+      task.phase = 'return';
+      task.target = { ...workshop };
+    }
+    if (task.phase === 'gather' && carried > 0 && this.workshopStock[bot.team] >= BOT_LOGISTICS_MIN_STOCK - 1) {
+      task.phase = 'return';
+      task.target = { ...workshop };
+    }
+    if (!task.target) {
+      const bx = Math.round(bot.position.x), bz = Math.round(bot.position.z);
+      let best: Position | null = null, bestDistance = Infinity;
+      for (let dx = -BOT_LOGISTICS_MINE_RADIUS; dx <= BOT_LOGISTICS_MINE_RADIUS; dx++) {
+        for (let dz = -BOT_LOGISTICS_MINE_RADIUS; dz <= BOT_LOGISTICS_MINE_RADIUS; dz++) {
+          const x = bx + dx, z = bz + dz;
+          if (Math.hypot(dx, dz) > BOT_LOGISTICS_MINE_RADIUS || isWorkshopProtectedCell(x, z)) continue;
+          const y = this.world.getGroundHeight(x, z) - 1;
+          const voxel = this.world.getVoxel(x, y, z);
+          if (!voxel || voxel.type === VOXEL_AIR || voxel.type === VOXEL_BUILT) continue;
+          const distance = Math.hypot(x - bot.position.x, z - bot.position.z);
+          if (distance < bestDistance) { best = { x, y, z }; bestDistance = distance; }
+        }
+      }
+      if (!best) { this.botLogisticsTasks.delete(bot.id); return false; }
+      task.target = best;
+    }
+    const target = task.target;
+    if (task.phase === 'gather') {
+      const voxel = this.world.getVoxel(target.x, target.y, target.z);
+      if (!voxel || voxel.type === VOXEL_BUILT || isWorkshopProtectedCell(target.x, target.z)) {
+        task.target = null;
+        return true;
+      }
+    }
+    if (Math.hypot(target.x - bot.position.x, target.z - bot.position.z) > 2.8) {
+      bot.approachJeep(target, ctx, this.tickDt);
+      return true;
+    }
+    if (task.phase === 'return') {
+      if (Math.hypot(bot.position.x - workshop.x, bot.position.y - workshop.y, bot.position.z - workshop.z) > WORKSHOP_REACH) {
+        bot.approachJeep(workshop, ctx, this.tickDt);
+        return true;
+      }
+      this.depositableBlocks.set(bot.id, carried);
+      if (carried > 0) {
+        const deposited = Math.min(carried, WORKSHOP_CAPACITY - this.workshopStock[bot.team]);
+        if (deposited > 0) {
+          this.depositableBlocks.set(bot.id, carried - deposited);
+          this.workshopStock[bot.team] += deposited;
+          this.broadcastWorkshops();
+        }
+      }
+      this.botLogisticsTasks.delete(bot.id);
+      return false;
+    }
+    if (this.world.serverTime >= task.nextMineAt) {
+      const voxel = this.world.getVoxel(target.x, target.y, target.z);
+      if (voxel && voxel.type !== VOXEL_BUILT && !isWorkshopProtectedCell(target.x, target.z)) {
+        const destroyed = this.world.damageVoxel(target.x, target.y, target.z, TOOLS.pickaxe.damage);
+        task.nextMineAt = this.world.serverTime + TOOLS.pickaxe.cooldown;
+        if (destroyed) {
+          this.depositableBlocks.set(bot.id, carried + 1);
+          this.broadcast({ type: 'voxelChanged', change: { x: target.x, y: target.y, z: target.z, type: VOXEL_AIR, durability: 0 } });
+          task.target = carried + 1 >= BOT_LOGISTICS_CAPACITY ? { ...workshop } : null;
+        }
+      } else task.target = null;
+    }
+    return true;
+  }
+
   private updateBots(ctx: BotContext): void {
+    this.assignBotLogisticsTasks();
+    this.assignBotJeepTasks();
     for (const [id, player] of this.players) {
       if (!(player instanceof ServerBot)) continue;
-      if (player.isDead) continue;
+      if (player.isDead) { this.botJeepTasks.delete(id); this.botLogisticsTasks.delete(id); continue; }
+      if (this.updateBotJeepTask(player, ctx)) continue;
+      if (this.updateBotLogisticsTask(player, ctx)) continue;
       // Per-bot view of dropped flags belonging to its own team
       const own = ctx.friendlyDroppedFlagPos;
       const drop = this.droppedFlags.find((f) => f.team === player.team);
@@ -620,6 +1236,7 @@ export class ServerGame {
     this.players.set(playerId, player);
     this.connections.set(playerId, ws);
     this.inventories.set(playerId, 20);
+    this.depositableBlocks.set(playerId, 0);
     
     // Send full init state to the new player
     const existingPlayersList: Array<{ id: string; state: PlayerState }> = [];
@@ -638,7 +1255,10 @@ export class ServerGame {
       stats: Object.fromEntries(
         [...this.playerStats].map(([id, s]) => [id, { ...s }]),
       ),
-      inventory: this.inventories.get(playerId) || 20,
+      inventory: this.inventories.get(playerId) ?? 20,
+      depositable: this.depositableBlocks.get(playerId) ?? 0,
+      workshops: this.getWorkshops(),
+      jeeps: this.jeepSnapshots(),
       voxelChanges: this.world.getModifiedVoxels(),
       // Full authoritative flag snapshot so late joiners see flags that were
       // picked up / dropped / captured BEFORE they connected (events alone
@@ -673,10 +1293,15 @@ export class ServerGame {
     // bails out when the player is already gone, which used to strand the flag
     // on a disconnected ghost carrier and deadlock the round.
     this.dropCarriedFlag(playerId);
+    this.exitJeep(playerId, true);
+    this.botJeepTasks.delete(playerId);
+    this.botJeepCooldown.delete(playerId);
 
     this.players.delete(playerId);
     this.connections.delete(playerId);
     this.inventories.delete(playerId);
+    this.depositableBlocks.delete(playerId);
+    this.joinedPlayers.delete(playerId);
     this.lastShootTime.delete(playerId);
     // Scoreboard tallies and session tokens must not outlive the player: bots
     // churn on every join/leave, so keeping them leaked memory (and bandwidth —
@@ -809,6 +1434,8 @@ export class ServerGame {
 
     switch (message.type) {
       case 'join':
+        if (this.joinedPlayers.has(playerId)) break;
+        this.joinedPlayers.add(playerId);
         // Team selection and the display name come from the client, so both are
         // validated here: an unknown team breaks every comparison downstream,
         // and an unbounded name ends up in logs and on every scoreboard.
@@ -831,11 +1458,9 @@ export class ServerGame {
               return;
             }
           }
-          if (isVec3(message.position)) {
-            player.position = { x: message.position.x, y: message.position.y, z: message.position.z };
-          } else {
-            player.position = this.getSpawnPosition(team);
-          }
+          // Never accept a client-selected spawn: it could bypass workshop reach
+          // and other server-side proximity checks.
+          player.position = this.getSpawnPosition(team);
         }
         // Rejoining connections must never start life dead/eliminated: clear any
         // stale death/spectate state and pending respawn timers from a previous
@@ -848,6 +1473,7 @@ export class ServerGame {
           player.hp = player.maxHp;
           player.isDead = false;
         }
+        this.sendToPlayer(playerId, { type: 'joined', state: player.getState() });
         this.broadcast({
           type: 'playerUpdated',
           playerId,
@@ -864,11 +1490,35 @@ export class ServerGame {
         // Reject movement from dead players (prevents ghost position updates
         // while the respawn timer runs) and spectators (no world presence)
         if (message.input && typeof message.input === 'object'
-          && !player.isDead && !player.isSpectating) {
-          player.applyInput(message.input);
+          && !player.isDead && !player.isSpectating && !this.driverJeep(playerId)) {
+          const pos = message.input.position;
+          if (isVec3(pos) && [...this.jeeps.values()].some(jeep =>
+            Math.abs(pos.y - jeep.position.y) < JEEP_HEIGHT &&
+            Math.hypot(pos.x - jeep.position.x, pos.z - jeep.position.z) < Math.hypot(JEEP_HALF_WIDTH, JEEP_HALF_LENGTH) + 0.45)) {
+            const { position: _blocked, ...input } = message.input;
+            player.applyInput(input);
+          } else player.applyInput(message.input);
         }
         break;
 
+      case 'buildJeep':
+        this.buildJeep(playerId);
+        break;
+      case 'enterJeep':
+        this.enterJeep(playerId, message.vehicleId);
+        break;
+      case 'exitJeep':
+        this.exitJeep(playerId);
+        break;
+      case 'driveJeep': {
+        const jeep = this.driverJeep(playerId);
+        if (!jeep || player.isDead || player.isSpectating || typeof message.throttle !== 'number' || !Number.isFinite(message.throttle) || typeof message.steering !== 'number' || !Number.isFinite(message.steering) || typeof message.brake !== 'boolean') break;
+        jeep.throttle = Math.max(-1, Math.min(1, message.throttle));
+        jeep.steering = Math.max(-1, Math.min(1, message.steering));
+        jeep.brake = message.brake;
+        jeep.lastInput = this.world.serverTime;
+        break;
+      }
       case 'shoot':
         if (!isVec3(message.origin) || !isVec3(message.direction)) break;
         this.handleShoot(playerId, message.origin, message.direction, message.targetId, message.isHeadshot);
@@ -884,8 +1534,12 @@ export class ServerGame {
         this.handleBuild(playerId, message.position);
         break;
 
+      case 'depositWorkshop':
+        this.depositWorkshop(playerId, message.team);
+        break;
+
       case 'reload':
-        if (player.startReload()) {
+        if (!this.driverJeep(playerId) && player.startReload()) {
           this.broadcast({
             type: 'playerUpdated',
             playerId,
@@ -905,7 +1559,7 @@ export class ServerGame {
       case 'toggleSpectator':
         // A spectator is frozen out of play, so a flag they were carrying would
         // be stranded on a non-moving player forever — drop it first.
-        if (!player.isSpectating) this.dropCarriedFlag(playerId);
+        if (!player.isSpectating) { this.dropCarriedFlag(playerId); this.exitJeep(playerId, true); }
         player.isSpectating = !player.isSpectating;
         this.broadcast({
           type: 'spectatorToggled',
@@ -938,6 +1592,7 @@ export class ServerGame {
         // the very first tick ("instant elimination on join" bug).
         {
           if (!player.isDead) {
+            if (this.driverJeep(playerId)) break;
             // Already alive: the server owns this player's position. Re-assert
             // it so a client that wrongly believes it died (e.g. a local
             // void-fall) recovers, but never teleport a live player back to
@@ -967,6 +1622,7 @@ export class ServerGame {
           // fire redundantly on top of this one.
           this.respawnTimers.delete(playerId);
           this.inventories.set(playerId, 20);
+          this.resetResources(playerId);
           this.broadcast({
             type: 'playerRespawned',
             playerId,
@@ -998,7 +1654,7 @@ export class ServerGame {
 
   private handleShoot(playerId: string, origin: Position, direction: Position, clientTargetId?: string, clientIsHeadshot?: boolean): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating) return;
+    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
 
     // The muzzle position and direction are client-supplied. Require the shot
     // to start at the shooter's own eye position (tolerance covers one tick of
@@ -1054,6 +1710,7 @@ export class ServerGame {
     // Raycast to find terrain hit distance (extended battlefield bullet range)
     const hit = this.world.raycast(origin, direction, 350);
     const maxDist = hit ? hit.distance : 350;
+    const vehicleHit = this.hitJeep(origin, direction, maxDist, player.team);
 
     // Suppression awareness: enemies within ~2m of the bullet's path were
     // nearly hit — bot victims react by seeking/digging cover ("pinned down").
@@ -1143,6 +1800,11 @@ export class ServerGame {
           }
         }
       }
+    }
+
+    if (vehicleHit && (!confirmedTarget || vehicleHit.distance < confirmedTarget.distance)) {
+      this.damageJeep(vehicleHit.jeep, weaponDamage(weapon, false, vehicleHit.distance));
+      return;
     }
 
     if (confirmedTarget) {
@@ -1258,7 +1920,19 @@ export class ServerGame {
 
   private handleUseTool(playerId: string, tool: 'pickaxe' | 'spade', target: Position): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating) return;
+    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
+
+    if ((tool !== 'pickaxe' && tool !== 'spade') || player.equipment !== tool) return;
+    const { x, y, z } = target;
+    if (![x, y, z].every(Number.isInteger) || isWorkshopProtectedCell(x, z)) return;
+    const eye = { x: player.position.x, y: player.position.y + 1.45, z: player.position.z };
+    const dx = x - eye.x, dy = y - eye.y, dz = z - eye.z;
+    const distance = Math.hypot(dx, dy, dz);
+    if (distance > 6 || distance < 0.01) return;
+    const hit = this.world.raycast(eye, { x: dx / distance, y: dy / distance, z: dz / distance }, distance + 0.9);
+    if (!hit || hit.voxelPos.x !== x || hit.voxelPos.y !== y || hit.voxelPos.z !== z) return;
+    const original = this.world.getVoxel(x, y, z);
+    if (!original) return;
 
     const now = Date.now() / 1000;
     const toolData = TOOLS[tool];
@@ -1268,17 +1942,19 @@ export class ServerGame {
     
     this.lastToolTime.set(playerId, now);
 
-    const { x, y, z } = target;
     const destroyed = this.world.damageVoxel(x, y, z, toolData.damage);
     
     if (destroyed) {
       if (toolData.harvests) {
-        const inventory = (this.inventories.get(playerId) || 0) + 1;
-        this.inventories.set(playerId, inventory);
-        this.sendToPlayer(playerId, {
-          type: 'inventoryUpdated',
-          inventory,
-        });
+        if (original.type === VOXEL_BUILT) {
+          const inventory = (this.inventories.get(playerId) ?? 0) + 1;
+          this.inventories.set(playerId, inventory);
+          this.sendToPlayer(playerId, { type: 'inventoryUpdated', inventory });
+        } else {
+          const depositable = (this.depositableBlocks.get(playerId) ?? 0) + 1;
+          this.depositableBlocks.set(playerId, depositable);
+          this.sendToPlayer(playerId, { type: 'resourcesUpdated', depositable });
+        }
       }
       
       const voxel = this.world.getVoxel(x, y, z);
@@ -1320,6 +1996,8 @@ export class ServerGame {
 
   private canBuildAt(x: number, y: number, z: number): boolean {
     if (!this.world.canBuild(x, y, z)) return false;
+    const radius = Math.hypot(JEEP_HALF_WIDTH, JEEP_HALF_LENGTH);
+    if ([...this.jeeps.values()].some(jeep => Math.abs(y - jeep.position.y) < JEEP_HEIGHT + 0.5 && Math.hypot(x - jeep.position.x, z - jeep.position.z) < radius + 0.71)) return false;
     
     // Check if block intersects any connected player
     for (const player of this.players.values()) {
@@ -1339,10 +2017,11 @@ export class ServerGame {
 
   private handleBuild(playerId: string, position: Position): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating) return;
+    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
 
-    const inventory = this.inventories.get(playerId) || 0;
-    if (inventory <= 0) return;
+    const inventory = this.inventories.get(playerId) ?? 0;
+    const depositable = this.depositableBlocks.get(playerId) ?? 0;
+    if (inventory + depositable <= 0) return;
 
     const { x, y, z } = position;
 
@@ -1358,12 +2037,13 @@ export class ServerGame {
 
     if (this.canBuildAt(x, y, z)) {
       this.world.setVoxel(x, y, z, 4, 3); // VOXEL_BUILT
-      this.inventories.set(playerId, inventory - 1);
-      
-      this.sendToPlayer(playerId, {
-        type: 'inventoryUpdated',
-        inventory: inventory - 1,
-      });
+      if (inventory > 0) {
+        this.inventories.set(playerId, inventory - 1);
+        this.sendToPlayer(playerId, { type: 'inventoryUpdated', inventory: inventory - 1 });
+      } else {
+        this.depositableBlocks.set(playerId, depositable - 1);
+        this.sendToPlayer(playerId, { type: 'resourcesUpdated', depositable: depositable - 1 });
+      }
       
       this.broadcast({
         type: 'voxelChanged',
@@ -1381,7 +2061,7 @@ export class ServerGame {
   private handleFlagPickup(playerId: string): void {
     if (this.roundPhase !== 'live') return; // no objective play between rounds
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating) return;
+    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
 
     // Check if player is already carrying a flag
     if (this.blueFlagCarrier === playerId || this.redFlagCarrier === playerId) {
@@ -1471,7 +2151,7 @@ export class ServerGame {
   private handleFlagCapture(playerId: string): void {
     if (this.roundPhase !== 'live') return; // clock already stopped this round
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating) return;
+    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
 
     // Validation: only a LIVE player who is actually carrying the enemy flag
     // AND standing at their home base may score. This blocks malicious or
@@ -1566,6 +2246,7 @@ export class ServerGame {
 
     this.clearSpawnProtection(playerId);
     this.dropCarriedFlag(playerId);
+    this.exitJeep(playerId, true);
   }
 
   update(dt: number): void {
@@ -1574,6 +2255,7 @@ export class ServerGame {
 
     // Round clock + phase transitions (live -> intermission -> next round)
     this.updateRound(dt);
+    this.updateJeeps(dt);
 
     // Clear stale shooting flags once the 100ms window has elapsed.
     // Done in the game loop instead of per-shot setTimeout so state stays
@@ -1599,6 +2281,7 @@ export class ServerGame {
             this.grantSpawnProtection(playerId);
             // Restore build inventory on respawn (matches join-time value)
             this.inventories.set(playerId, 20);
+            this.resetResources(playerId);
             if (player instanceof ServerBot) {
               player.refillBlocks();
             }
@@ -1623,6 +2306,7 @@ export class ServerGame {
     for (const player of this.players.values()) {
       if (player instanceof ServerBot) continue; // handled below via botUpdate
       player.update(dt, this.world);
+      if (this.driverJeep(player.id)) continue;
       
       // Check and broadcast footstep sounds
       const footstepData = player.getFootstepData(this.world);
@@ -1701,7 +2385,7 @@ export class ServerGame {
   
   private checkFlagCaptures(): void {
     for (const [playerId, player] of this.players) {
-      if (player.isDead || player.isSpectating) continue;
+      if (player.isDead || player.isSpectating || this.driverJeep(playerId)) continue;
 
       if (!player.carryingFlag) {
         // Auto-check flag pickup

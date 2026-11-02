@@ -3,7 +3,7 @@ import { VoxelWorld, VOXEL_BUILT, VOXEL_SIZE, WORLD_SIZE, CHUNK_SIZE } from './w
 import { Player } from './player';
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
-import { PlayerState, PlayerInput, Position, PlayerStats } from '../shared/types';
+import { PlayerState, PlayerInput, Position, PlayerStats, Workshops, JeepSnapshot } from '../shared/types';
 // Local copies previously drifted from the server (shared/types) values;
 // now sourced from the shared module so client and server agree on spawns/flags.
 import {
@@ -19,6 +19,8 @@ import {
   DEFAULT_ROUND_MINUTES,
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
+  WORKSHOP_REACH, JEEP_ENTER_REACH,
+  isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
   type RoundSnapshot,
@@ -96,7 +98,7 @@ const TEXTURE_SCALE = 16;
 
 export type EquipmentType = 'rifle' | 'smg' | 'spade' | 'pickaxe';
 type Team = 'red' | 'blue';
-type GameMode = 'multiplayer' | 'singleplayer' | 'online';
+type GameMode = 'multiplayer' | 'singleplayer' | 'online' | 'beta';
 
 export interface RadioMessage {
   id: string;
@@ -111,6 +113,14 @@ export interface GameState {
   maxHp: number;
   equipment: EquipmentType;
   inventory: number;
+  depositable: number;
+  workshopStock: number;
+  workshopCapacity: number;
+  workshopDistance: number | null;
+  jeepNearby: boolean;
+  jeepDriving: boolean;
+  jeepHp: number;
+  jeepSpeed: number;
   isDead: boolean;
   respawnTimer: number;
   hitMarker: boolean;
@@ -319,6 +329,13 @@ export class Game {
   bots: Bot[] = [];
   equipment: EquipmentType = 'rifle';
   inventory: number = 0;
+  depositable: number = 0;
+  workshops: Workshops | null = null;
+  private workshopMeshes: THREE.Group[] = [];
+  private jeeps = new Map<string, { state: JeepSnapshot; mesh: THREE.Group }>();
+  private drivingJeepId: string | null = null;
+  private lastDriveInput = 0;
+  private jeepBrake = false;
   lastActionTime: number = 0;
   isMouseDown: boolean = false;
   // Separate per-button state so right-click (build/aim) never triggers the
@@ -457,8 +474,13 @@ export class Game {
   captureZoneSize: number = 4;
 
   gameMode: GameMode = 'multiplayer';
+  /** True when launched from Beta Development Mode: rides the same
+   *  authoritative server simulation as online mode (workshops, jeeps,
+   *  logistics bots) but keeps a distinct label for the HUD. */
+  betaLabel: boolean = false;
 
   networkClient: NetworkClient | null = null;
+  private onlineJoinConfirmed = false;
   serverUrl?: string;
   playerName?: string;
   /** Timestamp (ms) of the last client-initiated respawn request — used by the
@@ -530,6 +552,12 @@ export class Game {
     // Keep the HUD audio control in sync with the M-key shortcut.
     this.sounds.onSettingsChange(() => this.emitState());
     this.gameMode = mode;
+    this.betaLabel = mode === 'beta';
+    // Beta has no client-side simulation of its own: every vehicle, workshop
+    // and logistics behavior lives in the authoritative ServerGame, so Beta
+    // rides the same network-driven code path online mode uses. Set before
+    // the checks below so spawn/respawn/mining/flag/jeep handling all apply.
+    if (mode === 'beta') this.gameMode = 'online';
     this.playerTeam = team;
     this.serverUrl = serverUrl;
     this.playerName = playerName;
@@ -635,7 +663,7 @@ export class Game {
     this.boundKeyUp = this.onKeyUp.bind(this);
     // If the window loses focus while Tab is held, keyup never arrives —
     // clear the flag so the scoreboard can't get stuck open.
-    this.boundBlur = () => { this.tabHeld = false; };
+    this.boundBlur = () => { this.tabHeld = false; if (this.drivingJeepId) { this.player.clearKeys(); this.jeepBrake = false; } };
     this.boundMouseMove = this.onMouseMove.bind(this);
     // Stored (not an inline arrow) so destroy() can remove it; the inline version
     // leaked one listener per game instance.
@@ -673,6 +701,109 @@ export class Game {
 
   }
 
+
+  private renderWorkshops(workshops: Workshops): void {
+    for (const group of this.workshopMeshes) {
+      this.scene.remove(group);
+      group.traverse(object => {
+        if (object instanceof THREE.Mesh) {
+          object.geometry.dispose();
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          materials.forEach(material => material.dispose());
+        }
+      });
+    }
+    this.workshopMeshes = [];
+    for (const team of ['blue', 'red'] as const) {
+      const { position } = workshops[team];
+      const group = new THREE.Group();
+      group.position.set(position.x, position.y, position.z);
+      const box = (width: number, height: number, depth: number, x: number, y: number, z: number, color: number) => {
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), new THREE.MeshStandardMaterial({ color, roughness: 0.85 }));
+        mesh.position.set(x, y, z);
+        group.add(mesh);
+      };
+      const color = team === 'blue' ? 0x2859bc : 0xb62e2e;
+      box(8, 0.35, 8, 0, 0, 0, 0x555b63);
+      box(8, 3.4, 0.7, 0, 1.8, -3.7, color);
+      box(0.7, 3.4, 8, -3.7, 1.8, 0, color);
+      box(0.7, 3.4, 8, 3.7, 1.8, 0, color);
+      box(8, 0.55, 8, 0, 3.7, 0, 0x333c49);
+      box(5, 0.8, 0.3, 0, 3, 3.7, 0xf0ca48);
+      box(8, 0.18, 8, 11, 0, 0, 0x777c80);
+      box(2.3, 1.1, 1.3, 0, 0.7, 0, 0xa27140);
+      this.scene.add(group);
+      this.workshopMeshes.push(group);
+    }
+  }
+
+  private applyJeeps(states: JeepSnapshot[]): void {
+    const ids = new Set(states.map(state => state.id));
+    for (const [id, jeep] of this.jeeps) {
+      if (!ids.has(id)) {
+        this.scene.remove(jeep.mesh);
+        jeep.mesh.traverse(object => {
+          if (object instanceof THREE.Mesh) {
+            object.geometry.dispose();
+            const materials = Array.isArray(object.material) ? object.material : [object.material];
+            materials.forEach(material => material.dispose());
+          }
+        });
+        this.jeeps.delete(id);
+      }
+    }
+    for (const state of states) {
+      let jeep = this.jeeps.get(state.id);
+      if (!jeep) {
+        const mesh = new THREE.Group();
+        const box = (w: number, h: number, d: number, x: number, y: number, z: number, color: number) => {
+          const part = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color, roughness: 0.8 }));
+          part.position.set(x, y, z); mesh.add(part);
+        };
+        const color = state.team === 'blue' ? 0x335ec4 : 0xb83535;
+        box(2, 0.65, 3.4, 0, 0.9, 0, color);
+        box(1.8, 0.45, 1.15, 0, 1.42, -1, color);
+        box(1.8, 0.4, 0.7, 0, 1.45, 1, color);
+        box(1.65, 0.65, 0.12, 0, 1.8, -0.35, 0xaad8ee);
+        for (const x of [-1.15, 1.15]) for (const z of [-1.1, 1.1]) box(0.65, 0.85, 0.85, x, 0.5, z, 0x252930);
+        box(0.45, 0.25, 0.12, -0.65, 1, -1.76, 0xffdf77);
+        box(0.45, 0.25, 0.12, 0.65, 1, -1.76, 0xffdf77);
+        mesh.position.set(state.position.x, state.position.y, state.position.z);
+        mesh.rotation.y = state.yaw;
+        this.scene.add(mesh);
+        jeep = { state, mesh }; this.jeeps.set(state.id, jeep);
+      }
+      jeep.state = state;
+      jeep.mesh.traverse(object => {
+        if (object instanceof THREE.Mesh && state.wreck) (object.material as THREE.MeshStandardMaterial).color.setHex(0x3b3b3b);
+      });
+    }
+    const occupied = new Set(states.map(state => state.driverId).filter((id): id is string => !!id));
+    for (const [id, remote] of this.remotePlayers) remote.mesh.visible = !remote.state.isDead && !occupied.has(id);
+    const driving = states.find(state => state.driverId === this.localPlayerId && !state.wreck);
+    if (driving && this.drivingJeepId !== driving.id) {
+      this.drivingJeepId = driving.id;
+      this.player.clearKeys(); this.jeepBrake = false;
+      this.isLeftDown = false; this.isRightDown = false;
+      this.weaponContainer.visible = false;
+    }
+    if (!driving && this.drivingJeepId) {
+      this.drivingJeepId = null;
+      this.player.clearKeys();
+      this.weaponContainer.visible = !this.isSpectating;
+    }
+  }
+
+  private nearestJeep(): JeepSnapshot | null {
+    let closest: JeepSnapshot | null = null;
+    let distance = JEEP_ENTER_REACH;
+    for (const { state } of this.jeeps.values()) {
+      if (state.team !== this.playerTeam || state.wreck || state.driverId) continue;
+      const d = this.player.position.distanceTo(new THREE.Vector3(state.position.x, state.position.y, state.position.z));
+      if (d < distance) { distance = d; closest = state; }
+    }
+    return closest;
+  }
 
   private getSafeSpawnPos(team: Team): THREE.Vector3 {
     const zMin = team === 'blue' ? BLUE_SPAWN_Z_MIN : RED_SPAWN_Z_MIN;
@@ -1823,11 +1954,12 @@ export class Game {
       // terrain / voids and get eliminated on the first tick. Request a
       // server-authoritative safe spawn immediately instead, before any
       // playerInput frame can push the old position back to the server.
+      this.onlineJoinConfirmed = false;
       this.networkClient!.sendJoin(this.playerTeam, undefined, this.playerName);
-      this.networkClient!.sendRequestRespawn();
     });
 
     this.networkClient.onDisconnect(() => {
+      this.onlineJoinConfirmed = false;
       this.showMessage('Disconnected from server. Reconnecting...');
     });
 
@@ -1867,9 +1999,8 @@ export class Game {
         this.player.respawnTimer = 0;
         this.player.hp = typeof st.hp === 'number' ? Math.max(st.hp, 1) : 100;
         this.spawnProtected = !!st.spawnProtected;
-        if (st.team === 'red' || st.team === 'blue') {
-          this.playerTeam = st.team;
-        }
+        // init is sent before the server processes our team selection.
+        // Keep the selected team until the authoritative join update arrives.
         this.player.updateCamera();
       }
       if (msg.captures) {
@@ -1891,6 +2022,12 @@ export class Game {
       if (typeof msg.inventory === 'number') {
         this.inventory = msg.inventory;
       }
+      this.depositable = typeof msg.depositable === 'number' ? msg.depositable : 0;
+      if (msg.workshops) {
+        this.workshops = msg.workshops as Workshops;
+        this.renderWorkshops(this.workshops);
+      }
+      this.applyJeeps(Array.isArray(msg.jeeps) ? msg.jeeps : []);
       // Apply authoritative flag snapshot (late-joiner sync)
       if (msg.flags) {
         const applyFlagSnapshot = (team: 'blue' | 'red') => {
@@ -1958,6 +2095,18 @@ export class Game {
       this.showMessage(`🟢 Online Match Ready! (${this.playerTeam.toUpperCase()} Team)`);
     });
 
+    this.networkClient.onMessage('joined', (msg: any) => {
+      const state = msg.state as PlayerState;
+      if (!state?.position || (state.team !== 'red' && state.team !== 'blue')) return;
+      this.playerTeam = state.team;
+      this.player.team = state.team;
+      this.player.position.set(state.position.x, state.position.y, state.position.z);
+      this.player.velocity.set(0, 0, 0);
+      this.player.yaw = state.team === 'blue' ? Math.PI : 0;
+      this.player.updateCamera();
+      this.onlineJoinConfirmed = true;
+    });
+
     // Handle player joined
     this.networkClient.onMessage('playerJoined', (msg: any) => {
       if (msg.playerId === this.localPlayerId) return;
@@ -2001,7 +2150,7 @@ export class Game {
           remote.mesh = mesh;
         }
         remote.state = msg.state;
-        remote.mesh.visible = !msg.state.isDead;
+        remote.mesh.visible = !msg.state.isDead && ![...this.jeeps.values()].some(jeep => jeep.state.driverId === msg.playerId);
         remote.targetPosition.set(msg.state.position.x, msg.state.position.y, msg.state.position.z);
         remote.targetRotation.set(0, msg.state.rotation.yaw, 0, 'YXZ');
       }
@@ -2163,6 +2312,30 @@ export class Game {
       if (typeof msg.inventory === 'number') {
         this.inventory = msg.inventory;
       }
+    });
+
+    this.networkClient.onMessage('resourcesUpdated', (msg: any) => {
+      this.depositable = msg.depositable;
+    });
+    this.networkClient.onMessage('workshopsUpdated', (msg: any) => {
+      this.workshops = msg.workshops as Workshops;
+    });
+
+    this.networkClient.onMessage('jeepsUpdated', (msg: any) => {
+      if (Array.isArray(msg.jeeps)) this.applyJeeps(msg.jeeps as JeepSnapshot[]);
+    });
+    this.networkClient.onMessage('jeepExited', (msg: any) => {
+      this.drivingJeepId = null;
+      this.player.clearKeys();
+      this.weaponContainer.visible = !this.isSpectating;
+      if (msg.position) {
+        this.player.position.set(msg.position.x, msg.position.y, msg.position.z);
+        this.player.velocity.set(0, 0, 0);
+        this.player.updateCamera();
+      }
+    });
+    this.networkClient.onMessage('jeepMessage', (msg: any) => {
+      if (typeof msg.message === 'string') this.showMessage(msg.message);
     });
 
     // Handle flag pickup
@@ -2516,6 +2689,7 @@ export class Game {
   }
 
   private onMouseDown(e: MouseEvent): void {
+    if (this.drivingJeepId) return;
     if (this.isSpectating) {
       // In spectator mode, clicking/dragging steers the camera only —
       // spectators must never fire or build.
@@ -2636,6 +2810,31 @@ export class Game {
       return; // Do NOT pass input to player
     }
 
+    if (this.gameMode === 'online' && !this.player.isDead && !e.repeat && e.code === 'KeyF') {
+      if (this.drivingJeepId) this.networkClient?.send({ type: 'exitJeep' });
+      else {
+        const jeep = this.nearestJeep();
+        if (jeep) this.networkClient?.send({ type: 'enterJeep', vehicleId: jeep.id });
+      }
+      return;
+    }
+    if (this.drivingJeepId) {
+      if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code)) { e.preventDefault(); if (e.code !== 'Space') this.player.handleKeyDown(e.code); else this.jeepBrake = true; }
+      return;
+    }
+    if (e.code === 'KeyG' && !e.repeat && this.gameMode === 'online' && !this.player.isDead && this.workshops) {
+      const pos = this.workshops[this.playerTeam].position;
+      if (this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH) this.networkClient?.send({ type: 'buildJeep' });
+      return;
+    }
+    if (e.code === 'KeyE' && !e.repeat && this.gameMode === 'online' && !this.player.isDead && this.workshops) {
+      const pos = this.workshops[this.playerTeam].position;
+      if (this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH) {
+        this.networkClient?.send({ type: 'depositWorkshop', team: this.playerTeam });
+      }
+      return;
+    }
+
     // Normal player mode controls:
     if (e.code === 'Digit1') { this.equipment = 'rifle'; this.switchWeaponModel('rifle'); this.isAiming = false; this.player.isAiming = false; }
     if (e.code === 'Digit2') { this.equipment = 'smg'; this.switchWeaponModel('smg'); this.isAiming = false; this.player.isAiming = false; }
@@ -2647,6 +2846,7 @@ export class Game {
   }
 
   private onKeyUp(e: KeyboardEvent): void {
+    if (e.code === 'Space') this.jeepBrake = false;
     if (e.code === 'Tab') {
       this.tabHeld = false;
       return;
@@ -2687,6 +2887,7 @@ export class Game {
       }
       return;
     }
+    if (this.drivingJeepId) return;
     if (document.pointerLockElement) {
       this.player.handleMouseMove(e.movementX, e.movementY);
     } else if (this.isMouseDown) {
@@ -2988,7 +3189,7 @@ export class Game {
     } else if (hit && closestTargetDist >= voxelDist - 0.2) {
       // Hit a voxel in the world
       const voxel = this.world.getVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z);
-      if (voxel) {
+      if (voxel && this.gameMode !== 'online') {
         const result = this.world.damageVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 1);
         if (result.destroyed) {
           this.sounds.pickaxeHit();
@@ -3038,13 +3239,14 @@ export class Game {
     const hit = this.world.raycast(origin, dir, 5);
     
     if (hit) {
-      const result = this.world.damageVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 3);
-      if (result.destroyed) {
-        this.inventory++;
-        this.sounds.pickaxeHit();
-      }
-      if (this.networkClient && this.networkClient.isConnected()) {
-        this.networkClient.sendUseTool('pickaxe', { x: hit.voxelPos.x, y: hit.voxelPos.y, z: hit.voxelPos.z });
+      if (this.gameMode === 'online') {
+        this.networkClient?.sendUseTool('pickaxe', { x: hit.voxelPos.x, y: hit.voxelPos.y, z: hit.voxelPos.z });
+      } else {
+        const result = this.world.damageVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 3);
+        if (result.destroyed) {
+          this.inventory++;
+          this.sounds.pickaxeHit();
+        }
       }
     }
   }
@@ -3063,6 +3265,11 @@ export class Game {
       const vy = hit.voxelPos.y;
       const vz = hit.voxelPos.z;
       
+      if (this.gameMode === 'online') {
+        this.networkClient?.sendUseTool('spade', { x: vx, y: vy, z: vz });
+        return;
+      }
+
       // Destroy target voxel
       const result1 = this.world.damageVoxel(vx, vy, vz, 3);
       if (result1.destroyed) {
@@ -3076,9 +3283,6 @@ export class Game {
       }
       
       this.sounds.spadeHit();
-      if (this.networkClient && this.networkClient.isConnected()) {
-        this.networkClient.sendUseTool('spade', { x: vx, y: vy, z: vz });
-      }
     }
   }
 
@@ -3234,7 +3438,7 @@ export class Game {
   }
 
   private tryBuild(): void {
-    if (this.inventory <= 0) return;
+    if (this.inventory + (this.gameMode === 'online' ? this.depositable : 0) <= 0) return;
     
     const dir = this.player.getAimDirection();
     const origin = this.player.camera.position.clone();
@@ -3245,13 +3449,16 @@ export class Game {
       const py = hit.voxelPos.y + Math.round(hit.normal.y);
       const pz = hit.voxelPos.z + Math.round(hit.normal.z);
       
+      if (this.gameMode === 'online') {
+        if (!isWorkshopProtectedCell(px, pz) && !this.world.isSolid(px, py, pz) && this.canPlaceBlock(px, py, pz)) {
+          this.networkClient?.sendBuild({ x: px, y: py, z: pz });
+        }
+        return;
+      }
       if (!this.world.isSolid(px, py, pz) && this.canPlaceBlock(px, py, pz)) {
         this.world.setVoxel(px, py, pz, VOXEL_BUILT, 3);
         this.inventory--;
         this.sounds.buildPlace();
-        if (this.networkClient && this.networkClient.isConnected()) {
-          this.networkClient.sendBuild({ x: px, y: py, z: pz });
-        }
         
         // Add instant visual feedback - flash the placed block
         this.createBlockPlacementEffect(px, py, pz);
@@ -3494,7 +3701,7 @@ export class Game {
     }
     // Restore build blocks on respawn (server also sends inventoryUpdated=20
     // in online mode; local games have no server so set it here too)
-    this.inventory = Math.max(this.inventory, 20);
+    if (this.gameMode !== 'online') this.inventory = Math.max(this.inventory, 20);
     this.player.carryingFlag = false;
     this.isReloadAnimating = false;
     this.reloadAnimationTime = 0;
@@ -3539,7 +3746,25 @@ export class Game {
       this.networkClient.sendRequestRespawn();
     }
 
-    this.player.update(dt);
+    const driving = this.drivingJeepId ? this.jeeps.get(this.drivingJeepId) : undefined;
+    if (driving && !this.isSpectating && !this.player.isDead) {
+      const state = driving.state;
+      this.player.position.set(state.position.x, state.position.y, state.position.z);
+      this.player.velocity.set(0, 0, 0);
+      const back = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw));
+      this.player.camera.position.set(state.position.x + back.x * 7, state.position.y + 4, state.position.z + back.z * 7);
+      this.player.camera.lookAt(state.position.x - back.x * 3, state.position.y + 1.4, state.position.z - back.z * 3);
+      const now = performance.now();
+      if (now - this.lastDriveInput > 80) {
+        this.lastDriveInput = now;
+        this.networkClient?.send({ type: 'driveJeep', throttle: (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0), steering: (this.player.hasKey('KeyA') ? 1 : 0) - (this.player.hasKey('KeyD') ? 1 : 0), brake: this.jeepBrake });
+      }
+    } else this.player.update(dt);
+    for (const { state, mesh } of this.jeeps.values()) {
+      mesh.position.lerp(new THREE.Vector3(state.position.x, state.position.y, state.position.z), Math.min(dt * 14, 1));
+      const delta = Math.atan2(Math.sin(state.yaw - mesh.rotation.y), Math.cos(state.yaw - mesh.rotation.y));
+      mesh.rotation.y += delta * Math.min(dt * 14, 1);
+    }
     this.world.update();
 
     // Continuous fire for SMG and tools while holding the LEFT mouse button.
@@ -3704,8 +3929,8 @@ export class Game {
     this.updateFlags(dt);
     this.updateBots(dt);
 
-    // Send network player input to server
-    if (this.networkClient && this.networkClient.isConnected() && !this.player.isDead) {
+    // Wait for the server to confirm our requested team before sending positions.
+    if (this.networkClient && this.networkClient.isConnected() && this.onlineJoinConfirmed && !this.player.isDead && !this.drivingJeepId) {
       const now = performance.now();
       if (now - this.lastInputSendTime > this.inputSendRate) {
         this.lastInputSendTime = now;
@@ -5294,7 +5519,19 @@ export class Game {
         hp: this.player.hp,
         maxHp: this.player.maxHp,
         equipment: this.equipment,
-        inventory: this.inventory,
+        inventory: this.inventory + (this.gameMode === 'online' ? this.depositable : 0),
+        depositable: this.depositable,
+        workshopStock: this.workshops?.[this.playerTeam].stock ?? 0,
+        workshopCapacity: this.workshops?.[this.playerTeam].capacity ?? 0,
+        jeepNearby: !!this.nearestJeep(),
+        jeepDriving: !!this.drivingJeepId,
+        jeepHp: this.drivingJeepId ? (this.jeeps.get(this.drivingJeepId)?.state.hp ?? 0) : 0,
+        jeepSpeed: this.drivingJeepId ? (this.jeeps.get(this.drivingJeepId)?.state.speed ?? 0) : 0,
+        workshopDistance: this.workshops ? this.player.position.distanceTo(new THREE.Vector3(
+          this.workshops[this.playerTeam].position.x,
+          this.workshops[this.playerTeam].position.y,
+          this.workshops[this.playerTeam].position.z,
+        )) : null,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,
         hitMarker: this.hitMarkerTimer > 0,
@@ -5302,7 +5539,7 @@ export class Game {
         message: this.message,
         messageTimer: this.messageTimer,
         buildMode: false,  // Always false with instant placement
-        buildValid: this.inventory > 0,
+        buildValid: this.inventory + (this.gameMode === 'online' ? this.depositable : 0) > 0,
         blueKills: this.blueKills,
         redKills: this.redKills,
         blueCaptures: this.blueCaptures,

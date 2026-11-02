@@ -18,6 +18,9 @@ const game = new ServerGame();
 const stats = { pickups: 0, captures: 0, returns: 0, deaths: 0, byTeam: { red: 0, blue: 0 } };
 // Structure starts/usage + stuck recoveries, observed per bot.
 let recoveries = 0;
+let jeepDriverTicks = 0;
+let jeepDrivingDistance = 0;
+const lastJeepPositions = new Map();
 const lastRecoveryByBot = new Map();
 const carriers = new Set();
 
@@ -30,6 +33,17 @@ const started = Date.now();
 
 for (let tick = 1; tick <= ticks; tick++) {
   game.update(1 / 20);
+
+  const activeJeeps = new Set();
+  for (const [id, jeep] of game.jeeps) {
+    if (!jeep.driverId || !game.players.get(jeep.driverId)?.isBotFlag) continue;
+    activeJeeps.add(id);
+    jeepDriverTicks++;
+    const last = lastJeepPositions.get(id);
+    if (last) jeepDrivingDistance += Math.hypot(jeep.position.x - last.x, jeep.position.z - last.z);
+    lastJeepPositions.set(id, { ...jeep.position });
+  }
+  for (const id of lastJeepPositions.keys()) if (!activeJeeps.has(id)) lastJeepPositions.delete(id);
 
   for (const [id, player] of game.players) {
     if (player.carryingFlag && !carriers.has(id)) {
@@ -87,5 +101,6 @@ console.log(JSON.stringify({
   blocksPlaced,
   structuresCompleted,
   recoveries,
+  botJeeps: { ...game.botJeepStats, driverSeconds: Number((jeepDriverTicks / 20).toFixed(1)), distanceMeters: Number(jeepDrivingDistance.toFixed(1)) },
   simSeconds: Number(elapsed),
 }, null, 2));

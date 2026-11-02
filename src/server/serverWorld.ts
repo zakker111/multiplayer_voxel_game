@@ -11,6 +11,8 @@ import {
   VOXEL_BUILT,
   Position,
   VoxelChange,
+  isWorkshopProtectedCell,
+  WORKSHOP_CENTERS,
 } from '../shared/types';
 
 interface VoxelData {
@@ -32,6 +34,7 @@ export class ServerWorld {
   constructor() {
     this.isGeneratingTerrain = true;
     this.generateTerrain();
+    this.levelWorkshopSites();
     this.isGeneratingTerrain = false;
     console.log('Server world initialized');
   }
@@ -85,6 +88,25 @@ export class ServerWorld {
     console.log('Terrain generated');
   }
 
+  /** A flat, immutable floor for the workshop and its future vehicle pad.
+   *  Record changes so clients with the original procedural terrain receive it. */
+  private levelWorkshopSites(): void {
+    for (const center of Object.values(WORKSHOP_CENTERS)) {
+      for (let x = center.x - 5; x <= center.x + 17; x++) {
+        for (let z = center.z - 7; z <= center.z + 7; z++) {
+          for (let y = GROUND_LEVEL - 1; y <= GROUND_LEVEL + 2; y++) {
+            const desired = y < GROUND_LEVEL ? VOXEL_DIRT : y === GROUND_LEVEL ? VOXEL_GRASS : VOXEL_AIR;
+            const existing = this.getVoxel(x, y, z);
+            if ((existing?.type ?? VOXEL_AIR) === desired) continue;
+            const durability = desired === VOXEL_AIR ? 0 : 3;
+            this.setVoxel(x, y, z, desired, durability);
+            this.modifiedVoxels.set(this.getVoxelKey(x, y, z), { x, y, z, type: desired, durability });
+          }
+        }
+      }
+    }
+  }
+
   getVoxel(x: number, y: number, z: number): VoxelData | null {
     const { chunkX, chunkZ } = this.getChunkCoords(x, z);
     const chunk = this.chunks.get(this.getChunkKey(chunkX, chunkZ));
@@ -94,6 +116,7 @@ export class ServerWorld {
   }
 
   setVoxel(x: number, y: number, z: number, type: number, durability: number = 3): void {
+    if (!this.isGeneratingTerrain && isWorkshopProtectedCell(x, z)) return;
     const { chunkX, chunkZ } = this.getChunkCoords(x, z);
     const chunk = this.getOrCreateChunk(chunkX, chunkZ);
     
@@ -169,6 +192,7 @@ export class ServerWorld {
   }
 
   canBuild(x: number, y: number, z: number): boolean {
+    if (isWorkshopProtectedCell(x, z)) return false;
     // Height limit
     if (y > GROUND_LEVEL + MAX_BUILD_UP) return false;
 
@@ -211,6 +235,7 @@ export class ServerWorld {
   }
 
   damageVoxel(x: number, y: number, z: number, damage: number): boolean {
+    if (isWorkshopProtectedCell(x, z)) return false;
     const voxel = this.getVoxel(x, y, z);
     if (!voxel) return false;
     
@@ -316,7 +341,7 @@ export class ServerWorld {
 
     for (const [nx, ny, nz] of neighbors) {
       const voxel = this.getVoxel(nx, ny, nz);
-      if (!voxel || voxel.type === VOXEL_AIR) continue;
+      if (!voxel || voxel.type === VOXEL_AIR || isWorkshopProtectedCell(nx, nz)) continue;
       
       const key = this.getVoxelKey(nx, ny, nz);
       if (checked.has(key)) continue;
@@ -334,6 +359,7 @@ export class ServerWorld {
       const y = parseInt(parts[1]);
       const z = parseInt(parts[2]);
       
+      if (isWorkshopProtectedCell(x, z)) continue;
       this.setVoxel(x, y, z, VOXEL_AIR, 0);
       changes.push({ x, y, z, type: VOXEL_AIR, durability: 0 });
     }
@@ -408,7 +434,7 @@ export class ServerWorld {
         if (checked.has(nkey)) continue;
         
         const voxel = this.getVoxel(nx, ny, nz);
-        if (!voxel || voxel.type === VOXEL_AIR) continue;
+        if (!voxel || voxel.type === VOXEL_AIR || isWorkshopProtectedCell(nx, nz)) continue;
         
         checked.add(nkey);
         queue.push({x: nx, y: ny, z: nz});

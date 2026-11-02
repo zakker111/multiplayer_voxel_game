@@ -157,6 +157,7 @@ export class ServerBot extends ServerPlayer {
   private fortifyStage: number = 0;
   /** Dedicated engineer: only these bots start firebases (panic cover stays universal). */
   private readonly engineer: boolean;
+  private readonly logistics: boolean;
   /** Last structure this bot started (for tests / diagnostics). */
   private lastStructureKind: StructureKind | null = null;
   // Stuck detection: sampled once per second, needs two strikes to act.
@@ -199,6 +200,7 @@ export class ServerBot extends ServerPlayer {
     team: 'red' | 'blue',
     name: string,
     engineer?: boolean,
+    logistics?: boolean,
   ) {
     super(id, position, team);
     this.name = name;
@@ -227,6 +229,7 @@ export class ServerBot extends ServerPlayer {
     // hash is the fallback for standalone/test bots. Engineers build the
     // firebase while the rest of the squad fights and screens it.
     this.engineer = engineer ?? (hash % 5 === 0);
+    this.logistics = logistics ?? false;
     this.laneSeed = (hash % 97) / 48.5 - 1; // -1..1, stable per bot
   }
 
@@ -247,6 +250,25 @@ export class ServerBot extends ServerPlayer {
   /** Whether this bot is one of the team's dedicated firebase engineers. */
   get isEngineer(): boolean {
     return this.engineer;
+  }
+
+  /** Whether this bot has the separate workshop logistics assignment. */
+  get isLogistics(): boolean {
+    return this.logistics;
+  }
+
+  /** Move toward a point using normal infantry obstacle avoidance. */
+  approachJeep(target: Position, ctx: BotContext, dt: number): void {
+    this.moveTo(target, dt, ctx, true);
+  }
+
+  /** Vehicle travel is not an infantry stuck sample or a continuation of a job. */
+  resumeAfterJeep(now: number): void {
+    this.velocity = { x: 0, y: 0, z: 0 };
+    this.lastProgressCheckAt = now;
+    this.progressPos = { ...this.position };
+    this.stuckStrikes = 0;
+    this.transition('GRABFLAG', now, 15);
   }
 
   /** Called by serverGame when this bot takes damage — enables revenge targeting. */
