@@ -50,11 +50,11 @@ const join = (game, team) => {
 };
 
 /** Craft and place one build for `team`; returns the live emplacement. */
-const build = (game, team, kind, spot) => {
+const build = (game, team, kind, spot, yaw = 0) => {
   const owner = join(game, team);
   game.workshopStock[team] = 400;
   game.handleMessage(owner.id, { type: 'craftBlueprint', kind, slot: 0 });
-  game.handleMessage(owner.id, { type: 'placeEmplacement', kind, position: spot, yaw: 0, slot: 0 });
+  game.handleMessage(owner.id, { type: 'placeEmplacement', kind, position: spot, yaw, slot: 0 });
   const emplacement = [...game.emplacements.values()].find((e) => e.kind === kind && e.team === team);
   assert.ok(emplacement, `the ${team} ${kind} was placed`);
   return { emplacement, owner };
@@ -137,6 +137,65 @@ test('a wrecked nest is removed and its gunner is set down', () => {
   assert.equal(game.gunnerEmplacement(owner.id), undefined, 'the gunner is no longer mounted');
   assert.ok(owner.frames.some((f) => f.type === 'emplacementsUpdated' && f.emplacements.length === 0),
     'clients are told the build is gone');
+});
+
+test('rifle fire that wrecks a nest ejects the gunner standing in it', () => {
+  const game = new ServerGame();
+  const [spot] = findSpots(game, 1);
+  const { emplacement: nest, owner: gunner } = build(game, 'blue', 'mgNest', spot);
+  gunner.player.position = { x: spot.x + 1.5, y: spot.y, z: spot.z };
+  game.handleMessage(gunner.id, { type: 'mountEmplacement', emplacementId: nest.id });
+  assert.equal(nest.gunnerId, gunner.id, 'the gunner is in the nest');
+
+  const shooter = join(game, 'red');
+  shooter.player.position = { x: spot.x, y: spot.y, z: spot.z + 2.5 };
+  const aim = { x: nest.position.x, y: nest.position.y + 0.8, z: nest.position.z };
+  // A 300 hp nest takes five 65-damage rifle rounds; clear the fire gate so the
+  // test does not wait out the real cadence between shots.
+  for (let i = 0; i < 5; i++) {
+    game.lastShootTime.delete(shooter.id);
+    shootAt(game, shooter, aim);
+  }
+
+  assert.equal(game.emplacements.has(nest.id), false, 'the nest is destroyed by gunfire');
+  assert.equal(game.gunnerEmplacement(gunner.id), undefined, 'the gunner was freed');
+  assert.ok(gunner.frames.some((f) => f.type === 'emplacementExited'), 'the gunner is told they are out');
+  assert.ok(Math.hypot(
+    gunner.player.position.x - spot.x,
+    gunner.player.position.z - spot.z,
+  ) > 1, 'the gunner was set down clear of the wreck');
+});
+
+test('a manned nest wrecks an enemy build and ejects its gunner', () => {
+  const game = new ServerGame();
+  const [blueSpot, redSpot] = findSpots(game, 2);
+  const { emplacement: blueNest, owner: blueGunner } = build(game, 'blue', 'mgNest', blueSpot);
+  blueGunner.player.position = { ...blueNest.position };
+  game.handleMessage(blueGunner.id, { type: 'mountEmplacement', emplacementId: blueNest.id });
+  assert.equal(blueNest.gunnerId, blueGunner.id, 'the blue nest is manned');
+
+  const yaw = Math.atan2(-(blueNest.position.x - redSpot.x), -(blueNest.position.z - redSpot.z));
+  const { emplacement: redNest, owner: redGunner } = build(game, 'red', 'mgNest', redSpot, yaw);
+  redGunner.player.position = { ...redNest.position };
+  game.handleMessage(redGunner.id, { type: 'mountEmplacement', emplacementId: redNest.id });
+  assert.equal(redNest.gunnerId, redGunner.id, 'the red nest is manned');
+
+  const maxHp = emplacementSpec('mgNest').maxHp;
+  const gunnerHp = blueGunner.player.hp;
+  game.handleMessage(redGunner.id, { type: 'fireEmplacement' });
+  assert.ok(blueNest.hp < maxHp, 'one nest round dents the enemy build');
+  assert.equal(blueGunner.player.hp, gunnerHp, 'the round stops at the build, not the gunner behind it');
+
+  // Ten 30-damage rounds finish the 300 hp nest.
+  for (let i = 0; i < 9 && game.emplacements.has(blueNest.id); i++) {
+    game.update(0.1);
+    game.handleMessage(redGunner.id, { type: 'fireEmplacement' });
+  }
+
+  assert.equal(game.emplacements.has(blueNest.id), false, 'the enemy nest is destroyed');
+  assert.equal(game.gunnerEmplacement(blueGunner.id), undefined, 'its gunner is no longer seated');
+  assert.ok(blueGunner.frames.some((f) => f.type === 'emplacementExited'), 'the gunner is told they are out');
+  assert.ok(game.emplacements.has(redNest.id), 'the firing nest survived');
 });
 
 test('shell splash wrecks enemy structures and spares friendly ones', () => {

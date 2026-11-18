@@ -548,9 +548,18 @@ export class ServerGame {
     const terrainHit = this.world.raycast(origin, direction, spec.maxRange);
     const maxDist = terrainHit ? terrainHit.distance : spec.maxRange;
     const vehicleHit = this.hitJeep(origin, direction, maxDist, emplacement.team);
-    const limit = vehicleHit ? Math.min(maxDist, vehicleHit.distance) : maxDist;
+    const structureHit = this.hitEmplacement(origin, direction, maxDist, emplacement.team);
 
-    if (vehicleHit) this.damageJeep(vehicleHit.jeep, EMPLACEMENT_ROUND_DAMAGE);
+    // Enemy hardware stops the round: whichever build is nearer takes it, and
+    // nothing behind that build can be hit by the same burst.
+    let limit = maxDist;
+    if (structureHit && (!vehicleHit || structureHit.distance <= vehicleHit.distance)) {
+      limit = structureHit.distance;
+      this.damageEmplacement(structureHit.emplacement.id, EMPLACEMENT_ROUND_DAMAGE);
+    } else if (vehicleHit) {
+      limit = vehicleHit.distance;
+      this.damageJeep(vehicleHit.jeep, EMPLACEMENT_ROUND_DAMAGE);
+    }
 
     // Nearest enemy body intersecting the round; torso and head are sampled so a
     // shot that clips the head counts as one.
