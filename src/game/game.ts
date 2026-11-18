@@ -3767,14 +3767,16 @@ export class Game {
       this.networkClient.sendRequestRespawn();
     }
 
+    // Seated only while alive and not spectating — dying or switching to
+    // spectator drops the player straight back to their own body and camera.
+    // The camera itself is chosen once, at the end of the frame (see the camera
+    // chain below), so nothing has to guard against a later overwrite here.
     const driving = this.drivingJeepId ? this.jeeps.get(this.drivingJeepId) : undefined;
-    if (driving && !this.isSpectating && !this.player.isDead) {
-      const state = driving.state;
+    const seatedJeep = driving && !this.isSpectating && !this.player.isDead ? driving : undefined;
+    if (seatedJeep) {
+      const state = seatedJeep.state;
       this.player.position.set(state.position.x, state.position.y, state.position.z);
       this.player.velocity.set(0, 0, 0);
-      const back = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw));
-      this.player.camera.position.set(state.position.x + back.x * 7, state.position.y + 4, state.position.z + back.z * 7);
-      this.player.camera.lookAt(state.position.x - back.x * 3, state.position.y + 1.4, state.position.z - back.z * 3);
       const now = performance.now();
       if (now - this.lastDriveInput > 80) {
         this.lastDriveInput = now;
@@ -4182,6 +4184,13 @@ export class Game {
         const lookTarget = this.spectatorPos.clone().add(forward);
         this.player.camera.lookAt(lookTarget);
       }
+    } else if (seatedJeep) {
+      // Chase camera behind the jeep. The player is pinned to the jeep origin
+      // while seated, so a first-person camera here would sit inside the hull.
+      const state = seatedJeep.state;
+      const back = new THREE.Vector3(Math.sin(state.yaw), 0, Math.cos(state.yaw));
+      this.player.camera.position.set(state.position.x + back.x * 7, state.position.y + 4, state.position.z + back.z * 7);
+      this.player.camera.lookAt(state.position.x - back.x * 3, state.position.y + 1.4, state.position.z - back.z * 3);
     } else {
       // First-person player camera
       this.player.updateCamera();
