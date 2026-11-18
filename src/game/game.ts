@@ -20,6 +20,7 @@ import {
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
   WORKSHOP_REACH, JEEP_ENTER_REACH,
+  emplacementSpec, type EmplacementKind,
   isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
@@ -334,6 +335,16 @@ export class Game {
   private workshopMeshes: THREE.Group[] = [];
   private jeeps = new Map<string, { state: JeepSnapshot; mesh: THREE.Group }>();
   private drivingJeepId: string | null = null;
+
+  // ---- Blueprint placement (Phase 4 prototype) ----
+  private blueprintSlots: EmplacementKind[] = ['mgNest', 'supplyCrate', 'spottingPost'];
+  private blueprintIndex: number | null = null;
+  private ghost: THREE.Group | null = null;
+  private ghostMaterial: THREE.MeshStandardMaterial | null = null;
+  private ghostPosition: { x: number; y: number; z: number } | null = null;
+  private ghostYaw = 0;
+  private ghostValid = false;
+  private ghostRequestedAt = 0;
   private lastDriveInput = 0;
   private jeepBrake = false;
   lastActionTime: number = 0;
@@ -2316,6 +2327,19 @@ export class Game {
     this.networkClient.onMessage('jeepsUpdated', (msg: any) => {
       if (Array.isArray(msg.jeeps)) this.applyJeeps(msg.jeeps as JeepSnapshot[]);
     });
+    this.networkClient.onMessage('emplacementPreview', (msg: any) => {
+      if (!this.ghost) return;
+      this.ghostValid = msg.ok === true;
+      if (this.ghostValid && msg.position) {
+        // Adopt the server's snapped position so what you see is where it lands.
+        this.ghostPosition = { x: msg.position.x, y: msg.position.y, z: msg.position.z };
+        this.ghost.position.set(msg.position.x, msg.position.y, msg.position.z);
+      }
+      this.tintGhost(this.ghostValid);
+    });
+    this.networkClient.onMessage('emplacementMessage', (msg: any) => {
+      if (typeof msg.message === 'string') this.showMessage(msg.message);
+    });
     this.networkClient.onMessage('jeepExited', (msg: any) => {
       this.drivingJeepId = null;
       this.player.clearKeys();
@@ -2709,8 +2733,101 @@ export class Game {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   }
 
+  // ---------------- Blueprint placement (Phase 4 prototype) --------------
+  // Three slots on 5/6/7. The ghost is advisory only: every green/red tint comes
+  // from the server's own placement rules, and a click just sends the intent.
+
+  private toggleBlueprint(index: number): void {
+    if (this.gameMode !== 'online' || this.isSpectating || this.player.isDead || this.drivingJeepId) return;
+    if (this.blueprintIndex === index) { this.cancelBlueprint(); return; }
+    this.clearGhost();
+    const kind = this.blueprintSlots[index];
+    const spec = emplacementSpec(kind);
+    if (!spec) return;
+    this.blueprintIndex = index;
+    this.ghostYaw = 0;
+    this.ghostValid = false;
+    this.ghostRequestedAt = 0;
+    this.ghostMaterial = new THREE.MeshStandardMaterial({ color: 0xe04949, transparent: true, opacity: 0.45, depthWrite: false });
+    this.ghost = this.createGhostMesh(kind, this.ghostMaterial);
+    this.ghost.visible = false;
+    this.scene.add(this.ghost);
+    this.showMessage(`🔧 ${spec.kind} blueprint · ${spec.cost} blocks · Q rotate · click place · right-click cancel`);
+  }
+
+  private cancelBlueprint(): void {
+    if (this.blueprintIndex === null) return;
+    this.blueprintIndex = null;
+    this.clearGhost();
+  }
+
+  private clearGhost(): void {
+    if (!this.ghost) return;
+    this.scene.remove(this.ghost);
+    this.ghost.traverse((object) => (object as THREE.Mesh).geometry?.dispose?.());
+    this.ghostMaterial?.dispose();
+    this.ghost = null;
+    this.ghostMaterial = null;
+    this.ghostPosition = null;
+    this.ghostValid = false;
+  }
+
+  /** Blocky placeholder silhouettes; real models come with the HUD pass. */
+  private createGhostMesh(kind: EmplacementKind, material: THREE.Material): THREE.Group {
+    const group = new THREE.Group();
+    const box = (w: number, h: number, d: number, x: number, y: number, z: number) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+      mesh.position.set(x, y + h / 2, z);
+      group.add(mesh);
+    };
+    if (kind === 'mgNest') { box(2.2, 0.5, 2.2, 0, 0, 0); box(0.3, 1.1, 0.3, 0.6, 0.5, 0.6); }
+    else if (kind === 'cannon') { box(1.6, 0.5, 1.6, 0, 0, 0); box(0.3, 0.3, 1.8, 0, 0.6, -0.6); }
+    else if (kind === 'mortar') { box(1.2, 0.4, 1.2, 0, 0, 0); box(0.35, 0.35, 1.4, 0, 0.7, -0.3); }
+    else if (kind === 'supplyCrate') { box(1.4, 1.1, 1.4, 0, 0, 0); }
+    else { box(1.2, 0.4, 1.2, 0, 0, 0); box(0.25, 3.6, 0.25, 0, 0.4, 0); }
+    return group;
+  }
+
+  private tintGhost(valid: boolean): void {
+    this.ghostMaterial?.color.setHex(valid ? 0x49e06a : 0xe04949);
+  }
+
+  private updateGhost(): void {
+    if (this.blueprintIndex === null || !this.ghost) return;
+    const kind = this.blueprintSlots[this.blueprintIndex];
+    const hit = this.world.raycast(this.player.camera.position.clone(), this.player.getAimDirection(), 8);
+    if (!hit) { this.ghost.visible = false; this.ghostValid = false; return; }
+    const spot = { x: Math.round(hit.voxelPos.x), y: Math.round(hit.voxelPos.y) + 1, z: Math.round(hit.voxelPos.z) };
+    this.ghostPosition = spot;
+    this.ghost.position.set(spot.x, spot.y, spot.z);
+    this.ghost.rotation.y = this.ghostYaw;
+    this.ghost.visible = true;
+    const now = performance.now();
+    if (now - this.ghostRequestedAt >= 120) {
+      this.ghostRequestedAt = now;
+      this.networkClient?.send({ type: 'previewEmplacement', kind, position: spot, yaw: this.ghostYaw });
+    }
+  }
+
+  private placeBlueprint(): void {
+    if (this.blueprintIndex === null || !this.ghostPosition || !this.ghostValid) return;
+    this.networkClient?.send({
+      type: 'placeEmplacement',
+      kind: this.blueprintSlots[this.blueprintIndex],
+      position: this.ghostPosition,
+      yaw: this.ghostYaw,
+    });
+    this.ghostRequestedAt = 0; // ask again at once in case that spot is taken now
+  }
+
   private onMouseDown(e: MouseEvent): void {
     if (this.drivingJeepId) return;
+    if (this.blueprintIndex !== null) {
+      // A ghost is up: clicks belong to the blueprint, never to the weapon.
+      if (e.button === 0) this.placeBlueprint();
+      else if (e.button === 2) this.cancelBlueprint();
+      return;
+    }
     if (this.isSpectating) {
       // In spectator mode, clicking/dragging steers the camera only —
       // spectators must never fire or build.
@@ -2861,6 +2978,13 @@ export class Game {
     if (e.code === 'Digit2') { this.equipment = 'smg'; this.switchWeaponModel('smg'); this.isAiming = false; this.player.isAiming = false; }
     if (e.code === 'Digit3') { this.equipment = 'spade'; this.switchWeaponModel('spade'); this.isAiming = false; this.player.isAiming = false; }
     if (e.code === 'Digit4') { this.equipment = 'pickaxe'; this.switchWeaponModel('pickaxe'); this.isAiming = false; this.player.isAiming = false; }
+    if (e.code === 'Digit5' || e.code === 'Digit6' || e.code === 'Digit7') {
+      this.toggleBlueprint(Number(e.code.slice(-1)) - 5);
+    }
+    if (e.code === 'KeyQ' && this.blueprintIndex !== null && !e.repeat) {
+      this.ghostYaw += Math.PI / 2;
+      this.ghostRequestedAt = 0; // re-ask the server for this rotation
+    }
     if (e.code === 'KeyR') this.startReload();
 
     this.player.handleKeyDown(e.code);
@@ -3027,6 +3151,7 @@ export class Game {
 
   private performAction(): void {
     if (this.player.isDead) return;
+    if (this.blueprintIndex !== null) return; // ghost up: no shooting or mining
     const now = performance.now() / 1000;
     if (this.equipment === 'rifle' || this.equipment === 'smg') {
       this.shoot(now);
@@ -3787,6 +3912,12 @@ export class Game {
       mesh.position.lerp(new THREE.Vector3(state.position.x, state.position.y, state.position.z), Math.min(dt * 14, 1));
       const delta = Math.atan2(Math.sin(state.yaw - mesh.rotation.y), Math.cos(state.yaw - mesh.rotation.y));
       mesh.rotation.y += delta * Math.min(dt * 14, 1);
+    }
+
+    if (this.blueprintIndex !== null) {
+      // Dying, spectating or boarding a vehicle puts the ghost away.
+      if (this.isSpectating || this.player.isDead || this.drivingJeepId) this.cancelBlueprint();
+      else this.updateGhost();
     }
     this.world.update();
 
@@ -5626,6 +5757,7 @@ export class Game {
   }
 
   destroy(): void {
+    this.clearGhost();
     if (this.networkClient) {
       this.networkClient.disconnect();
     }

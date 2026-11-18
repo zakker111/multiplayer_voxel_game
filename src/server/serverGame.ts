@@ -58,7 +58,7 @@ import {
   Workshops,
   JeepSnapshot,
   WORLD_HALF, vehicleSpec, emplacementSpec,
-  type VehicleSpec, type Footprint, type EmplacementKind, type EmplacementSnapshot,
+  type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot,
 } from '../shared/types';
 
 export interface GameConnection {
@@ -97,6 +97,8 @@ const EMPLACEMENT_ENEMY_BASE_RING = 40;
 const EMPLACEMENT_OWN_FLAG_CLEARANCE = 10;
 const EMPLACEMENT_WORKSHOP_CLEARANCE = 8;
 const EMPLACEMENT_SEPARATION = 0.5;
+/** Minimum gap between ghost validity replies for one player, in ms. */
+const EMPLACEMENT_PREVIEW_INTERVAL = 90;
 
 interface ServerJeep extends JeepSnapshot {
   throttle: number;
@@ -179,6 +181,7 @@ export class ServerGame {
   private jeepSequence = 0;
   private emplacements = new Map<string, EmplacementSnapshot>();
   private emplacementSequence = 0;
+  private emplacementPreviewAt = new Map<string, number>();
   private jeepSync = 0;
   private botJeepTasks = new Map<string, BotJeepTask>();
   private botJeepCooldown = new Map<string, number>();
@@ -213,64 +216,89 @@ export class ServerGame {
    * where it may stand, whether the ground fits, and what it costs. Nothing is
    * charged unless the build is accepted, so a rejected ghost costs nothing.
    */
-  private placeEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown): void {
+  private emplacementVerdict(
+    playerId: string, kind: unknown, position: unknown, yaw: unknown,
+  ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number } | { ok: false; reason: string } {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
-    if (typeof kind !== 'string' || !isVec3(position)) return;
+    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return { ok: false, reason: 'Cannot build right now' };
+    if (typeof kind !== 'string' || !isVec3(position)) return { ok: false, reason: 'Bad blueprint' };
     const spec = emplacementSpec(kind);
-    if (!spec) return;
+    if (!spec) return { ok: false, reason: 'Unknown blueprint' };
 
     const extent = Math.hypot(spec.halfWidth, spec.halfLength);
     if (Math.abs(position.x) > WORLD_HALF - extent - 1 || Math.abs(position.z) > WORLD_HALF - extent - 1) {
-      return this.emplacementMessage(playerId, 'Outside the map');
+      return { ok: false, reason: 'Outside the map' };
     }
 
     const ownFlag = player.team === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
     const enemyFlag = player.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
     if (Math.hypot(position.x - enemyFlag.x, position.z - enemyFlag.z) < EMPLACEMENT_ENEMY_BASE_RING) {
-      return this.emplacementMessage(playerId, 'Too close to the enemy base');
+      return { ok: false, reason: 'Too close to the enemy base' };
     }
     if (Math.hypot(position.x - ownFlag.x, position.z - ownFlag.z) < EMPLACEMENT_OWN_FLAG_CLEARANCE) {
-      return this.emplacementMessage(playerId, 'Too close to your flag stand');
+      return { ok: false, reason: 'Too close to your flag stand' };
     }
     const workshop = this.getWorkshops()[player.team].position;
     if (Math.hypot(position.x - workshop.x, position.z - workshop.z) < EMPLACEMENT_WORKSHOP_CLEARANCE) {
-      return this.emplacementMessage(playerId, 'Keep the workshop pad clear');
+      return { ok: false, reason: 'Keep the workshop pad clear' };
     }
 
     // Snap to the ground the server sees, never to the client's y.
     const ground = this.jeepGround(position.x, position.z, position.y);
-    if (ground === null) return this.emplacementMessage(playerId, 'Needs flat, solid ground');
+    if (ground === null) return { ok: false, reason: 'Needs flat, solid ground' };
     const spot = { x: position.x, y: ground, z: position.z };
     const rotation = typeof yaw === 'number' && Number.isFinite(yaw) ? yaw : 0;
 
-    if (!this.jeepClear(spot, rotation, spec)) return this.emplacementMessage(playerId, 'No room there');
+    if (!this.jeepClear(spot, rotation, spec)) return { ok: false, reason: 'No room there' };
     const padded = { ...spec, halfWidth: spec.halfWidth + EMPLACEMENT_SEPARATION, halfLength: spec.halfLength + EMPLACEMENT_SEPARATION };
     for (const other of this.emplacements.values()) {
       const otherSpec = emplacementSpec(other.kind) ?? spec;
       if (Math.abs(other.position.y - ground) >= (spec.height + otherSpec.height) / 2) continue;
       if (jeepRectsOverlap(spot.x, spot.z, rotation, padded, other.position.x, other.position.z, other.yaw, otherSpec)) {
-        return this.emplacementMessage(playerId, 'Too close to another emplacement');
+        return { ok: false, reason: 'Too close to another emplacement' };
       }
     }
 
     const built = [...this.emplacements.values()].filter(e => e.team === player.team && e.kind === spec.kind).length;
-    if (built >= spec.teamLimit) return this.emplacementMessage(playerId, 'Team limit for that build reached');
-    if (this.workshopStock[player.team] < spec.cost) return this.emplacementMessage(playerId, 'Not enough workshop blocks');
+    if (built >= spec.teamLimit) return { ok: false, reason: 'Team limit for that build reached' };
+    if (this.workshopStock[player.team] < spec.cost) return { ok: false, reason: 'Not enough workshop blocks' };
 
-    this.workshopStock[player.team] -= spec.cost;
+    return { ok: true, spec, spot, rotation };
+  }
+
+  private placeEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player) return;
+    const verdict = this.emplacementVerdict(playerId, kind, position, yaw);
+    if (!verdict.ok) return this.emplacementMessage(playerId, verdict.reason);
+
+    this.workshopStock[player.team] -= verdict.spec.cost;
     const emplacement: EmplacementSnapshot = {
       id: `emp_${++this.emplacementSequence}`,
-      kind: spec.kind,
+      kind: verdict.spec.kind,
       team: player.team,
-      position: spot,
-      yaw: rotation,
-      hp: spec.maxHp,
-      ammo: spec.ammo,
+      position: verdict.spot,
+      yaw: verdict.rotation,
+      hp: verdict.spec.maxHp,
+      ammo: verdict.spec.ammo,
     };
     this.emplacements.set(emplacement.id, emplacement);
     this.broadcastWorkshops();
     this.broadcastEmplacements();
+  }
+
+  /** Same rules as a real placement, so the ghost tint can be trusted. */
+  private previewEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown): void {
+    const now = Date.now();
+    if (now - (this.emplacementPreviewAt.get(playerId) ?? 0) < EMPLACEMENT_PREVIEW_INTERVAL) return;
+    this.emplacementPreviewAt.set(playerId, now);
+    const verdict = this.emplacementVerdict(playerId, kind, position, yaw);
+    this.sendToPlayer(
+      playerId,
+      verdict.ok
+        ? { type: 'emplacementPreview', ok: true, position: verdict.spot, yaw: verdict.rotation }
+        : { type: 'emplacementPreview', ok: false, reason: verdict.reason },
+    );
   }
 
   private driverJeep(playerId: string): ServerJeep | undefined {
@@ -1608,6 +1636,9 @@ export class ServerGame {
         break;
       case 'placeEmplacement':
         this.placeEmplacement(playerId, message.kind, message.position, message.yaw);
+        break;
+      case 'previewEmplacement':
+        this.previewEmplacement(playerId, message.kind, message.position, message.yaw);
         break;
       case 'enterJeep':
         this.enterJeep(playerId, message.vehicleId);

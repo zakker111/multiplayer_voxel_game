@@ -178,6 +178,48 @@ test('each team pays from its own stockpile', () => {
   assert.equal(game.workshopStock.red, 200 - emplacementSpec('supplyCrate').cost);
 });
 
+test('the ghost preview agrees with placement and charges nothing', () => {
+  const { game, id, frames } = setup();
+  const [spot] = findSpots(game, 1);
+  game.workshopStock.blue = 200;
+
+  game.handleMessage(id, { type: 'previewEmplacement', kind: 'mgNest', position: spot, yaw: Math.PI / 2 });
+  const preview = frames.filter((f) => f.type === 'emplacementPreview').pop();
+  assert.ok(preview, 'the server answered the preview');
+  assert.equal(preview.ok, true);
+  assert.equal(preview.yaw, Math.PI / 2, 'rotation is echoed back');
+  assert.deepEqual(preview.position, spot, 'the snapped spot comes back to the ghost');
+  assert.equal(game.emplacements.size, 0, 'a preview builds nothing');
+  assert.equal(game.workshopStock.blue, 200, 'a preview charges nothing');
+
+  place(game, id, 'mgNest', spot, Math.PI / 2);
+  assert.equal(game.emplacements.size, 1, 'the same spot then places for real');
+});
+
+test('the ghost preview explains a refusal', () => {
+  const { game, id, frames } = setup('blue');
+  game.workshopStock.blue = 200;
+
+  game.handleMessage(id, { type: 'previewEmplacement', kind: 'mortar', position: { x: RED_FLAG_POS.x, y: 10, z: RED_FLAG_POS.z }, yaw: 0 });
+  const preview = frames.filter((f) => f.type === 'emplacementPreview').pop();
+
+  assert.equal(preview.ok, false);
+  assert.match(String(preview.reason), /enemy base/i);
+  assert.equal(game.workshopStock.blue, 200);
+});
+
+test('preview replies are throttled so a hovering ghost cannot spam', () => {
+  const { game, id, frames } = setup();
+  const [spot] = findSpots(game, 1);
+  game.workshopStock.blue = 200;
+
+  for (let i = 0; i < 10; i++) {
+    game.handleMessage(id, { type: 'previewEmplacement', kind: 'mgNest', position: spot, yaw: 0 });
+  }
+
+  assert.equal(frames.filter((f) => f.type === 'emplacementPreview').length, 1, 'a burst gets one reply');
+});
+
 test('a new round clears the map of emplacements', () => {
   const { game, id } = setup();
   const [spot] = findSpots(game, 1);
