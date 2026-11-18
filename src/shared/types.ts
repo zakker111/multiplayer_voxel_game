@@ -175,6 +175,8 @@ export type ServerMessage =
   | { type: 'emplacementPreview'; ok: boolean; reason?: string; position?: Position; yaw?: number }
   | { type: 'emplacementMessage'; message: string }
   | { type: 'emplacementMounted'; emplacementId: string; position: Position; yaw: number }
+  | { type: 'shellFired'; id: string; kind: EmplacementKind; position: Position; velocity: Position }
+  | { type: 'shellImpact'; id: string; kind: EmplacementKind; position: Position; radius: number }
   | { type: 'emplacementExited'; position: Position }
   | { type: 'blueprintsUpdated'; blueprints: BlueprintSlots }
   | { type: 'jeepExited'; position: Position }
@@ -307,6 +309,8 @@ export interface EmplacementSpec extends Footprint {
   teamLimit: number;
   /** Firing arc in radians, centred on the placement yaw. 0 = unarmed. */
   arc: number;
+  /** Seconds between rounds once manned. 0 = unarmed. */
+  fireInterval: number;
   /** Rounds carried when placed. 0 = unarmed. */
   ammo: number;
   /** Closest useful target; indirect fire needs this so it cannot hit its base. */
@@ -315,11 +319,11 @@ export interface EmplacementSpec extends Footprint {
 }
 
 export const EMPLACEMENTS: Record<EmplacementKind, EmplacementSpec> = {
-  mgNest: { kind: 'mgNest', cost: 70, maxHp: 300, teamLimit: 2, halfWidth: 1.1, halfLength: 1.1, height: 1.6, arc: Math.PI, ammo: 200, minRange: 0, maxRange: 90 },
-  cannon: { kind: 'cannon', cost: 90, maxHp: 350, teamLimit: 1, halfWidth: 1.2, halfLength: 1.6, height: 1.5, arc: Math.PI / 3, ammo: 10, minRange: 8, maxRange: 120 },
-  mortar: { kind: 'mortar', cost: 80, maxHp: 250, teamLimit: 1, halfWidth: 0.9, halfLength: 0.9, height: 1.2, arc: Math.PI, ammo: 6, minRange: 25, maxRange: 120 },
-  supplyCrate: { kind: 'supplyCrate', cost: 20, maxHp: 150, teamLimit: 3, halfWidth: 0.9, halfLength: 0.9, height: 1.1, arc: 0, ammo: 0, minRange: 0, maxRange: 0 },
-  spottingPost: { kind: 'spottingPost', cost: 40, maxHp: 200, teamLimit: 1, halfWidth: 0.9, halfLength: 0.9, height: 4, arc: 0, ammo: 0, minRange: 0, maxRange: 0 },
+  mgNest: { kind: 'mgNest', cost: 70, maxHp: 300, teamLimit: 2, halfWidth: 1.1, halfLength: 1.1, height: 1.6, arc: Math.PI, fireInterval: 0.09, ammo: 200, minRange: 0, maxRange: 90 },
+  cannon: { kind: 'cannon', cost: 90, maxHp: 350, teamLimit: 1, halfWidth: 1.2, halfLength: 1.6, height: 1.5, arc: Math.PI / 3, fireInterval: 2.5, ammo: 10, minRange: 8, maxRange: 120 },
+  mortar: { kind: 'mortar', cost: 80, maxHp: 250, teamLimit: 1, halfWidth: 0.9, halfLength: 0.9, height: 1.2, arc: Math.PI, fireInterval: 3, ammo: 6, minRange: 25, maxRange: 120 },
+  supplyCrate: { kind: 'supplyCrate', cost: 20, maxHp: 150, teamLimit: 3, halfWidth: 0.9, halfLength: 0.9, height: 1.1, arc: 0, fireInterval: 0, ammo: 0, minRange: 0, maxRange: 0 },
+  spottingPost: { kind: 'spottingPost', cost: 40, maxHp: 200, teamLimit: 1, halfWidth: 0.9, halfLength: 0.9, height: 4, arc: 0, fireInterval: 0, ammo: 0, minRange: 0, maxRange: 0 },
 };
 
 /** Unknown kinds come straight from the wire, so this is a lookup, not a cast. */
@@ -344,13 +348,21 @@ export interface EmplacementSnapshot {
   gunnerId: string | null;
 }
 
-/** Kinds a player can man with F. The cannon and mortar wait for the projectile
- *  work; seating them now would promise a gun that cannot fire. */
-export const MANNED_EMPLACEMENTS: EmplacementKind[] = ['mgNest'];
+/** Kinds a player can man with F: the three armed builds. */
+export const MANNED_EMPLACEMENTS: EmplacementKind[] = ['mgNest', 'cannon', 'mortar'];
 /** How close a player must stand to climb into a nest. */
 export const EMPLACEMENT_MOUNT_REACH = 3.5;
 /** Seconds between MG nest rounds: an emplaced nest outguns a rifle. */
 export const EMPLACEMENT_FIRE_INTERVAL = 0.09;
+/** Gravity pulling cannon and mortar shells, shared so the client can draw the
+ *  same arc the server simulates. */
+export const EMPLACEMENT_SHELL_GRAVITY = 18;
+/** Splash radius and the damage at the centre of a cannon round. */
+export const CANNON_BLAST_RADIUS = 4;
+export const CANNON_BLAST_DAMAGE = 70;
+/** Slower, heavier, wider: the mortar's trade for its arc and range. */
+export const MORTAR_BLAST_RADIUS = 6;
+export const MORTAR_BLAST_DAMAGE = 90;
 /** Damage one MG nest round does to a body. */
 export const EMPLACEMENT_ROUND_DAMAGE = 30;
 /** How far up or down the gunner may tilt the nest, in radians. */

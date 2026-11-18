@@ -59,6 +59,7 @@ import {
   JeepSnapshot,
   WORLD_HALF, vehicleSpec, emplacementSpec, BENCH_REACH, benchPosition, EmplacementKind,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH,
+  EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
   type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots,
 } from '../shared/types';
 
@@ -100,6 +101,19 @@ const EMPLACEMENT_WORKSHOP_CLEARANCE = 8;
 const EMPLACEMENT_SEPARATION = 0.5;
 /** Minimum gap between ghost validity replies for one player, in ms. */
 const EMPLACEMENT_PREVIEW_INTERVAL = 90;
+
+/** One shell in flight. Stepped on the server tick, drawn on the client from the
+ *  same spawn point, velocity and gravity. */
+interface ServerShell {
+  id: string;
+  kind: EmplacementKind;
+  team: 'red' | 'blue';
+  ownerId: string;
+  position: Position;
+  velocity: Position;
+  /** Server clock when it left the barrel, for the flight timeout. */
+  firedAt: number;
+}
 
 interface ServerJeep extends JeepSnapshot {
   throttle: number;
@@ -189,6 +203,8 @@ export class ServerGame {
   private emplacementPreviewAt = new Map<string, number>();
   /** Last round fired per emplacement, on the server clock. */
   private emplacementFireAt = new Map<string, number>();
+  private shells = new Map<string, ServerShell>();
+  private shellSequence = 0;
   private emplacementSync = 0;
   private jeepSync = 0;
   private botJeepTasks = new Map<string, BotJeepTask>();
@@ -469,12 +485,24 @@ export class ServerGame {
     if (!spec) return;
     if (emplacement.ammo <= 0) return this.emplacementMessage(playerId, 'The nest is out of rounds');
     const now = this.world.serverTime;
-    if (now - (this.emplacementFireAt.get(emplacement.id) ?? -1) < EMPLACEMENT_FIRE_INTERVAL) return;
+    const interval = spec.fireInterval || EMPLACEMENT_FIRE_INTERVAL;
+    // No previous shot means the first round is always allowed; a -1 sentinel
+    // silently blocked long reloads while the server clock was still near zero.
+    const lastFire = this.emplacementFireAt.get(emplacement.id);
+    if (lastFire !== undefined && now - lastFire < interval) return;
     this.emplacementFireAt.set(emplacement.id, now);
     emplacement.ammo -= 1;
 
     const yaw = emplacement.yaw;
     const pitch = Math.max(-EMPLACEMENT_MAX_PITCH, Math.min(EMPLACEMENT_MAX_PITCH, player.rotation.pitch ?? 0));
+
+    // Cannon and mortar lob a shell the whole server steps; only the nest is
+    // hitscan, because a 200-round belt cannot be 200 projectiles.
+    if (emplacement.kind === 'cannon' || emplacement.kind === 'mortar') {
+      this.fireShell(emplacement, player, yaw, pitch, spec);
+      return;
+    }
+
     const cosPitch = Math.cos(pitch);
     const direction = { x: -Math.sin(yaw) * cosPitch, y: Math.sin(pitch), z: -Math.cos(yaw) * cosPitch };
     const origin = {
@@ -521,6 +549,126 @@ export class ServerGame {
       // applyDamage already confirms the hit to the shooter.
       this.applyDamage(best.id, damage, playerId, best.headshot);
     }
+  }
+
+  /** Put a shell in the air. Cannon rounds are flat and fast; mortar rounds go
+   *  up at 45 degrees so they clear cover and fall on the far side. */
+  private fireShell(emplacement: EmplacementSnapshot, player: ServerPlayer, yaw: number, pitch: number, spec: EmplacementSpec): void {
+    const forward = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+    const isMortar = emplacement.kind === 'mortar';
+    const speed = isMortar ? 42 : 85;
+    const launchPitch = isMortar ? Math.max(pitch, Math.PI / 4) : pitch;
+    const cosPitch = Math.cos(launchPitch);
+    const velocity = {
+      x: forward.x * speed * cosPitch,
+      y: Math.sin(launchPitch) * speed,
+      z: forward.z * speed * cosPitch,
+    };
+    // Start clear of the barrel so the shell cannot explode on its own nest.
+    const muzzle = isMortar ? 1.0 : 1.6;
+    const position = {
+      x: emplacement.position.x + forward.x * muzzle,
+      y: emplacement.position.y + 1.2,
+      z: emplacement.position.z + forward.z * muzzle,
+    };
+    const id = `shell_${++this.shellSequence}`;
+    this.shells.set(id, {
+      id,
+      kind: emplacement.kind,
+      team: emplacement.team,
+      ownerId: player.id,
+      position,
+      velocity,
+      firedAt: this.world.serverTime,
+    });
+    // Muzzle flash and report reuse the shot event every client already draws.
+    this.broadcast({ type: 'playerShot', playerId: player.id, origin: position, direction: { ...velocity }, weapon: emplacement.kind });
+    this.broadcast({ type: 'shellFired', id, kind: emplacement.kind, position: { ...position }, velocity: { ...velocity } });
+    void spec;
+  }
+
+  /** Advance every shell and resolve what it ran into. */
+  private updateShells(dt: number): void {
+    if (this.shells.size === 0) return;
+    const step = Math.min(dt, 0.05);
+    for (const shell of [...this.shells.values()]) {
+      // Two integration substeps keep a fast cannon round from tunnelling
+      // through a one-voxel wall.
+      for (let i = 0; i < 2; i++) {
+        const half = step / 2;
+        shell.velocity.y -= EMPLACEMENT_SHELL_GRAVITY * half;
+        const next = {
+          x: shell.position.x + shell.velocity.x * half,
+          y: shell.position.y + shell.velocity.y * half,
+          z: shell.position.z + shell.velocity.z * half,
+        };
+        const impact = this.shellImpactAt(shell, next);
+        if (impact) {
+          this.explodeShell(shell, impact);
+          break;
+        }
+        shell.position = next;
+      }
+      if (!this.shells.has(shell.id)) continue;
+      if (this.world.serverTime - shell.firedAt > 8 || Math.abs(shell.position.y) > 80) {
+        this.shells.delete(shell.id);
+        this.broadcast({ type: 'shellImpact', id: shell.id, kind: shell.kind, position: { ...shell.position }, radius: 0 });
+      }
+    }
+  }
+
+  /** Where a shell would stop, or null when the path is clear. */
+  private shellImpactAt(shell: ServerShell, next: Position): Position | null {
+    if (Math.abs(next.x) >= WORLD_HALF || Math.abs(next.z) >= WORLD_HALF) return next;
+    if (this.world.isSolid(Math.round(next.x), Math.round(next.y), Math.round(next.z))) return shell.position;
+    for (const [id, player] of this.players) {
+      if (id === shell.ownerId || player.isDead || player.isSpectating) continue;
+      if (player.team === shell.team) continue;
+      if (Math.hypot(player.position.x - next.x, player.position.y + 1 - next.y, player.position.z - next.z) < 0.7) return next;
+    }
+    for (const jeep of this.jeeps.values()) {
+      if (jeep.wreck || jeep.team === shell.team) continue;
+      const spec = vehicleSpec(jeep.kind);
+      if (Math.abs(jeep.position.y - next.y) < spec.height &&
+        Math.hypot(jeep.position.x - next.x, jeep.position.z - next.z) < Math.hypot(spec.halfWidth, spec.halfLength)) return next;
+    }
+    return null;
+  }
+
+  /** Blast: enemies only, falling off with distance. Terrain and rounds are
+   *  permanent, players are not, so the same shell can ruin a trench and soften
+   *  the squad behind it. */
+  private explodeShell(shell: ServerShell, position: Position): void {
+    this.shells.delete(shell.id);
+    const isMortar = shell.kind === 'mortar';
+    const radius = isMortar ? MORTAR_BLAST_RADIUS : CANNON_BLAST_RADIUS;
+    const maxDamage = isMortar ? MORTAR_BLAST_DAMAGE : CANNON_BLAST_DAMAGE;
+
+    for (const [id, target] of this.players) {
+      if (target.isDead || target.isSpectating || target.team === shell.team) continue;
+      const distance = Math.hypot(target.position.x - position.x, target.position.y + 1 - position.y, target.position.z - position.z);
+      if (distance > radius) continue;
+      const damage = Math.max(1, Math.round(maxDamage * (1 - distance / radius)));
+      this.applyDamage(id, damage, shell.ownerId, false);
+    }
+    for (const jeep of this.jeeps.values()) {
+      if (jeep.wreck || jeep.team === shell.team) continue;
+      const distance = Math.hypot(jeep.position.x - position.x, jeep.position.y + 1 - position.y, jeep.position.z - position.z);
+      if (distance > radius) continue;
+      this.damageJeep(jeep, Math.max(1, Math.round(maxDamage * (1 - distance / radius))));
+    }
+    // Terrain damage is the point of a shell: carve the voxels it lands on.
+    const ground = Math.round(position.y);
+    for (const [dx, dy, dz] of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 0, 1], [-1, 0, -1], [1, 0, -1], [-1, 0, 1], [0, -1, 0]]) {
+      const x = Math.round(position.x) + dx, y = ground + dy, z = Math.round(position.z) + dz;
+      if (!this.world.isSolid(x, y, z)) continue;
+      if (this.world.damageVoxel(x, y, z, 99)) {
+        // A shell that removed terrain must reach clients, or their world
+        // diverges from the server's from then on.
+        this.broadcast({ type: 'voxelChanged', change: { x, y, z, type: VOXEL_AIR, durability: 0 } });
+      }
+    }
+    this.broadcast({ type: 'shellImpact', id: shell.id, kind: shell.kind, position: { ...position }, radius });
   }
 
   private driverJeep(playerId: string): ServerJeep | undefined {
@@ -1223,6 +1371,7 @@ export class ServerGame {
       }
       this.emplacements.clear();
       this.emplacementFireAt.clear();
+      this.shells.clear();
       this.broadcastEmplacements();
     }
     this.jeeps.clear();
@@ -2701,6 +2850,7 @@ export class ServerGame {
     // Round clock + phase transitions (live -> intermission -> next round)
     this.updateRound(dt);
     this.updateJeeps(dt);
+    this.updateShells(dt);
     // A manned nest turns with its gunner; 10Hz is enough to read as smooth and
     // keeps aim updates off the per-message broadcast path.
     if (this.emplacements.size > 0) {

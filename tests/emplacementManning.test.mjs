@@ -63,11 +63,12 @@ const nestAt = (game, id, player, spot, yaw = 0) => {
 const mount = (game, id, nest) =>
   game.handleMessage(id, { type: 'mountEmplacement', emplacementId: nest.id });
 
-test('only an MG nest can be manned', () => {
-  assert.deepEqual(MANNED_EMPLACEMENTS, ['mgNest'], 'the cannon and mortar wait on projectiles');
+test('the armed builds are seats, the support builds are not', () => {
+  const armed = ['mgNest', 'cannon', 'mortar'];
+  assert.deepEqual([...MANNED_EMPLACEMENTS].sort(), [...armed].sort(), 'every gun can be manned');
   for (const kind of Object.keys(EMPLACEMENTS)) {
     const manned = MANNED_EMPLACEMENTS.includes(kind);
-    assert.equal(manned, kind === 'mgNest', `${kind} manning matches the list`);
+    assert.equal(manned, armed.includes(kind), `${kind} manning matches its role`);
   }
 });
 

@@ -21,7 +21,7 @@ import {
   relativeBearingDegrees,
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
   emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
-  MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH,
+  MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
   isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
@@ -135,6 +135,8 @@ export interface GameState {
   benchMenuOpen: boolean;
   /** True while manning an emplacement; the HUD swaps to its gun hints. */
   manningEmplacement: boolean;
+  /** Which gun is manned, for the HUD line. */
+  manningKind: EmplacementKind | null;
   /** Rounds left in the manned nest, or null when not manning one. */
   manningAmmo: number | null;
   /** A mannable nest of your own team is within reach. */
@@ -370,6 +372,10 @@ export class Game {
   private emplacementMeshes = new Map<string, THREE.Group>();
   private mountedEmplacementId: string | null = null;
   private lastEmplacementFire = 0;
+  /** Shells in flight, drawn from the same spawn/velocity/gravity the server
+   *  uses so the round you see is the round that lands. */
+  private shells = new Map<string, { mesh: THREE.Mesh; spawn: THREE.Vector3; velocity: THREE.Vector3; spawnedAt: number }>();
+  private shellBlasts: Array<{ mesh: THREE.Mesh; material: THREE.MeshBasicMaterial; until: number }> = [];
   /** The slot 5/6/7 picks. It stays set on an empty slot so B knows where to
    *  craft; `blueprintIndex` is the same slot only once its ghost is up. */
   private blueprintSlot = 0;
@@ -2414,6 +2420,36 @@ export class Game {
         this.player.updateCamera();
       }
     });
+    this.networkClient.onMessage('shellFired', (msg: any) => {
+      if (!msg.position || !msg.velocity) return;
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(msg.kind === 'mortar' ? 0.28 : 0.2, 8, 6),
+        new THREE.MeshBasicMaterial({ color: msg.kind === 'mortar' ? 0x2b2b2b : 0x3a3a3a }),
+      );
+      this.scene.add(mesh);
+      this.shells.set(msg.id, {
+        mesh,
+        spawn: new THREE.Vector3(msg.position.x, msg.position.y, msg.position.z),
+        velocity: new THREE.Vector3(msg.velocity.x, msg.velocity.y, msg.velocity.z),
+        spawnedAt: performance.now() / 1000,
+      });
+    });
+    this.networkClient.onMessage('shellImpact', (msg: any) => {
+      const shell = this.shells.get(msg.id);
+      if (shell) {
+        this.scene.remove(shell.mesh);
+        shell.mesh.geometry.dispose();
+        (shell.mesh.material as THREE.Material).dispose();
+        this.shells.delete(msg.id);
+      }
+      if (!msg.position) return;
+      const radius = typeof msg.radius === 'number' && msg.radius > 0 ? msg.radius : 2;
+      const material = new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.85, depthWrite: false });
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius * 0.6, 12, 8), material);
+      mesh.position.set(msg.position.x, msg.position.y, msg.position.z);
+      this.scene.add(mesh);
+      this.shellBlasts.push({ mesh, material, until: performance.now() / 1000 + 0.35 });
+    });
     this.networkClient.onMessage('emplacementMessage', (msg: any) => {
       if (typeof msg.message === 'string') this.showMessage(msg.message);
     });
@@ -4149,6 +4185,32 @@ export class Game {
     // Continuous fire for SMG and tools while holding the LEFT mouse button.
     // Rifle fires exactly once per click (no burst). Right-click never fires —
     // it is reserved for building voxels.
+    // Shells follow the server's parabola; blasts pop and fade.
+    if (this.shells.size > 0 || this.shellBlasts.length > 0) {
+      const nowSeconds = performance.now() / 1000;
+      for (const shell of this.shells.values()) {
+        const t = nowSeconds - shell.spawnedAt;
+        shell.mesh.position.set(
+          shell.spawn.x + shell.velocity.x * t,
+          shell.spawn.y + shell.velocity.y * t - 0.5 * EMPLACEMENT_SHELL_GRAVITY * t * t,
+          shell.spawn.z + shell.velocity.z * t,
+        );
+      }
+      for (let i = this.shellBlasts.length - 1; i >= 0; i--) {
+        const blast = this.shellBlasts[i];
+        const left = blast.until - nowSeconds;
+        if (left <= 0) {
+          this.scene.remove(blast.mesh);
+          blast.mesh.geometry.dispose();
+          blast.material.dispose();
+          this.shellBlasts.splice(i, 1);
+          continue;
+        }
+        blast.material.opacity = Math.min(0.85, left * 2.5);
+        blast.mesh.scale.multiplyScalar(1.06);
+      }
+    }
+
     if (this.mountedEmplacementId && this.isLeftDown && !this.player.isDead) {
       this.fireMannedEmplacement();
     }
@@ -5932,6 +5994,9 @@ export class Game {
         blueprintCatalogue: this.blueprintCatalogue,
         benchMenuOpen: this.benchMenuOpen,
         manningEmplacement: Boolean(this.mountedEmplacementId),
+        manningKind: this.mountedEmplacementId
+          ? (this.emplacedSnapshots.get(this.mountedEmplacementId)?.kind ?? null)
+          : null,
         manningAmmo: this.mountedEmplacementId
           ? (this.emplacedSnapshots.get(this.mountedEmplacementId)?.ammo ?? null)
           : null,

@@ -29,7 +29,7 @@ function App() {
     blueprints: [null, null, null], blueprintSlot: 0,
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
     benchMenuOpen: false,
-    manningEmplacement: false, manningAmmo: null, emplacementNearby: false,
+    manningEmplacement: false, manningKind: null, manningAmmo: null, emplacementNearby: false,
     jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
@@ -980,13 +980,13 @@ function App() {
 
               {(gameMode === 'online' || gameMode === 'beta') && gameState.manningEmplacement && (
                 <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-sky-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
-                  MG NEST · {gameState.manningAmmo ?? 0} rounds · hold click to fire · move mouse to aim · F to step out
+                  {(gameState.manningKind ? EMPLACEMENT_LABELS[gameState.manningKind] : 'GUN').toUpperCase()} · {gameState.manningAmmo ?? 0} rounds · hold click to fire · move mouse to aim · F to step out
                 </div>
               )}
 
               {(gameMode === 'online' || gameMode === 'beta') && !gameState.manningEmplacement && gameState.emplacementNearby && (
                 <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-sky-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
-                  Press F to man the MG nest
+                  Press F to man the gun
                 </div>
               )}
 
