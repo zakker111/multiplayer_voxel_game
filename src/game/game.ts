@@ -349,6 +349,9 @@ export class Game {
    *  its ghost can go green; placing consumes it. */
   private craftedSlots: BlueprintSlots = [null, null, null];
   private benchOpen = false;
+  /** The slot 5/6/7 picks. It stays set on an empty slot so B knows where to
+   *  craft; `blueprintIndex` is the same slot only once its ghost is up. */
+  private blueprintSlot = 0;
   private blueprintIndex: number | null = null;
   private ghost: THREE.Group | null = null;
   private ghostMaterial: THREE.MeshStandardMaterial | null = null;
@@ -2760,14 +2763,19 @@ export class Game {
 
   private toggleBlueprint(index: number): void {
     if (this.gameMode !== 'online' || this.isSpectating || this.player.isDead || this.drivingJeepId) return;
-    if (this.blueprintIndex === index) { this.cancelBlueprint(); return; }
-    this.clearGhost();
+    // Picking a slot always arms the bench, empty or not: otherwise only slot 1
+    // could ever be crafted, because B reads the slot from the live ghost.
+    this.blueprintSlot = index;
     const kind = this.craftedSlots[index];
     if (!kind) {
+      this.clearGhost();
+      this.blueprintIndex = null;
       const wanted = this.blueprintCatalogue[index];
-      this.showMessage(`Slot ${index + 1} is empty — stand at the bench and press B to craft ${wanted}`);
+      this.showMessage(`Slot ${index + 1} is empty — press B at the bench to craft ${wanted}`);
       return;
     }
+    if (this.blueprintIndex === index) { this.cancelBlueprint(); return; }
+    this.clearGhost();
     const spec = emplacementSpec(kind);
     if (!spec) return;
     this.blueprintIndex = index;
@@ -2778,7 +2786,7 @@ export class Game {
     this.ghost = this.createGhostMesh(kind, this.ghostMaterial);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
-    this.showMessage(`🔧 ${spec.kind} blueprint · Q rotate · click place · right-click cancel`);
+    this.showMessage(`🔧 ${spec.kind} blueprint in slot ${index + 1} · Q rotate · click place · right-click cancel`);
   }
 
   /** Craft the catalogue blueprint for the selected slot. The server owns the
@@ -2788,7 +2796,7 @@ export class Game {
       this.showMessage('Stand at your blueprint bench to craft');
       return;
     }
-    const slot = this.blueprintIndex ?? 0;
+    const slot = this.blueprintSlot;
     this.networkClient?.send({ type: 'craftBlueprint', kind: this.blueprintCatalogue[slot], slot });
   }
 
