@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
-import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, emplacementSpec, type EmplacementKind } from './shared/types';
+import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, emplacementSpec, type EmplacementKind } from './shared/types';
 import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX } from 'lucide-react';
 
 /** HUD names for the bench blueprints; the shared table only carries numbers. */
@@ -30,6 +30,7 @@ function App() {
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
     benchMenuOpen: false,
     manningEmplacement: false, manningKind: null, manningAmmo: null, emplacementNearby: false,
+    crateNearby: false, crateStock: null,
     jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
@@ -987,6 +988,12 @@ function App() {
               {(gameMode === 'online' || gameMode === 'beta') && !gameState.manningEmplacement && gameState.emplacementNearby && (
                 <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-sky-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
                   Press F to man the gun
+                </div>
+              )}
+
+              {(gameMode === 'online' || gameMode === 'beta') && !gameState.manningEmplacement && gameState.crateNearby && (
+                <div className="absolute bottom-40 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-amber-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
+                  SUPPLY CRATE · {gameState.crateStock ?? 0}/{SUPPLY_CRATE_CAPACITY} blocks · Press E to deposit mined blocks · G to take {SUPPLY_CRATE_DRAW}
                 </div>
               )}
 

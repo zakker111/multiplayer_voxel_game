@@ -64,6 +64,7 @@ export type ClientMessage =
   | { type: 'mountEmplacement'; emplacementId: string }
   | { type: 'dismountEmplacement' }
   | { type: 'fireEmplacement' }
+  | { type: 'useSupplyCrate'; emplacementId: string; action: 'deposit' | 'draw' }
   | { type: 'join'; team: 'red' | 'blue'; position?: Position; name?: string }
   | { type: 'playerInput'; input: PlayerInput }
   | { type: 'shoot'; origin: Position; direction: Position; targetId?: string; isHeadshot?: boolean }
@@ -344,6 +345,8 @@ export interface EmplacementSnapshot {
   baseYaw: number;
   hp: number;
   ammo: number;
+  /** Mined blocks held by a supply crate; 0 for every other build. */
+  stock: number;
   /** Player manning it, or null. Only MANNED_EMPLACEMENTS can be manned. */
   gunnerId: string | null;
 }
@@ -352,6 +355,12 @@ export interface EmplacementSnapshot {
 export const MANNED_EMPLACEMENTS: EmplacementKind[] = ['mgNest', 'cannon', 'mortar'];
 /** How close a player must stand to climb into a nest. */
 export const EMPLACEMENT_MOUNT_REACH = 3.5;
+/** How close a team must stand to fill or draw from a supply crate. */
+export const EMPLACEMENT_USE_REACH = 4;
+/** Mined blocks a forward supply crate can hold before it is full. */
+export const SUPPLY_CRATE_CAPACITY = 60;
+/** Blocks one draw hands to a teammate's build inventory. */
+export const SUPPLY_CRATE_DRAW = 5;
 /** Seconds between MG nest rounds: an emplaced nest outguns a rifle. */
 export const EMPLACEMENT_FIRE_INTERVAL = 0.09;
 /** Gravity pulling cannon and mortar shells, shared so the client can draw the

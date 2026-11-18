@@ -22,6 +22,7 @@ import {
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
   emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
+  EMPLACEMENT_USE_REACH,
   isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
@@ -141,6 +142,10 @@ export interface GameState {
   manningAmmo: number | null;
   /** A mannable nest of your own team is within reach. */
   emplacementNearby: boolean;
+  /** A supply crate of your own team is within use reach. */
+  crateNearby: boolean;
+  /** Blocks held by that crate, for the HUD prompt. */
+  crateStock: number | null;
   jeepNearby: boolean;
   jeepDriving: boolean;
   jeepHp: number;
@@ -2968,6 +2973,24 @@ export class Game {
     return best;
   }
 
+  /** An own-team supply crate within reach, or null. */
+  private nearbySupplyCrate(): EmplacementSnapshot | null {
+    if (this.gameMode !== 'online') return null;
+    let best: EmplacementSnapshot | null = null;
+    let bestDistance = Infinity;
+    for (const snapshot of this.emplacedSnapshots.values()) {
+      if (snapshot.kind !== 'supplyCrate' || snapshot.team !== this.playerTeam) continue;
+      const distance = this.player.position.distanceTo(
+        new THREE.Vector3(snapshot.position.x, snapshot.position.y, snapshot.position.z),
+      );
+      if (distance <= EMPLACEMENT_USE_REACH && distance < bestDistance) {
+        best = snapshot;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
   /** Place, move, turn and remove the meshes for the server's emplacements.
    *  They are static props, so each broadcast only touches what changed. */
   private applyEmplacements(list: EmplacementSnapshot[]): void {
@@ -3214,12 +3237,19 @@ export class Game {
     if (e.code === 'KeyG' && !e.repeat && this.gameMode === 'online' && !this.player.isDead && this.workshops) {
       const pos = this.workshops[this.playerTeam].position;
       if (this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH) this.networkClient?.send({ type: 'buildJeep' });
+      else {
+        const crate = this.nearbySupplyCrate();
+        if (crate) this.networkClient?.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'draw' });
+      }
       return;
     }
     if (e.code === 'KeyE' && !e.repeat && this.gameMode === 'online' && !this.player.isDead && this.workshops) {
       const pos = this.workshops[this.playerTeam].position;
       if (this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH) {
         this.networkClient?.send({ type: 'depositWorkshop', team: this.playerTeam });
+      } else {
+        const crate = this.nearbySupplyCrate();
+        if (crate) this.networkClient?.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'deposit' });
       }
       return;
     }
@@ -5969,6 +5999,7 @@ export class Game {
       const bench = this.workshops ? benchPosition(this.workshops[this.playerTeam].position) : null;
       const benchDistance = bench ? this.player.position.distanceTo(new THREE.Vector3(bench.x, bench.y, bench.z)) : null;
       this.benchOpen = benchDistance !== null && benchDistance <= BENCH_REACH;
+      const crate = this.nearbySupplyCrate();
 
       this.onStateChange({
         hp: this.player.hp,
@@ -6001,6 +6032,8 @@ export class Game {
           ? (this.emplacedSnapshots.get(this.mountedEmplacementId)?.ammo ?? null)
           : null,
         emplacementNearby: this.nearbyMannableEmplacement() !== null,
+        crateNearby: crate !== null,
+        crateStock: crate ? crate.stock : null,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,
         hitMarker: this.hitMarkerTimer > 0,

@@ -41,12 +41,19 @@ const findSpots = (game, count) => {
   return spots;
 };
 
-/** A support bot that is not on the separate workshop logistics assignment. */
+/** A single support bot. The extra recruits are retired afterwards: a second
+ *  bot would fight the shooting test's target and make the gun the wrong
+ *  suspect for its death. */
 const supportBot = (game, team = 'blue') => {
-  for (let i = 0; i < 22; i++) {
+  const extras = [];
+  for (let i = 0; i < 40; i++) {
     const id = game.addBot(team, `Gunner ${i}`);
     const bot = game.players.get(id);
-    if (bot.roleName === 'support' && !bot.isLogistics) return bot;
+    if (bot.roleName === 'support' && !bot.isLogistics) {
+      for (const extra of extras) game.removeBot(extra);
+      return bot;
+    }
+    extras.push(id);
   }
   throw new Error('no support bot drawn');
 };
@@ -61,7 +68,9 @@ const placeNest = (game, bot, spot) => {
 /** Pick a spot around the nest with a clear line of fire and the yaw to it. */
 const findShot = (game, gun) => {
   const origin = { x: gun.position.x, y: gun.position.y + 1.15, z: gun.position.z };
-  for (const radius of [10, 12, 16, 20]) {
+  // Keep the target beyond the close-contact distance where the bot prefers
+  // its rifle over walking to a nest.
+  for (const radius of [12, 14, 16, 20]) {
     for (let i = 0; i < 16; i++) {
       const angle = (i * Math.PI) / 8;
       const x = gun.position.x + Math.cos(angle) * radius;

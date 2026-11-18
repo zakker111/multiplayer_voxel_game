@@ -14,6 +14,9 @@
 // PHASE=structures: craft, place, man and fire a cannon, watch the shell reach
 //              another client, then wreck the gun with rifle fire. Needs a
 //              botless server with MOVE_VALIDATION=off (it teleports).
+// PHASE=support: craft and place a supply crate, fill it with mined blocks and
+//              draw them back out. Needs a botless server with
+//              MOVE_VALIDATION=off (it teleports).
 // PHASE=all  : also workshop deposit, jeep build/enter/drive/exit and a flag
 //              capture (deterministic when the server runs without bots). It
 //              teleports the probe on purpose, so that server needs
@@ -117,7 +120,7 @@ try {
     typeof A.token === 'string' && typeof A.playerId === 'string');
   const bots = init.players.filter((p) => p.id.startsWith('bot_'));
   // Phase 2 deliberately runs the server botless so jeeps/CTF are deterministic.
-  const botless = PHASE === 'all' || PHASE === 'structures';
+  const botless = PHASE === 'all' || PHASE === 'structures' || PHASE === 'support';
   const expectedBots = botless ? 0 : 20;
   // Bots refill on a timer, so a server that recently had a human can be one
   // bot short of the target for a few seconds.
@@ -539,6 +542,89 @@ try {
       check('rifle fire damages and eventually wrecks an enemy emplacement', damaged || gone,
         gone ? 'destroyed' : damaged ? 'damaged but standing' : 'no damage seen');
       check('a wrecked cannon leaves the map', gone, gone ? '' : `hp ${startHp} -> ${R.last('emplacementsUpdated')?.emplacements?.find((e) => e.id === gun.id)?.hp}`);
+    }
+  }
+
+  // ---------- forward supply crate: craft, place, fill, draw ----------
+  if (PHASE === 'support') {
+    const shop = init.workshops.blue.position;
+    check('the workshop can fund a supply crate', init.workshops.blue.stock >= 20,
+      `stock=${init.workshops.blue.stock}`);
+
+    const bench = { x: shop.x - 3, y: shop.y, z: shop.z + 5 };
+    await A.place(bench);
+    await sleep(150);
+    A.messages.length = 0;
+    await A.send({ type: 'craftBlueprint', kind: 'supplyCrate', slot: 0 });
+    const crafted = await A.waitFor('blueprintsUpdated', 2000, (m) => m.blueprints?.[0] === 'supplyCrate');
+    check('crafting a crate fills a blueprint slot', !!crafted, crafted ? '' : `saw ${A.types()}`);
+
+    let crate = null;
+    let scans = 0;
+    let refusal = '';
+    outerCrate:
+    for (let z = -32; z <= 32; z += 4) {
+      for (let x = -64; x <= 64; x += 4) {
+        if (Math.abs(x) < 16 || scans >= 160) continue;
+        scans++;
+        A.messages.length = 0;
+        await A.send({ type: 'previewEmplacement', kind: 'supplyCrate', position: { x, y: shop.y, z }, yaw: 0, slot: 0 });
+        await sleep(105);
+        const good = A.last('emplacementPreview');
+        if (good?.ok && good.position) {
+          A.messages.length = 0;
+          await A.send({ type: 'placeEmplacement', kind: 'supplyCrate', position: good.position, yaw: 0, slot: 0 });
+          const upd = await A.waitFor('emplacementsUpdated', 1500,
+            (m) => (m.emplacements ?? []).some((e) => e.kind === 'supplyCrate'));
+          crate = upd?.emplacements?.find((e) => e.kind === 'supplyCrate') ?? null;
+          break outerCrate;
+        }
+        if (good && !good.ok) refusal = good.reason ?? refusal;
+      }
+    }
+    check('a crafted supply crate can be placed', !!crate,
+      crate ? `at ${crate.position.x},${crate.position.z}`
+        : `no accepted spot after ${scans} previews (${refusal || 'silent'})`);
+
+    if (crate) {
+      // Mine a few blocks; the pickaxe is the only thing that yields supply.
+      let depositable = 0;
+      outerMine:
+      for (const [ox, oz] of [[8, 0], [-8, 0], [0, 8], [0, -8]]) {
+        const spot = { x: Math.floor(shop.x) + ox + 0.5, y: shop.y, z: Math.floor(shop.z) + oz + 0.5 };
+        await A.place(spot, 'pickaxe');
+        await sleep(120);
+        for (const dy of [1, 2, 3]) {
+          A.messages.length = 0;
+          await A.send({ type: 'useTool', tool: 'pickaxe', target: { x: Math.floor(spot.x), y: Math.floor(spot.y) - dy, z: Math.floor(spot.z) } });
+          await sleep(520);
+          const res = A.last('resourcesUpdated');
+          if (res) depositable = res.depositable;
+          if (depositable >= 2) break outerMine;
+        }
+      }
+      check('the player carries mined blocks', depositable >= 2, `carried=${depositable}`);
+
+      await A.place({ x: crate.position.x + 1.5, y: crate.position.y, z: crate.position.z }, 'rifle');
+      await sleep(150);
+      A.messages.length = 0;
+      await A.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'deposit' });
+      const filled = await A.waitFor('emplacementsUpdated', 2000,
+        (m) => (m.emplacements ?? []).some((e) => e.id === crate.id && e.stock > 0));
+      const stock = filled?.emplacements?.find((e) => e.id === crate.id)?.stock ?? 0;
+      check('depositing mined blocks fills the crate', stock >= 2, `stock=${stock}`);
+      check('depositing empties the carried blocks',
+        A.last('resourcesUpdated')?.depositable === 0,
+        `depositable=${A.last('resourcesUpdated')?.depositable}`);
+
+      A.messages.length = 0;
+      await A.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'draw' });
+      const drawn = await A.waitFor('emplacementsUpdated', 2000,
+        (m) => (m.emplacements ?? []).some((e) => e.id === crate.id && e.stock < stock));
+      const left = drawn?.emplacements?.find((e) => e.id === crate.id)?.stock ?? stock;
+      check('teammates can draw blocks back out', left < stock, `stock ${stock} -> ${left}`);
+      check('a draw refills build inventory', !!A.last('inventoryUpdated'),
+        A.last('inventoryUpdated') ? `inventory=${A.last('inventoryUpdated').inventory}` : 'no inventoryUpdated');
     }
   }
 

@@ -58,7 +58,9 @@ import {
   Workshops,
   JeepSnapshot,
   WORLD_HALF, vehicleSpec, emplacementSpec, BENCH_REACH, benchPosition, EmplacementKind,
-  MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH,
+  MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_USE_REACH,
+  SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW,
+  EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH,
   EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
   type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots,
 } from '../shared/types';
@@ -331,6 +333,7 @@ export class ServerGame {
       yaw: rotation,
       hp: spec.maxHp,
       ammo: spec.ammo,
+      stock: 0,
       baseYaw: rotation,
       gunnerId: null,
     };
@@ -1048,6 +1051,43 @@ export class ServerGame {
     this.workshopStock[team] += amount;
     this.sendToPlayer(playerId, { type: 'resourcesUpdated', depositable: this.depositableBlocks.get(playerId)! });
     this.broadcastWorkshops();
+  }
+
+  /** A forward supply crate: mined blocks go in so a squad can resupply away
+   *  from the workshop, and teammates draw them back into build inventory.
+   *  Server-validated team, reach and capacity; the crate's stock dies with it. */
+  private useSupplyCrate(playerId: string, emplacementId: unknown, action: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
+    if (typeof emplacementId !== 'string' || (action !== 'deposit' && action !== 'draw')) return;
+    const crate = this.emplacements.get(emplacementId);
+    if (!crate || crate.kind !== 'supplyCrate') return this.emplacementMessage(playerId, 'That build is not a supply crate');
+    if (crate.team !== player.team) return this.emplacementMessage(playerId, 'That crate belongs to the other team');
+    const distance = Math.hypot(
+      player.position.x - crate.position.x,
+      player.position.y - crate.position.y,
+      player.position.z - crate.position.z,
+    );
+    if (distance > EMPLACEMENT_USE_REACH) return this.emplacementMessage(playerId, 'Walk up to the crate to use it');
+
+    if (action === 'deposit') {
+      const carried = this.depositableBlocks.get(playerId) ?? 0;
+      const amount = Math.min(carried, SUPPLY_CRATE_CAPACITY - crate.stock);
+      if (amount <= 0) {
+        return this.emplacementMessage(playerId, carried > 0 ? 'The crate is full' : 'Mine blocks to fill the crate');
+      }
+      crate.stock += amount;
+      this.depositableBlocks.set(playerId, carried - amount);
+      this.sendToPlayer(playerId, { type: 'resourcesUpdated', depositable: carried - amount });
+    } else {
+      if (crate.stock <= 0) return this.emplacementMessage(playerId, 'The crate is empty');
+      const amount = Math.min(SUPPLY_CRATE_DRAW, crate.stock);
+      crate.stock -= amount;
+      const inventory = (this.inventories.get(playerId) ?? 0) + amount;
+      this.inventories.set(playerId, inventory);
+      this.sendToPlayer(playerId, { type: 'inventoryUpdated', inventory });
+    }
+    this.broadcastEmplacements();
   }
   
   // Flag positions (must match client)
@@ -2310,6 +2350,10 @@ export class ServerGame {
 
       case 'depositWorkshop':
         this.depositWorkshop(playerId, message.team);
+        break;
+
+      case 'useSupplyCrate':
+        this.useSupplyCrate(playerId, message.emplacementId, message.action);
         break;
 
       case 'reload':
