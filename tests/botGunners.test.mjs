@@ -196,3 +196,104 @@ test('a bot leaves a nest alone while a human is manning it', () => {
   assert.equal(gun.gunnerId, humanId, 'the seat still belongs to the human');
   assert.notEqual(bot.stateName, 'MAN_GUN');
 });
+
+test('a bot gunner is ejected when its nest is destroyed', () => {
+  const game = new ServerGame();
+  const bot = supportBot(game);
+  const [spot] = findSpots(game, 1);
+  const gun = placeNest(game, bot, spot);
+
+  // Man the nest.
+  bot.position = { x: gun.position.x + 1, y: gun.position.y, z: gun.position.z };
+  for (let i = 0; i < 60 && gun.gunnerId !== bot.id; i++) game.update(1 / 20);
+  assert.equal(gun.gunnerId, bot.id, 'the bot manned the nest');
+
+  // A red rifleman stands clear and tears the nest down.
+  const redId = game.addPlayer({ send: () => {}, isOpen: () => true });
+  game.handleMessage(redId, { type: 'join', team: 'red' });
+  const rifle = game.players.get(redId);
+  rifle.position = { x: gun.position.x, y: gun.position.y, z: gun.position.z + 3 };
+  const aim = { x: 0, y: 0, z: -1 };
+
+  let destroyed = false;
+  for (let i = 0; i < 80 && !destroyed; i++) {
+    game.lastShootTime.delete(redId);
+    game.handleMessage(redId, {
+      type: 'shoot',
+      origin: { x: rifle.position.x, y: rifle.position.y + 1.6, z: rifle.position.z },
+      direction: aim,
+    });
+    game.update(1 / 20);
+    if (!game.emplacements.has(gun.id)) destroyed = true;
+  }
+
+  assert.ok(destroyed, 'the nest was wrecked by rifle fire');
+  assert.equal(game.gunnerEmplacement(bot.id), undefined, 'the bot was dismounted');
+  assert.notEqual(bot.stateName, 'MAN_GUN', 'the bot left the gun state');
+  assert.ok(Math.hypot(bot.position.x - gun.position.x, bot.position.z - gun.position.z) > 1,
+    'the bot was set down clear of the wreck');
+});
+
+test('a crewed bot stays at the gun and does not walk away while firing', () => {
+  const game = new ServerGame();
+  const bot = supportBot(game);
+  const [spot] = findSpots(game, 1);
+  const gun = placeNest(game, bot, spot);
+
+  const shot = findShot(game, gun);
+  assert.ok(shot, 'there is a clear line of fire near the nest');
+  gun.baseYaw = shot.yaw;
+  gun.yaw = shot.yaw;
+  bot.position = { x: gun.position.x + 1, y: gun.position.y, z: gun.position.z };
+
+  // Man the nest.
+  for (let i = 0; i < 60 && gun.gunnerId !== bot.id; i++) game.update(1 / 20);
+  assert.equal(gun.gunnerId, bot.id, 'manned');
+
+  // A red target stands in the line of fire.
+  const redId = game.addPlayer({ send: () => {}, isOpen: () => true });
+  game.handleMessage(redId, { type: 'join', team: 'red' });
+  const target = game.players.get(redId);
+  target.position = { x: shot.x, y: shot.y, z: shot.z };
+
+  const startPos = { ...bot.position };
+  let roundsSpent = gun.ammo;
+  for (let i = 0; i < 80; i++) {
+    game.update(1 / 20);
+    // The gunner must not drift from the nest while seated.
+    assert.ok(
+      Math.hypot(bot.position.x - gun.position.x, bot.position.z - gun.position.z) < 0.6,
+      `gunner stayed at the nest (drifted ${Math.hypot(bot.position.x - gun.position.x, bot.position.z - gun.position.z).toFixed(2)})`,
+    );
+    if (gun.ammo < roundsSpent) {
+      roundsSpent = gun.ammo;
+      assert.ok(
+        Math.hypot(bot.position.x - gun.position.x, bot.position.z - gun.position.z) < 0.6,
+        'gunner still at the nest after spending a round',
+      );
+    }
+  }
+
+  assert.ok(gun.ammo < emplacementSpec('mgNest').ammo, 'the nest spent rounds');
+  assert.ok(Math.hypot(bot.position.x - startPos.x, bot.position.z - startPos.z) < 0.6,
+    'the gunner never walked away from the nest');
+});
+
+test('a bot gunner is dismounted when it dies while manning the nest', () => {
+  const game = new ServerGame();
+  const bot = supportBot(game);
+  const [spot] = findSpots(game, 1);
+  const gun = placeNest(game, bot, spot);
+
+  bot.position = { x: gun.position.x + 1, y: gun.position.y, z: gun.position.z };
+  for (let i = 0; i < 60 && gun.gunnerId !== bot.id; i++) game.update(1 / 20);
+  assert.equal(gun.gunnerId, bot.id, 'manned the nest');
+
+  // Killing the gunner through the nest is hard (the nest intercepts hitscan),
+  // so damage the bot directly and let the death path dismount it.
+  bot.takeDamage(bot.maxHp);
+  game.handlePlayerDeath(bot.id);
+
+  assert.ok(bot.isDead, 'the gunner was killed');
+  assert.equal(game.gunnerEmplacement(bot.id), undefined, 'the dead gunner was dismounted');
+});
