@@ -272,7 +272,7 @@ async function startServer() {
   // message budget: 60/s sustained comfortably covers the client's 20Hz input
   // stream plus shooting, building and driving actions.
   const WS_MAX_CLIENTS = Number(process.env.WS_MAX_CLIENTS) || 64;
-  const WS_MAX_PER_IP = Number(process.env.WS_MAX_PER_IP) || 6;
+  const WS_MAX_PER_IP = Number(process.env.WS_MAX_PER_IP) || 32;
   const WS_MSG_RATE = Number(process.env.WS_MSG_RATE) || 60;
   const WS_MSG_BURST = Number(process.env.WS_MSG_BURST) || 120;
   const wsLimiter = new ConnectionLimiter(WS_MAX_CLIENTS, WS_MAX_PER_IP);
