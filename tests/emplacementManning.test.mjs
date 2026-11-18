@@ -73,7 +73,7 @@ test('the armed builds are seats, the support builds are not', () => {
 });
 
 test('a gunner must be close, on the same team, and find the seat free', () => {
-  const { game } = { game: new ServerGame() };
+  const game = new ServerGame();
   const frames = [];
   const blue = join(game, 'blue', frames);
   const [spot] = findSpots(game, 1);
@@ -239,13 +239,9 @@ test('death, disconnect and a new round all free the seat', () => {
   game.handlePlayerDeath(blue.id);
   assert.equal(nest.gunnerId, null, 'a dead gunner is not manning anything');
 
+  blue.player.isDead = false;
+  blue.player.hp = 100;
   mount(game, blue.id, nest);
-  if (nest.gunnerId !== blue.id) {
-    // Death left the player dead; revive the seat check on a healthy player.
-    blue.player.isDead = false;
-    blue.player.hp = 100;
-    mount(game, blue.id, nest);
-  }
   assert.equal(nest.gunnerId, blue.id, 'a healthy gunner can climb back in');
 
   game.removePlayer(blue.id);

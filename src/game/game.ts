@@ -37,6 +37,15 @@ const DAMAGE_INDICATOR_SECONDS = 2;
 /** Latency probe interval (ms, measured every N seconds). */
 const PING_INTERVAL_SECONDS = 2;
 
+/** Squared distance to a plain snapshot position, so the per-frame reach checks
+ *  allocate nothing. */
+function distanceSquared(from: { x: number; y: number; z: number }, to: Position): number {
+  const dx = from.x - to.x;
+  const dy = from.y - to.y;
+  const dz = from.z - to.z;
+  return dx * dx + dy * dy + dz * dz;
+}
+
 /** One row of the killfeed. Names are resolved on the client because the server
  *  only sends ids (it never needs to know display names). */
 export interface KillfeedEntry {
@@ -2956,17 +2965,16 @@ export class Game {
   /** A mannable nest of your team within reach, or null. */
   private nearbyMannableEmplacement(): EmplacementSnapshot | null {
     if (this.gameMode !== 'online') return null;
+    const reachSq = EMPLACEMENT_MOUNT_REACH * EMPLACEMENT_MOUNT_REACH;
     let best: EmplacementSnapshot | null = null;
-    let bestDistance = Infinity;
+    let bestDistanceSq = Infinity;
     for (const snapshot of this.emplacedSnapshots.values()) {
       if (!MANNED_EMPLACEMENTS.includes(snapshot.kind)) continue;
       if (snapshot.team !== this.playerTeam || snapshot.gunnerId) continue;
-      const distance = this.player.position.distanceTo(
-        new THREE.Vector3(snapshot.position.x, snapshot.position.y, snapshot.position.z),
-      );
-      if (distance <= EMPLACEMENT_MOUNT_REACH && distance < bestDistance) {
+      const distanceSq = distanceSquared(this.player.position, snapshot.position);
+      if (distanceSq <= reachSq && distanceSq < bestDistanceSq) {
         best = snapshot;
-        bestDistance = distance;
+        bestDistanceSq = distanceSq;
       }
     }
     return best;
@@ -2975,16 +2983,15 @@ export class Game {
   /** An own-team supply crate within reach, or null. */
   private nearbySupplyCrate(): EmplacementSnapshot | null {
     if (this.gameMode !== 'online') return null;
+    const reachSq = EMPLACEMENT_USE_REACH * EMPLACEMENT_USE_REACH;
     let best: EmplacementSnapshot | null = null;
-    let bestDistance = Infinity;
+    let bestDistanceSq = Infinity;
     for (const snapshot of this.emplacedSnapshots.values()) {
       if (snapshot.kind !== 'supplyCrate' || snapshot.team !== this.playerTeam) continue;
-      const distance = this.player.position.distanceTo(
-        new THREE.Vector3(snapshot.position.x, snapshot.position.y, snapshot.position.z),
-      );
-      if (distance <= EMPLACEMENT_USE_REACH && distance < bestDistance) {
+      const distanceSq = distanceSquared(this.player.position, snapshot.position);
+      if (distanceSq <= reachSq && distanceSq < bestDistanceSq) {
         best = snapshot;
-        bestDistance = distance;
+        bestDistanceSq = distanceSq;
       }
     }
     return best;
@@ -3019,9 +3026,13 @@ export class Game {
         this.weaponContainer.visible = !this.isSpectating;
       }
       this.scene.remove(mesh);
-      mesh.traverse((object) => (object as THREE.Mesh).geometry?.dispose?.());
-      (mesh.children[0] as THREE.Mesh | undefined)?.material instanceof THREE.Material
-        && ((mesh.children[0] as THREE.Mesh).material as THREE.Material).dispose();
+      mesh.traverse((object) => {
+        const part = object as THREE.Mesh;
+        part.geometry?.dispose();
+        const material = part.material;
+        if (Array.isArray(material)) material.forEach((entry) => entry.dispose());
+        else material?.dispose();
+      });
       this.emplacementMeshes.delete(id);
       this.emplacedSnapshots.delete(id);
     }
