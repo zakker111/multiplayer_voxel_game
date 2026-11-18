@@ -1286,6 +1286,23 @@ export class ServerGame {
         carryingFlag: p.carryingFlag,
       });
     }
+    // Emplacements are valid targets and obstacles for bots; a manned nest in
+    // particular must be fightable, not invisible. Both teams' builds are listed
+    // and each bot filters its own side out in perception (same as players).
+    for (const e of this.emplacements.values()) {
+      targets.push({
+        id: e.id,
+        position: { ...e.position },
+        team: e.team,
+        isDead: false,
+        carryingFlag: false,
+        emplacement: {
+          id: e.id,
+          kind: e.kind,
+          manned: e.gunnerId !== null,
+        },
+      });
+    }
     const ctx: BotContext = {
       world: this.world,
       serverTime: this.world.serverTime,
@@ -1302,6 +1319,16 @@ export class ServerGame {
           z: aimDir.z + (Math.random() - 0.5) * spread,
         };
         this.botShoot(bot.id, origin, dir, target.id);
+      },
+      fireAtEmplacement: (bot, emplacementId, aimDir, eyeY) => {
+        const origin = { x: bot.position.x, y: bot.position.y + eyeY, z: bot.position.z };
+        const spread = bot.equipment === 'smg' ? 0.03 : 0.004;
+        const dir = {
+          x: aimDir.x + (Math.random() - 0.5) * spread,
+          y: aimDir.y + (Math.random() - 0.5) * spread,
+          z: aimDir.z + (Math.random() - 0.5) * spread,
+        };
+        this.botShootAtEmplacement(bot.id, origin, dir, emplacementId);
       },
       buildBlock: (bot, pos) => {
         this.botBuild(bot.id, pos);
@@ -1394,6 +1421,46 @@ export class ServerGame {
     const occupiedJeep = this.driverJeep(targetId);
     if (occupiedJeep) this.damageJeep(occupiedJeep, weaponDamage(weapon, false, dist));
     else this.applyDamage(targetId, damage, botId, isHeadshot);
+  }
+
+  /** Bot fired at an emplacement target: the round is aimed at the build itself
+   *  and damages it directly (no player-body sampling). */
+  private botShootAtEmplacement(botId: string, origin: Position, direction: Position, emplacementId: string): void {
+    const bot = this.players.get(botId);
+    const emplacement = this.emplacements.get(emplacementId);
+    if (!bot || bot.isDead || !emplacement || emplacement.team === bot.team) return;
+
+    const weapon = WEAPONS[bot.equipment as 'rifle' | 'smg'];
+    if (!weapon) return;
+
+    this.broadcastExcept(botId, {
+      type: 'playerShot',
+      playerId: botId,
+      origin,
+      direction,
+      weapon: bot.equipment,
+    });
+    this.broadcast({ type: 'playerUpdated', playerId: botId, state: bot.getState() });
+
+    if (!this.hasLineOfSight(origin, { x: emplacement.position.x, y: emplacement.position.y + 0.8, z: emplacement.position.z })) {
+      const hit = this.world.raycast(origin, direction, 350);
+      if (hit && hit.voxelPos) {
+        this.damageAndBroadcastVoxel(hit.voxelPos);
+      }
+      return;
+    }
+
+    const dist = Math.hypot(
+      emplacement.position.x - origin.x,
+      emplacement.position.y + 0.8 - origin.y,
+      emplacement.position.z - origin.z,
+    );
+    const damage = weaponDamage(weapon, false, dist);
+
+    const structureHit = this.hitEmplacement(origin, direction, dist, bot.team);
+    if (structureHit && structureHit.emplacement.id === emplacementId) {
+      this.damageEmplacement(emplacementId, damage);
+    }
   }
 
   private damageAndBroadcastVoxel(pos: Position): void {

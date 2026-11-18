@@ -57,6 +57,13 @@ export interface BotTargetInfo {
   team: 'red' | 'blue';
   isDead: boolean;
   carryingFlag: boolean;
+  /** If this target is an emplacement, the build details the bot can engage. */
+  emplacement?: {
+    id: string;
+    kind: string;
+    /** True when a gunner is seated in it (the gun is live). */
+    manned: boolean;
+  };
 }
 
 /** The part of a placed gun the AI needs to work it. */
@@ -97,6 +104,8 @@ export interface BotContext {
   friendlyDroppedFlagPos: Position | null; // dropped flag of MY team to return
   canSee: (from: Position, to: Position) => boolean; // LOS check (terrain raycast)
   fireWeapon: (bot: ServerBot, target: BotTargetInfo, aimDir: Position, eyeY: number) => void;
+  /** Fire the bot's weapon at an emplacement (used when the target is a build). */
+  fireAtEmplacement?: (bot: ServerBot, emplacementId: string, aimDir: Position, eyeY: number) => void;
   buildBlock: (bot: ServerBot, pos: Position) => void;
   /** Optional: clear a blocking voxel (used by stuck recovery when available). */
   digBlock?: (bot: ServerBot, pos: Position) => void;
@@ -361,6 +370,8 @@ export class ServerBot extends ServerPlayer {
     // --- Perception: nearest visible enemy (with threat/revenge weighting) ---
     let nearest: BotTargetInfo | null = null;
     let nearestDist = Infinity;
+    let nearestEmplacement: BotTargetInfo | null = null;
+    let nearestEmplacementDist = Infinity;
     const revengeActive = t - this.lastAttackedAt < 8;
     for (const cand of ctx.targets) {
       if (cand.id === this.id || cand.isDead || cand.team === this.team) continue;
@@ -380,8 +391,15 @@ export class ServerBot extends ServerPlayer {
         nearestDist = score;
         nearest = cand;
       }
+      // Emplacements are valid targets too: a manned nest is worth pushing
+      // toward (it outguns a rifle), and any enemy build is a thing to fight.
+      if (cand.emplacement && cand.emplacement.manned && d < nearestEmplacementDist) {
+        nearestEmplacementDist = d;
+        nearestEmplacement = cand;
+      }
     }
     if (nearest) this.lastSeenEnemy = { ...nearest.position };
+    if (nearestEmplacement && !nearest) this.lastSeenEnemy = { ...nearestEmplacement.position };
 
     // Our flag is on the move: support bots screen the carrier home. This is
     // what turns a lucky pickup into an actual capture — a lone carrier dies
@@ -448,18 +466,25 @@ export class ServerBot extends ServerPlayer {
     ) {
       this.transition('ESCORT', t, 8);
     } else if (nearest && this.botState !== 'RETREAT') {
-      // An assault runner treats distant contacts as scenery: only an enemy
-      // inside ASSAULT_IGNORE_RANGE (or one carrying our flag) pulls it into a
-      // fight. This is what lets a wave actually reach the stand.
+      // A visible manned nest is a concrete threat, not distant scenery: fight
+      // it even while on the objective run, because it outguns a rifle.
+      const fightingAnEmplacement = nearest.emplacement && nearest.emplacement.manned;
+      // An assault runner treats distant player contacts as scenery: only an
+      // enemy inside ASSAULT_IGNORE_RANGE (or one carrying our flag) pulls it
+      // into a fight. This is what lets a wave actually reach the stand.
       const assaultPush =
         this.role === 'assault' &&
         !nearest.carryingFlag &&
+        !fightingAnEmplacement &&
         nearestDist > ASSAULT_IGNORE_RANGE;
       if (distToEnemyFlag < OBJECTIVE_PUSH_RANGE || assaultPush) {
         // In the enemy base: take the stand. Without this a bot that saw any
         // defender within ~75m picked a duel instead and the flag was never
         // touched (measured: zero pickups in a bot-only match).
         if (this.botState !== 'GRABFLAG') this.transition('GRABFLAG', t, 15);
+      } else if (fightingAnEmplacement) {
+        // A manned nest in sight is worth leaving the run for.
+        this.transition('ENGAGE', t, 4);
       } else {
         // A runner keeps running: only close contacts may pull it off the
         // objective. It still shoots back from inside doGrabFlag.
@@ -467,6 +492,10 @@ export class ServerBot extends ServerPlayer {
           this.botState === 'GRABFLAG' && nearestDist > OBJECTIVE_COMMIT_RANGE;
         if (!committedToRun) this.combatReaction(nearest, nearestDist, ctx, t);
       }
+    } else if (nearestEmplacement && nearestEmplacementDist < 40 && this.botState !== 'RETREAT') {
+      // A manned enemy nest in range is worth abandoning a wander for: it
+      // outguns a rifle and is a proper thing to fight over.
+      this.transition('ENGAGE', t, 4);
     } else if (t >= this.stateUntil) {
       this.chooseObjective(ctx, t, enemyFlag, homeBase);
     }
@@ -593,7 +622,8 @@ export class ServerBot extends ServerPlayer {
       this.transition('FLANK', t, 5 + Math.random() * 3);
     } else if (roll < this.aggroBias + this.campBias && dist > 25 && this.botState !== 'CAMP') {
       // Camp: settle into nearby cover and pre-aim
-      const spot = this.findCampSpot(ctx, enemy.position);
+      const threatPos = enemy.emplacement ? enemy.position : enemy.position;
+      const spot = this.findCampSpot(ctx, threatPos);
       if (spot) {
         this.campSpot = spot;
         this.waypoint = { ...spot };
@@ -726,6 +756,10 @@ export class ServerBot extends ServerPlayer {
     // standing in the open. A rifle bot also holds its range band (see strafe).
     if (this.isReloading && dist < 26) {
       this.breakContact(enemy.position, step, ctx);
+    } else if (enemy.emplacement) {
+      // Closing on a build: walk toward it (blockedBy keeps us out of its
+      // footprint) rather than strafing, which is tuned for moving targets.
+      this.moveTo(enemy.position, step, ctx, false);
     } else {
       // Strafe while shooting — never walk straight into the barrel
       this.strafeAround(enemy.position, step, ctx, dist);
@@ -733,7 +767,7 @@ export class ServerBot extends ServerPlayer {
     this.aimAndShoot(enemy, ctx, t);
 
     // Trading shots in the open at low HP: put a block between us and the gun.
-    if (this.hp < this.maxHp * 0.6 && t < this.pinnedDownUntil) {
+    if (this.hp < this.maxHp * 0.6 && t < this.pinnedDownUntil && !enemy.emplacement) {
       this.buildPanicCover(enemy.position, ctx, t);
     }
 
@@ -1752,7 +1786,12 @@ export class ServerBot extends ServerPlayer {
     const acquiring = t < this.aimTargetAt;
 
     const eye = this.eyePos();
-    const aimPoint: Position = { x: enemy.position.x, y: enemy.position.y + 1.1, z: enemy.position.z };
+    // Aim at the emplacement body for builds, at the torso for players.
+    const aimPoint: Position = {
+      x: enemy.position.x,
+      y: enemy.emplacement ? enemy.position.y + 0.8 : enemy.position.y + 1.1,
+      z: enemy.position.z,
+    };
     const fwd = this.forwardDir();
     const dx = aimPoint.x - eye.x;
     const dy = aimPoint.y - eye.y;
@@ -1777,13 +1816,17 @@ export class ServerBot extends ServerPlayer {
     // Accuracy: hit chance falls off with distance; rifles are more accurate
     const baseAcc = this.equipment === 'rifle' ? 0.92 : 0.8;
     const acc = baseAcc - Math.max(0, (dist - 20) / 120);
+    const aimDir = { x: dx / dist, y: dy / dist, z: dz / dist };
     if (Math.random() > acc) {
       // Missed deliberately: still consume ammo and broadcast the shot
       if (this.useAmmo()) {
         this.lastShotAt = t;
         this.isShooting = true;
-        ctx.fireWeapon(this, enemy, { x: dx / dist, y: dy / dist, z: dz / dist }, EYE_HEIGHT);
-        // tracer missed — handled by caller via randomness
+        if (enemy.emplacement && ctx.fireAtEmplacement) {
+          ctx.fireAtEmplacement(this, enemy.id, aimDir, EYE_HEIGHT);
+        } else {
+          ctx.fireWeapon(this, enemy, aimDir, EYE_HEIGHT);
+        }
       } else {
         this.startReloadIfNeeded();
       }
@@ -1793,7 +1836,11 @@ export class ServerBot extends ServerPlayer {
     if (this.useAmmo()) {
       this.lastShotAt = t;
       this.isShooting = true;
-      ctx.fireWeapon(this, enemy, { x: dx / dist, y: dy / dist, z: dz / dist }, EYE_HEIGHT);
+      if (enemy.emplacement && ctx.fireAtEmplacement) {
+        ctx.fireAtEmplacement(this, enemy.id, aimDir, EYE_HEIGHT);
+      } else {
+        ctx.fireWeapon(this, enemy, aimDir, EYE_HEIGHT);
+      }
     } else {
       this.startReloadIfNeeded();
     }

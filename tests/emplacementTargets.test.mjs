@@ -251,3 +251,98 @@ test('a bot steers around a blocked footprint instead of walking into it', () =>
   assert.equal(entered, false, 'the bot never stood inside the footprint');
   assert.ok(bot.position.x > 3, 'it still made progress toward the far side');
 });
+
+test('a bot treats an enemy nest as a visible target in the shared context', () => {
+  const game = new ServerGame();
+  const [spot] = findSpots(game, 1);
+  const { emplacement: nest } = build(game, 'blue', 'mgNest', spot);
+  // The context lists both teams' builds; each bot filters its own side out.
+  const ctx = game.getBotContext();
+  const blueBuilds = ctx.targets.filter((t) => t.emplacement && t.team === 'blue');
+  const redBuilds = ctx.targets.filter((t) => t.emplacement && t.team === 'red');
+  assert.equal(blueBuilds.length, 1, 'the blue nest is in the shared target list');
+  assert.equal(blueBuilds[0].emplacement?.kind, 'mgNest', 'the nest carries its kind');
+  assert.equal(blueBuilds[0].emplacement?.manned, false, 'an unmanned nest is not manned');
+  assert.equal(redBuilds.length, 0, 'no red builds leak into the list');
+});
+
+test('a bot engages a manned enemy nest instead of ignoring it', () => {
+  // Headless bots with a mocked world: the bot sees a manned red nest and
+  // switches to ENGAGE to fight it, then fires at it.
+  const world = new ServerWorld();
+  const nestPos = { x: 20, y: GROUND_LEVEL, z: 0 };
+  const nestId = 'red-nest';
+  let firedAt = null;
+  const ctx = {
+    world,
+    serverTime: 0,
+    targets: [
+      {
+        id: nestId,
+        position: nestPos,
+        team: 'red',
+        isDead: false,
+        carryingFlag: false,
+        emplacement: { id: nestId, kind: 'mgNest', manned: true },
+      },
+    ],
+    friendlyDroppedFlagPos: null,
+    canSee: (from, to) => Math.hypot(from.x - to.x, from.z - to.z) < 45,
+    fireWeapon: () => { throw new Error('should not fire at a player target') },
+    fireAtEmplacement: (_bot, id, _dir, _eye) => { firedAt = id; },
+    buildBlock: () => {},
+    blockedBy: (x, z) => Math.abs(x - nestPos.x) < 3 && Math.abs(z - nestPos.z) < 2.5,
+  };
+  const bot = new ServerBot('engager', { x: 0, y: GROUND_LEVEL, z: 0 }, 'blue', 'Hunter');
+  bot.equipment = 'rifle';
+  bot.currentAmmo = 30;
+  bot.magazineSize = 30;
+
+  // Run long enough for the bot to notice the nest and switch states.
+  for (let tick = 0; tick < 300; tick++) {
+    ctx.serverTime += 1 / 20;
+    bot.botUpdate(1 / 20, ctx);
+    if (firedAt) break;
+  }
+  assert.equal(firedAt, nestId, 'the bot fired at the manned nest');
+  assert.equal(bot.stateName, 'ENGAGE', 'the bot entered ENGAGE to fight the nest');
+});
+
+test('a bot routes around an emplacement instead of walking into it', () => {
+  const world = new ServerWorld();
+  const nestX = 10;
+  const ctx = {
+    world,
+    serverTime: 0,
+    targets: [
+      {
+        id: 'enemy-nest',
+        position: { x: nestX, y: GROUND_LEVEL, z: 0 },
+        team: 'red',
+        isDead: false,
+        carryingFlag: false,
+        emplacement: { id: 'enemy-nest', kind: 'mgNest', manned: true },
+      },
+    ],
+    friendlyDroppedFlagPos: null,
+    canSee: () => true,
+    fireWeapon: () => {},
+    fireAtEmplacement: () => {},
+    buildBlock: () => {},
+    blockedBy: (x, z) => Math.abs(x - nestX) < 3 && Math.abs(z - 0) < 2.5,
+  };
+  const bot = new ServerBot('router', { x: 0, y: GROUND_LEVEL, z: 8 }, 'blue', 'Runner');
+  let enteredFootprint = false;
+  for (let tick = 0; tick < 200; tick++) {
+    ctx.serverTime += 1 / 20;
+    // Move toward a point on the far side of the nest.
+    bot.moveTo({ x: nestX, y: GROUND_LEVEL, z: -8 }, 1 / 20, ctx, false);
+    if (Math.abs(bot.position.x - nestX) < 3 - 0.5 && Math.abs(bot.position.z - 0) < 2.5 - 0.5) {
+      enteredFootprint = true;
+    }
+  }
+  assert.equal(enteredFootprint, false, 'the bot never stood inside the nest footprint');
+  // It should have gone around to the other side.
+  assert.ok(Math.abs(bot.position.z + 8) < 4 || Math.abs(bot.position.x - nestX) > 4,
+    'the bot made progress past the nest');
+});
