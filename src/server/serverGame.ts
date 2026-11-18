@@ -93,8 +93,10 @@ const BOT_JEEP_COOLDOWN = 25;
 const BOT_LOGISTICS_PER_TEAM = 1;
 const BOT_LOGISTICS_CAPACITY = 12;
 // Watermark the logistics bots keep the workshop stocked to. It has to cover
-// the most expensive thing a bot buys on its own initiative: an emplacement.
-const BOT_LOGISTICS_MIN_STOCK = 120;
+// the most expensive thing a bot buys on its own initiative: an emplacement
+// (cannon, cost 90). Lower values starve emplacements; higher values waste
+// mining trips on stock the bots cannot spend on their own.
+const BOT_LOGISTICS_MIN_STOCK = 90;
 const BOT_LOGISTICS_MINE_RADIUS = 8;
 
 // Emplacement placement rules (Phase 4). Your own base may be fortified, but
