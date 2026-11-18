@@ -28,7 +28,7 @@ function App() {
     benchDistance: null, benchOpen: false,
     blueprints: [null, null, null], blueprintSlot: 0,
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
-    benchMenuOpen: false,
+    benchMenuOpen: false, benchFeedback: '',
     manningEmplacement: false, manningKind: null, manningAmmo: null, emplacementNearby: false,
     crateNearby: false, crateStock: null,
     jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
@@ -1056,17 +1056,26 @@ function App() {
                             </div>
                             {[0, 1, 2].map((slot) => {
                               const taken = Boolean(gameState.blueprints[slot]);
-                              const disabled = taken || !affordable;
+                              // Keep the button clickable even when it cannot
+                              // succeed: the server's refusal is the feedback,
+                              // and a disabled button made it look dead.
+                              const muted = taken || !affordable;
                               return (
                                 <button
                                   key={slot}
                                   type="button"
-                                  disabled={disabled}
-                                  title={taken ? 'That slot already holds a blueprint' : `Craft into slot ${slot + 1}`}
+                                  aria-disabled={muted}
+                                  title={
+                                    taken
+                                      ? 'That slot already holds a blueprint'
+                                      : affordable
+                                        ? `Craft into slot ${slot + 1}`
+                                        : `Not enough team stock (needs ${spec.cost})`
+                                  }
                                   onClick={() => gameRef.current?.craftFromBench(kind, slot)}
                                   className={`rounded-md border px-2 py-1 text-xs ${
-                                    disabled
-                                      ? 'cursor-not-allowed border-gray-700 text-gray-600'
+                                    muted
+                                      ? 'cursor-pointer border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300'
                                       : 'border-sky-500/60 text-sky-200 hover:bg-sky-500/20'
                                   }`}
                                 >
@@ -1077,6 +1086,15 @@ function App() {
                           </div>
                         );
                       })}
+                    </div>
+
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="mt-3 min-h-[2.25rem] rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs text-sky-100"
+                    >
+                      {gameState.benchFeedback
+                        || 'Pick a build and a slot — the server checks stock, reach and empty slots.'}
                     </div>
 
                     <div className="mt-4 flex items-center justify-between gap-3">

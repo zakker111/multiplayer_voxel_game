@@ -134,6 +134,9 @@ export interface GameState {
   blueprintCatalogue: EmplacementKind[];
   /** The bench menu overlay is up; the cursor is free and the game keys idle. */
   benchMenuOpen: boolean;
+  /** Latest craft answer from the server, shown inside the bench menu because
+   *  the menu overlay covers the normal HUD message line. */
+  benchFeedback: string;
   /** True while manning an emplacement; the HUD swaps to its gun hints. */
   manningEmplacement: boolean;
   /** Which gun is manned, for the HUD line. */
@@ -372,6 +375,8 @@ export class Game {
   private craftedSlots: BlueprintSlots = [null, null, null];
   private benchOpen = false;
   private benchMenuOpen = false;
+  /** Last craft success/refusal, mirrored into the menu overlay. */
+  private benchFeedback = '';
   /** Emplacements the server has broadcast, and the meshes drawn for them. */
   private emplacedSnapshots = new Map<string, EmplacementSnapshot>();
   private emplacementMeshes = new Map<string, THREE.Group>();
@@ -2381,7 +2386,7 @@ export class Game {
       const craftedAt = this.craftedSlots.findIndex((kind, i) => kind !== null && previous[i] === null);
       if (craftedAt >= 0) {
         const spec = emplacementSpec(this.craftedSlots[craftedAt]!);
-        if (spec) this.showMessage(`🔧 Crafted ${spec.kind} into slot ${craftedAt + 1} · -${spec.cost} blocks`);
+        if (spec) this.showBenchMessage(`🔧 Crafted ${spec.kind} into slot ${craftedAt + 1} · -${spec.cost} blocks`);
       }
       // Placing a blueprint empties its slot, so the ghost must go away rather
       // than linger as a ghost the server would refuse.
@@ -2456,7 +2461,7 @@ export class Game {
       this.shellBlasts.push({ mesh, material, until: performance.now() / 1000 + 0.35 });
     });
     this.networkClient.onMessage('emplacementMessage', (msg: any) => {
-      if (typeof msg.message === 'string') this.showMessage(msg.message);
+      if (typeof msg.message === 'string') this.showBenchMessage(msg.message);
     });
     this.networkClient.onMessage('jeepExited', (msg: any) => {
       this.drivingJeepId = null;
@@ -2892,6 +2897,7 @@ export class Game {
       return;
     }
     this.benchMenuOpen = true;
+    this.benchFeedback = '';
     // A ghost left over from a previous pick would sit behind the panel.
     this.cancelBlueprint();
     if (document.pointerLockElement) document.exitPointerLock();
@@ -2904,19 +2910,21 @@ export class Game {
     // Re-locking needs a user gesture; closing from a click on the panel has
     // one, closing from a key press falls back to the canvas click path, so a
     // rejected request must not surface as an unhandled promise.
-    if (!document.pointerLockElement) {
-      try {
-        this.canvas.requestPointerLock?.();
-      } catch {
-        /* the canvas click path re-locks the pointer */
-      }
-    }
+    if (!document.pointerLockElement) this.tryPointerLock();
+  }
+
+  /** Show craft feedback in the bench menu as well as the normal HUD line. The
+   *  overlay covers the message banner, so a refusal would otherwise look like
+   *  a dead click. */
+  private showBenchMessage(msg: string): void {
+    this.showMessage(msg);
+    if (this.benchMenuOpen) this.benchFeedback = msg;
   }
 
   /** Craft one build into one slot from the menu. The server owns the cost, the
    *  reach check and the slot, so this only states the intent. */
   craftFromBench(kind: EmplacementKind, slot: number): void {
-    if (!this.benchOpen) { this.showMessage('Stand at your blueprint bench to craft'); return; }
+    if (!this.benchOpen) { this.showBenchMessage('Stand at your blueprint bench to craft'); return; }
     this.blueprintSlot = slot;
     this.networkClient?.send({ type: 'craftBlueprint', kind, slot });
   }
@@ -3428,7 +3436,19 @@ export class Game {
   }
 
   requestPointerLock(canvas: HTMLCanvasElement): void {
-    canvas.requestPointerLock();
+    this.tryPointerLock(canvas);
+  }
+
+  /** Request pointer lock without leaking a rejected promise. Browsers reject
+   *  when the request is not tied to a user gesture or the document is not
+   *  focused; the canvas click path re-locks, so the failure stays silent. */
+  private tryPointerLock(canvas: HTMLCanvasElement = this.canvas): void {
+    try {
+      const pending = canvas.requestPointerLock?.() as unknown;
+      if (pending instanceof Promise) void pending.catch(() => { /* click path re-locks */ });
+    } catch {
+      /* older browsers may throw synchronously */
+    }
   }
 
   private performAction(): void {
@@ -4111,6 +4131,7 @@ export class Game {
     this.message = msg;
     this.messageTimer = 2;
   }
+
 
   private handlePlayerRespawn(customPos?: THREE.Vector3): void {
     const spawnPos = customPos || this.getSafeSpawnPos(this.playerTeam);
@@ -6024,6 +6045,7 @@ export class Game {
         blueprintSlot: this.blueprintSlot,
         blueprintCatalogue: this.blueprintCatalogue,
         benchMenuOpen: this.benchMenuOpen,
+        benchFeedback: this.benchMenuOpen ? this.benchFeedback : '',
         manningEmplacement: Boolean(this.mountedEmplacementId),
         manningKind: this.mountedEmplacementId
           ? (this.emplacedSnapshots.get(this.mountedEmplacementId)?.kind ?? null)
