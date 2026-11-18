@@ -1,6 +1,10 @@
-// Emplacement foundation (Phase 4): the kind table, server-side placement
-// validation and cost charging. No client UI yet — these drive the server
-// directly through the same protocol message a client will send.
+// Emplacement foundation (Phase 4): the kind table, the bench craft step and
+// server-side placement validation. No client UI yet — these drive the server
+// directly through the same protocol messages a client will send.
+//
+// Cost model: the bench charges the full spec cost when a blueprint is crafted
+// into one of three slots; placing that blueprint is free and consumes the slot.
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -24,11 +28,14 @@ const isFlat = (game, x, z) => {
   return high - low <= 0 && high > 0;
 };
 
-/** Flat, non-overlapping spots away from both bases and workshops. */
+/** Flat, non-overlapping spots in the mid-map band so they clear both bases,
+ *  the workshops and the bench (where the player stands to craft). */
 const findSpots = (game, count) => {
   const spots = [];
   for (let z = -30; z <= 30; z += 3) {
     for (let x = -60; x <= 60; x += 3) {
+      if (Math.abs(x) < 15) continue;           // clear of the workshop band
+      if (Math.abs(z) > 50) continue;           // clear of the flag stands
       if (!isFlat(game, x, z)) continue;
       if (spots.some((s) => Math.hypot(s.x - x, s.z - z) < 5)) continue;
       spots.push({ x, y: groundTop(game, x, z), z });
@@ -38,18 +45,32 @@ const findSpots = (game, count) => {
   return spots;
 };
 
+/** A joined player standing at their team's bench, plus the frames the server
+ *  sent them. Bots are off, so the first human id is the one we control. */
 const setup = (team = 'blue') => {
   const game = new ServerGame();
   const frames = [];
   const id = game.addPlayer({ send: (data) => frames.push(JSON.parse(data)), isOpen: () => true });
   game.handleMessage(id, { type: 'join', team });
   const player = game.players.get(id);
-  player.position = { x: 0, y: 40, z: 0 }; // clear of every placement footprint
-  return { game, id, player, frames };
+
+  // The bench sits at the workshop centre + BENCH_OFFSET, inside the protected
+  // workshop cells. The player must stand there to craft.
+  const workshop = game.getWorkshops()[team].position;
+  const bench = { x: workshop.x - 3, y: workshop.y, z: workshop.z + 5 };
+  player.position = { ...bench };
+
+  return { game, id, player, frames, workshop, bench };
 };
 
-const place = (game, id, kind, spot, yaw = 0) =>
-  game.handleMessage(id, { type: 'placeEmplacement', kind, position: spot, yaw });
+const craft = (game, id, kind, slot) =>
+  game.handleMessage(id, { type: 'craftBlueprint', kind, slot });
+
+const place = (game, id, kind, spot, yaw = 0, slot = 0) =>
+  game.handleMessage(id, { type: 'placeEmplacement', kind, position: spot, yaw, slot });
+
+const message = (frames, text) =>
+  frames.filter((f) => f.type === 'emplacementMessage' && f.message === text);
 
 test('every emplacement kind is a complete spec', () => {
   const kinds = ['mgNest', 'cannon', 'mortar', 'supplyCrate', 'spottingPost'];
@@ -80,13 +101,67 @@ test('every emplacement kind is a complete spec', () => {
   assert.equal(emplacementSpec('toString'), undefined, 'prototype keys are not specs');
 });
 
-test('a valid placement is charged once and stored with its spec stats', () => {
+test('crafting at the bench charges the cost and fills the slot', () => {
+  const { game, id, frames } = setup();
+  const spec = emplacementSpec('mgNest');
+  game.workshopStock.blue = 200;
+
+  craft(game, id, 'mgNest', 0);
+
+  assert.deepEqual(game.craftedBlueprints.get(id), ['mgNest', null, null], 'slot 1 holds the blueprint');
+  assert.equal(game.workshopStock.blue, 200 - spec.cost, 'the bench charged the spec cost');
+  const update = frames.filter((f) => f.type === 'blueprintsUpdated').pop();
+  assert.deepEqual(update?.blueprints, ['mgNest', null, null], 'the crafter is told about the slot');
+});
+
+test('crafting is refused away from the bench, with junk input, and into a full slot', () => {
+  const { game, id, frames } = setup();
+  game.workshopStock.blue = 200;
+
+  craft(game, id, 'mgNest', 0);
+  assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest');
+
+  craft(game, id, 'mgNest', 0);
+  assert.equal(message(frames, 'That slot already has a blueprint in it').length, 1, 'an occupied slot refuses');
+
+  craft(game, id, 'tank', 1);
+  assert.equal(message(frames, 'That is not a real blueprint').length, 1, 'unknown kinds refuse');
+
+  craft(game, id, 'mgNest', 9);
+  assert.equal(message(frames, 'Choose slot 1, 2 or 3').length, 1, 'out-of-range slots refuse');
+
+  game.players.get(id).position = { x: 0, y: 40, z: 0 };
+  craft(game, id, 'cannon', 1);
+  assert.equal(message(frames, 'Stand at your blueprint bench to craft').length, 1, 'distance refuses');
+
+  assert.deepEqual(game.craftedBlueprints.get(id), ['mgNest', null, null], 'only the first craft landed');
+  assert.equal(game.workshopStock.blue, 200 - emplacementSpec('mgNest').cost, 'refusals cost nothing');
+});
+
+test('an unaffordable craft is refused and costs nothing', () => {
+  const { game, id, frames } = setup();
+  const spec = emplacementSpec('cannon');
+  game.workshopStock.blue = spec.cost - 1;
+
+  craft(game, id, 'cannon', 0);
+
+  assert.equal(message(frames, 'Not enough workshop blocks for that build').length, 1);
+  assert.equal(game.workshopStock.blue, spec.cost - 1, 'no charge for a refusal');
+  assert.equal(game.craftedBlueprints.get(id), undefined, 'no slot was created');
+  assert.equal(frames.filter((f) => f.type === 'blueprintsUpdated').length, 0, 'and no slot update');
+});
+
+test('a valid placement consumes the crafted blueprint and stores its spec stats', () => {
   const { game, id } = setup();
   const [spot] = findSpots(game, 1);
   assert.ok(spot, 'the generated terrain has a flat spot to build on');
   game.workshopStock.blue = 200;
 
-  place(game, id, 'mgNest', spot);
+  const craftCost = emplacementSpec('mgNest').cost;
+  craft(game, id, 'mgNest', 0);
+  assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest', 'the slot now holds the blueprint');
+
+  place(game, id, 'mgNest', spot, 0, 0);
 
   assert.equal(game.emplacements.size, 1);
   const built = [...game.emplacements.values()][0];
@@ -96,29 +171,34 @@ test('a valid placement is charged once and stored with its spec stats', () => {
   assert.equal(built.hp, spec.maxHp);
   assert.equal(built.ammo, spec.ammo);
   assert.equal(built.position.y, spot.y, 'snapped to the server ground');
-  assert.equal(game.workshopStock.blue, 200 - spec.cost, 'charged exactly the spec cost');
+  assert.equal(game.workshopStock.blue, 200 - craftCost, 'stock only moved at the bench, not at placement');
+  assert.equal(game.craftedBlueprints.get(id)?.[0], null, 'the slot is empty after placement');
 });
 
-test('an unaffordable placement is refused and costs nothing', () => {
+test('placing an empty or mismatched slot is refused', () => {
   const { game, id } = setup();
   const [spot] = findSpots(game, 1);
-  const spec = emplacementSpec('cannon');
-  game.workshopStock.blue = spec.cost - 1;
+  game.workshopStock.blue = 200;
 
-  place(game, id, 'cannon', spot);
+  place(game, id, 'mgNest', spot, 0, 0);
+  assert.equal(game.emplacements.size, 0, 'no blueprint, no build');
+  assert.equal(game.workshopStock.blue, 200, 'and nothing was charged');
 
-  assert.equal(game.emplacements.size, 0);
-  assert.equal(game.workshopStock.blue, spec.cost - 1, 'no charge for a refusal');
+  craft(game, id, 'mgNest', 0);
+  place(game, id, 'cannon', spot, 0, 0);
+  assert.equal(game.emplacements.size, 0, 'the slot holds a different kind');
+  assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest', 'the mismatched attempt spent nothing');
 });
 
 test('nothing can be placed near the enemy base', () => {
   const { game, id } = setup('blue');
   game.workshopStock.blue = 200;
 
-  place(game, id, 'mortar', { x: RED_FLAG_POS.x, y: 10, z: RED_FLAG_POS.z });
+  craft(game, id, 'mortar', 0);
+  place(game, id, 'mortar', { x: RED_FLAG_POS.x, y: 10, z: RED_FLAG_POS.z }, 0, 0);
 
   assert.equal(game.emplacements.size, 0);
-  assert.equal(game.workshopStock.blue, 200, 'no charge for a refusal');
+  assert.equal(game.craftedBlueprints.get(id)?.[0], 'mortar', 'the refused build keeps its blueprint');
 });
 
 test('a spot claimed twice is refused the second time', () => {
@@ -126,73 +206,99 @@ test('a spot claimed twice is refused the second time', () => {
   const [spot] = findSpots(game, 1);
   game.workshopStock.blue = 200;
 
-  place(game, id, 'mgNest', spot);
-  place(game, id, 'mgNest', spot);
+  craft(game, id, 'mgNest', 0);
+  place(game, id, 'mgNest', spot, 0, 0);
+  craft(game, id, 'mgNest', 0);
+  place(game, id, 'mgNest', spot, 0, 0);
 
   assert.equal(game.emplacements.size, 1);
-  assert.equal(game.workshopStock.blue, 200 - emplacementSpec('mgNest').cost);
+  assert.equal(game.workshopStock.blue, 200 - emplacementSpec('mgNest').cost * 2, 'both crafts were paid for');
+  assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest', 'the blocked spot kept its blueprint');
 });
 
 test('the per-team limit stops the build after its allowance', () => {
   const { game, id } = setup();
-  const spots = findSpots(game, 3);
-  assert.ok(spots.length >= 3, 'needs three flat spots');
   const spec = emplacementSpec('mgNest');
+  const spots = findSpots(game, spec.teamLimit + 1);
+  assert.ok(spots.length > spec.teamLimit, 'needs one more flat spot than the limit');
   game.workshopStock.blue = 300;
 
-  for (const spot of spots) place(game, id, 'mgNest', spot);
+  for (let i = 0; i < spec.teamLimit; i++) {
+    craft(game, id, 'mgNest', 0);
+    place(game, id, 'mgNest', spots[i], 0, 0);
+  }
 
   assert.equal(game.emplacements.size, spec.teamLimit, 'only the allowed number stands');
-  assert.equal(game.workshopStock.blue, 300 - spec.cost * spec.teamLimit);
+  assert.equal(game.workshopStock.blue, 300 - spec.cost * spec.teamLimit, 'one craft charge per build');
+  assert.deepEqual(game.craftedBlueprints.get(id), [null, null, null], 'all crafted slots consumed');
+
+  // One more blueprint survives the refused build: the limit is checked before
+  // the slot, so nothing is spent and the blueprint stays in the slot.
+  craft(game, id, 'mgNest', 0);
+  place(game, id, 'mgNest', spots[spec.teamLimit], 0, 0);
+  assert.equal(game.emplacements.size, spec.teamLimit, 'still capped by the team limit');
+  assert.equal(game.workshopStock.blue, 300 - spec.cost * (spec.teamLimit + 1), 'only the craft moved stock');
+  assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest', 'the refused build kept its blueprint');
 });
 
 test('junk kinds and off-ground positions are ignored', () => {
   const { game, id } = setup();
   const [spot] = findSpots(game, 1);
   game.workshopStock.blue = 200;
+  craft(game, id, 'mgNest', 0);
 
-  place(game, id, 'tank', spot);
-  place(game, id, 'mgNest', { x: Number.NaN, y: 0, z: 0 });
-  place(game, id, 'mgNest', { x: spot.x, y: spot.y + 20, z: spot.z });
+  place(game, id, 'tank', spot, 0, 0);
+  place(game, id, 'mgNest', { x: Number.NaN, y: 0, z: 0 }, 0, 0);
+  place(game, id, 'mgNest', { x: spot.x, y: spot.y + 20, z: spot.z }, 0, 0);
 
   assert.equal(game.emplacements.size, 0, 'nothing was built');
-  assert.equal(game.workshopStock.blue, 200, 'and nothing was charged');
+  assert.equal(game.workshopStock.blue, 200 - emplacementSpec('mgNest').cost, 'only the craft was charged');
+  assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest', 'the blueprint was not consumed');
 });
 
 test('each team pays from its own stockpile', () => {
-  const { game, id } = setup('blue');
-  const red = game.addPlayer({ send: () => {}, isOpen: () => true });
-  game.handleMessage(red, { type: 'join', team: 'red' });
-  game.players.get(red).position = { x: 0, y: 40, z: 0 };
+  const { game, id: blueId } = setup('blue');
+  const redId = game.addPlayer({ send: () => {}, isOpen: () => true });
+  game.handleMessage(redId, { type: 'join', team: 'red' });
+  const redPlayer = game.players.get(redId);
+  const redWorkshop = game.getWorkshops().red.position;
+  redPlayer.position = { x: redWorkshop.x - 3, y: redWorkshop.y, z: redWorkshop.z + 5 };
 
   const spots = findSpots(game, 2);
   assert.ok(spots.length >= 2, 'needs two flat spots');
   game.workshopStock.blue = 200;
   game.workshopStock.red = 200;
+  const crateCost = emplacementSpec('supplyCrate').cost;
 
-  place(game, id, 'supplyCrate', spots[0]);
-  place(game, red, 'supplyCrate', spots[1]);
+  craft(game, blueId, 'supplyCrate', 0);
+  craft(game, redId, 'supplyCrate', 1);
+  place(game, blueId, 'supplyCrate', spots[0], 0, 0);
+  place(game, redId, 'supplyCrate', spots[1], 0, 1);
 
   assert.equal(game.emplacements.size, 2);
-  assert.equal(game.workshopStock.blue, 200 - emplacementSpec('supplyCrate').cost);
-  assert.equal(game.workshopStock.red, 200 - emplacementSpec('supplyCrate').cost);
+  assert.equal(game.workshopStock.blue, 200 - crateCost);
+  assert.equal(game.workshopStock.red, 200 - crateCost);
+  assert.equal(game.craftedBlueprints.get(blueId)?.[0], null, 'blue blueprint consumed');
+  assert.equal(game.craftedBlueprints.get(redId)?.[1], null, 'red blueprint consumed');
 });
 
 test('the ghost preview agrees with placement and charges nothing', () => {
   const { game, id, frames } = setup();
   const [spot] = findSpots(game, 1);
   game.workshopStock.blue = 200;
+  const nestCost = emplacementSpec('mgNest').cost;
+  craft(game, id, 'mgNest', 0);
 
-  game.handleMessage(id, { type: 'previewEmplacement', kind: 'mgNest', position: spot, yaw: Math.PI / 2 });
+  game.handleMessage(id, { type: 'previewEmplacement', kind: 'mgNest', position: spot, yaw: Math.PI / 2, slot: 0 });
   const preview = frames.filter((f) => f.type === 'emplacementPreview').pop();
   assert.ok(preview, 'the server answered the preview');
   assert.equal(preview.ok, true);
   assert.equal(preview.yaw, Math.PI / 2, 'rotation is echoed back');
   assert.deepEqual(preview.position, spot, 'the snapped spot comes back to the ghost');
   assert.equal(game.emplacements.size, 0, 'a preview builds nothing');
-  assert.equal(game.workshopStock.blue, 200, 'a preview charges nothing');
+  assert.equal(game.workshopStock.blue, 200 - nestCost, 'only the craft cost moved');
 
-  place(game, id, 'mgNest', spot, Math.PI / 2);
+  place(game, id, 'mgNest', spot, Math.PI / 2, 0);
   assert.equal(game.emplacements.size, 1, 'the same spot then places for real');
 });
 
@@ -200,7 +306,7 @@ test('the ghost preview explains a refusal', () => {
   const { game, id, frames } = setup('blue');
   game.workshopStock.blue = 200;
 
-  game.handleMessage(id, { type: 'previewEmplacement', kind: 'mortar', position: { x: RED_FLAG_POS.x, y: 10, z: RED_FLAG_POS.z }, yaw: 0 });
+  game.handleMessage(id, { type: 'previewEmplacement', kind: 'mortar', position: { x: RED_FLAG_POS.x, y: 10, z: RED_FLAG_POS.z }, yaw: 0, slot: 0 });
   const preview = frames.filter((f) => f.type === 'emplacementPreview').pop();
 
   assert.equal(preview.ok, false);
@@ -214,21 +320,30 @@ test('preview replies are throttled so a hovering ghost cannot spam', () => {
   game.workshopStock.blue = 200;
 
   for (let i = 0; i < 10; i++) {
-    game.handleMessage(id, { type: 'previewEmplacement', kind: 'mgNest', position: spot, yaw: 0 });
+    game.handleMessage(id, { type: 'previewEmplacement', kind: 'mgNest', position: spot, yaw: 0, slot: 0 });
   }
 
   assert.equal(frames.filter((f) => f.type === 'emplacementPreview').length, 1, 'a burst gets one reply');
 });
 
-test('a new round clears the map of emplacements', () => {
+test('a new round clears the map and the carried blueprints', () => {
   const { game, id } = setup();
   const [spot] = findSpots(game, 1);
   game.workshopStock.blue = 200;
 
-  place(game, id, 'mgNest', spot);
+  craft(game, id, 'mgNest', 0);
+  place(game, id, 'mgNest', spot, 0, 0);
   assert.equal(game.emplacements.size, 1);
+  assert.equal(game.craftedBlueprints.get(id)?.[0], null, 'the placed blueprint is already consumed');
+  assert.equal(game.workshopStock.blue, 200 - emplacementSpec('mgNest').cost, 'only the craft cost moved');
+
+  // Craft a second one and hold it without placing, so the round reset has
+  // something to clear.
+  craft(game, id, 'cannon', 1);
+  assert.equal(game.craftedBlueprints.get(id)?.[1], 'cannon', 'a held blueprint exists');
 
   game.startNextRound();
 
-  assert.equal(game.emplacements.size, 0);
+  assert.equal(game.emplacements.size, 0, 'emplacements clear on round reset');
+  assert.equal(game.craftedBlueprints.get(id), undefined, 'carried blueprints are dropped with no refund');
 });

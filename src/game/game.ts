@@ -19,8 +19,8 @@ import {
   DEFAULT_ROUND_MINUTES,
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
-  WORKSHOP_REACH, JEEP_ENTER_REACH, benchPosition,
-  emplacementSpec, type EmplacementKind,
+  WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
+  emplacementSpec, type EmplacementKind, type BlueprintSlots,
   isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
@@ -343,7 +343,11 @@ export class Game {
   private drivingJeepId: string | null = null;
 
   // ---- Blueprint placement (Phase 4 prototype) ----
-  private blueprintSlots: EmplacementKind[] = ['mgNest', 'supplyCrate', 'spottingPost'];
+  /** What the bench can build into each slot (slot 1..3 = index 0..2). */
+  private readonly blueprintCatalogue: EmplacementKind[] = ['mgNest', 'supplyCrate', 'spottingPost'];
+  /** Server-owned crafted blueprints. A slot must be filled at the bench before
+   *  its ghost can go green; placing consumes it. */
+  private craftedSlots: BlueprintSlots = [null, null, null];
   private benchOpen = false;
   private blueprintIndex: number | null = null;
   private ghost: THREE.Group | null = null;
@@ -1983,6 +1987,9 @@ export class Game {
       // Round HUD: adopt the server clock immediately, otherwise a late joiner
       // would show round 1 with a full 30:00 clock until the next 1Hz sync.
       if (msg.round) this.applyRoundSnapshot(msg.round as RoundSnapshot);
+      // Bench blueprints survive reconnects: the server sends this player's
+      // crafted slots with the rest of the init snapshot.
+      this.craftedSlots = Array.isArray(msg.blueprints) ? (msg.blueprints as BlueprintSlots) : [null, null, null];
       // Scoreboard: adopt the server's authoritative K/D/capture tallies.
       // Clear stale singleplayer tallies first so they don't linger in online play.
       this.statsById.clear();
@@ -2329,6 +2336,13 @@ export class Game {
     });
     this.networkClient.onMessage('workshopsUpdated', (msg: any) => {
       this.workshops = msg.workshops as Workshops;
+    });
+    this.networkClient.onMessage('blueprintsUpdated', (msg: any) => {
+      if (!Array.isArray(msg.blueprints)) return;
+      this.craftedSlots = msg.blueprints as BlueprintSlots;
+      // Placing a blueprint empties its slot, so the ghost must go away rather
+      // than linger as a ghost the server would refuse.
+      if (this.blueprintIndex !== null && !this.craftedSlots[this.blueprintIndex]) this.cancelBlueprint();
     });
 
     this.networkClient.onMessage('jeepsUpdated', (msg: any) => {
@@ -2748,7 +2762,12 @@ export class Game {
     if (this.gameMode !== 'online' || this.isSpectating || this.player.isDead || this.drivingJeepId) return;
     if (this.blueprintIndex === index) { this.cancelBlueprint(); return; }
     this.clearGhost();
-    const kind = this.blueprintSlots[index];
+    const kind = this.craftedSlots[index];
+    if (!kind) {
+      const wanted = this.blueprintCatalogue[index];
+      this.showMessage(`Slot ${index + 1} is empty — stand at the bench and press B to craft ${wanted}`);
+      return;
+    }
     const spec = emplacementSpec(kind);
     if (!spec) return;
     this.blueprintIndex = index;
@@ -2759,7 +2778,18 @@ export class Game {
     this.ghost = this.createGhostMesh(kind, this.ghostMaterial);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
-    this.showMessage(`🔧 ${spec.kind} blueprint · ${spec.cost} blocks · Q rotate · click place · right-click cancel`);
+    this.showMessage(`🔧 ${spec.kind} blueprint · Q rotate · click place · right-click cancel`);
+  }
+
+  /** Craft the catalogue blueprint for the selected slot. The server owns the
+   *  cost and the reach check; the client only says which slot it wants. */
+  private craftAtBench(): void {
+    if (!this.benchOpen || this.isSpectating || this.player.isDead || this.drivingJeepId) {
+      this.showMessage('Stand at your blueprint bench to craft');
+      return;
+    }
+    const slot = this.blueprintIndex ?? 0;
+    this.networkClient?.send({ type: 'craftBlueprint', kind: this.blueprintCatalogue[slot], slot });
   }
 
   private cancelBlueprint(): void {
@@ -2801,7 +2831,8 @@ export class Game {
 
   private updateGhost(): void {
     if (this.blueprintIndex === null || !this.ghost) return;
-    const kind = this.blueprintSlots[this.blueprintIndex];
+    const kind = this.craftedSlots[this.blueprintIndex];
+    if (!kind) return;
     const hit = this.world.raycast(this.player.camera.position.clone(), this.player.getAimDirection(), 8);
     if (!hit) { this.ghost.visible = false; this.ghostValid = false; return; }
     const spot = { x: Math.round(hit.voxelPos.x), y: Math.round(hit.voxelPos.y) + 1, z: Math.round(hit.voxelPos.z) };
@@ -2812,17 +2843,20 @@ export class Game {
     const now = performance.now();
     if (now - this.ghostRequestedAt >= 120) {
       this.ghostRequestedAt = now;
-      this.networkClient?.send({ type: 'previewEmplacement', kind, position: spot, yaw: this.ghostYaw });
+      this.networkClient?.send({ type: 'previewEmplacement', kind, position: spot, yaw: this.ghostYaw, slot: this.blueprintIndex });
     }
   }
 
   private placeBlueprint(): void {
     if (this.blueprintIndex === null || !this.ghostPosition || !this.ghostValid) return;
+    const kind = this.craftedSlots[this.blueprintIndex];
+    if (!kind) return;
     this.networkClient?.send({
       type: 'placeEmplacement',
-      kind: this.blueprintSlots[this.blueprintIndex],
+      kind,
       position: this.ghostPosition,
       yaw: this.ghostYaw,
+      slot: this.blueprintIndex,
     });
     this.ghostRequestedAt = 0; // ask again at once in case that spot is taken now
   }
@@ -2992,6 +3026,7 @@ export class Game {
       this.ghostYaw += Math.PI / 2;
       this.ghostRequestedAt = 0; // re-ask the server for this rotation
     }
+    if (e.code === 'KeyB' && !e.repeat && this.gameMode === 'online') this.craftAtBench();
     if (e.code === 'KeyR') this.startReload();
 
     this.player.handleKeyDown(e.code);
@@ -5684,6 +5719,8 @@ export class Game {
       );
 
       const bench = this.workshops ? benchPosition(this.workshops[this.playerTeam].position) : null;
+      const benchDistance = bench ? this.player.position.distanceTo(new THREE.Vector3(bench.x, bench.y, bench.z)) : null;
+      this.benchOpen = benchDistance !== null && benchDistance <= BENCH_REACH;
 
       this.onStateChange({
         hp: this.player.hp,
@@ -5702,7 +5739,7 @@ export class Game {
           this.workshops[this.playerTeam].position.y,
           this.workshops[this.playerTeam].position.z,
         )) : null,
-        benchDistance: bench ? this.player.position.distanceTo(new THREE.Vector3(bench.x, bench.y, bench.z)) : null,
+        benchDistance,
         benchOpen: this.benchOpen,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,

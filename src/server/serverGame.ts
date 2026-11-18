@@ -57,8 +57,8 @@ import {
   isWorkshopProtectedCell,
   Workshops,
   JeepSnapshot,
-  WORLD_HALF, vehicleSpec, emplacementSpec,
-  type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot,
+  WORLD_HALF, vehicleSpec, emplacementSpec, BENCH_REACH, benchPosition, EmplacementKind,
+  type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots,
 } from '../shared/types';
 
 export interface GameConnection {
@@ -177,6 +177,10 @@ export class ServerGame {
   private depositableBlocks = new Map<string, number>();
   private joinedPlayers = new Set<string>();
   private workshopStock = { red: WORKSHOP_START_STOCK, blue: WORKSHOP_START_STOCK };
+  /** Crafted-but-unplaced blueprints the player carries. Consumed on placement,
+   *  cleared on round reset with no refund — they are spent supply, like a
+   *  bought jeep that rolled off the shop floor. */
+  private craftedBlueprints = new Map<string, BlueprintSlots>();
   private jeeps = new Map<string, ServerJeep>();
   private jeepSequence = 0;
   private emplacements = new Map<string, EmplacementSnapshot>();
@@ -217,13 +221,16 @@ export class ServerGame {
    * charged unless the build is accepted, so a rejected ghost costs nothing.
    */
   private emplacementVerdict(
-    playerId: string, kind: unknown, position: unknown, yaw: unknown,
-  ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number } | { ok: false; reason: string } {
+    playerId: string, kind: unknown, position: unknown, yaw: unknown, slot: unknown,
+  ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number; slot: number } | { ok: false; reason: string } {
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return { ok: false, reason: 'Cannot build right now' };
     if (typeof kind !== 'string' || !isVec3(position)) return { ok: false, reason: 'Bad blueprint' };
     const spec = emplacementSpec(kind);
     if (!spec) return { ok: false, reason: 'Unknown blueprint' };
+    if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > 2) {
+      return { ok: false, reason: 'No blueprint in that slot' };
+    }
 
     const extent = Math.hypot(spec.halfWidth, spec.halfLength);
     if (Math.abs(position.x) > WORLD_HALF - extent - 1 || Math.abs(position.z) > WORLD_HALF - extent - 1) {
@@ -261,18 +268,27 @@ export class ServerGame {
 
     const built = [...this.emplacements.values()].filter(e => e.team === player.team && e.kind === spec.kind).length;
     if (built >= spec.teamLimit) return { ok: false, reason: 'Team limit for that build reached' };
-    if (this.workshopStock[player.team] < spec.cost) return { ok: false, reason: 'Not enough workshop blocks' };
 
-    return { ok: true, spec, spot, rotation };
+    // Placement now consumes a crafted blueprint (one charge in the bench)
+    // instead of drawing from the team stockpile directly. The bench is the
+    // only place supply turns into deployment rights.
+    if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > 2) {
+      return { ok: false, reason: 'No blueprint in that slot' };
+    }
+    if (!this.hasBlueprint(playerId, slot, kind)) {
+      return { ok: false, reason: 'No blueprint in that slot' };
+    }
+
+    return { ok: true, spec, spot, rotation, slot };
   }
 
-  private placeEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown): void {
+  private placeEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown, slot: unknown): void {
     const player = this.players.get(playerId);
     if (!player) return;
-    const verdict = this.emplacementVerdict(playerId, kind, position, yaw);
+    const verdict = this.emplacementVerdict(playerId, kind, position, yaw, slot);
     if (!verdict.ok) return this.emplacementMessage(playerId, verdict.reason);
 
-    this.workshopStock[player.team] -= verdict.spec.cost;
+    this.consumeBlueprint(playerId, verdict.slot);
     const emplacement: EmplacementSnapshot = {
       id: `emp_${++this.emplacementSequence}`,
       kind: verdict.spec.kind,
@@ -283,16 +299,34 @@ export class ServerGame {
       ammo: verdict.spec.ammo,
     };
     this.emplacements.set(emplacement.id, emplacement);
+    this.broadcastBlueprints(playerId);
     this.broadcastWorkshops();
     this.broadcastEmplacements();
   }
 
-  /** Same rules as a real placement, so the ghost tint can be trusted. */
-  private previewEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown): void {
+  /** Consume one crafted blueprint slot. Called only on a successful
+   *  placement — the verdict already asserts the slot holds that kind. */
+  private consumeBlueprint(playerId: string, slot: number): void {
+    const slots = this.craftedBlueprints.get(playerId);
+    if (!slots || slots[slot] === null) return;
+    slots[slot] = null;
+    this.broadcastBlueprints(playerId);
+  }
+
+  /** True when the player holds that kind in the requested slot. */
+  private hasBlueprint(playerId: string, slot: number, kind: string): boolean {
+    const slots = this.craftedBlueprints.get(playerId);
+    return Boolean(slots && slots[slot] === kind);
+  }
+
+  /** Same rules as a real placement, so the ghost tint can be trusted. The
+   *  slot is checked the same way as a placement uses it, so a ghost over an
+   *  empty slot goes red with 'No blueprint in that slot'. */
+  private previewEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown, slot: unknown): void {
     const now = Date.now();
     if (now - (this.emplacementPreviewAt.get(playerId) ?? 0) < EMPLACEMENT_PREVIEW_INTERVAL) return;
     this.emplacementPreviewAt.set(playerId, now);
-    const verdict = this.emplacementVerdict(playerId, kind, position, yaw);
+    const verdict = this.emplacementVerdict(playerId, kind, position, yaw, slot);
     this.sendToPlayer(
       playerId,
       verdict.ok
@@ -528,11 +562,58 @@ export class ServerGame {
     this.broadcast({ type: 'workshopsUpdated', workshops: this.getWorkshops() });
   }
 
+  /** Blueprints are per player: only the crafter sees their own bench slots. */
+  private broadcastBlueprints(playerId: string): void {
+    this.sendToPlayer(playerId, {
+      type: 'blueprintsUpdated',
+      blueprints: [...(this.craftedBlueprints.get(playerId) ?? [null, null, null])] as BlueprintSlots,
+    });
+  }
+
   private resetResources(playerId: string): void {
     this.depositableBlocks.set(playerId, 0);
     this.sendToPlayer(playerId, { type: 'resourcesUpdated', depositable: 0 });
   }
 
+  /** Craft one blueprint into the requested slot at this team's bench. Charges
+   *  the full spec cost from that team's stockpile and stores the kind in the
+   *  slot so subsequent placement can consume it. Rejected (cheap) rejections
+   *  never touch stock — the bench is expensive and final. */
+  private craftBlueprint(playerId: string, kind: unknown, slot: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') {
+      return this.emplacementMessage(playerId, 'Cannot craft right now');
+    }
+    if (typeof kind !== 'string' || !emplacementSpec(kind)) {
+      return this.emplacementMessage(playerId, 'That is not a real blueprint');
+    }
+    if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > 2) {
+      return this.emplacementMessage(playerId, 'Choose slot 1, 2 or 3');
+    }
+
+    const bench = benchPosition(this.getWorkshops()[player.team].position);
+    if (Math.hypot(player.position.x - bench.x, player.position.y - bench.y, player.position.z - bench.z) > BENCH_REACH) {
+      return this.emplacementMessage(playerId, 'Stand at your blueprint bench to craft');
+    }
+
+    const slots = this.craftedBlueprints.get(playerId) ?? [null, null, null];
+    if (slots[slot] !== null) {
+      return this.emplacementMessage(playerId, 'That slot already has a blueprint in it');
+    }
+
+    const spec = emplacementSpec(kind)!;
+    if (this.workshopStock[player.team] < spec.cost) {
+      return this.emplacementMessage(playerId, 'Not enough workshop blocks for that build');
+    }
+
+    this.workshopStock[player.team] -= spec.cost;
+    slots[slot] = spec.kind;
+    this.craftedBlueprints.set(playerId, slots);
+    this.broadcastWorkshops();
+    this.broadcastBlueprints(playerId);
+  }
+
+  
   private depositWorkshop(playerId: string, team: unknown): void {
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating || !isTeam(team) || player.team !== team) return;
@@ -961,7 +1042,10 @@ export class ServerGame {
     log.info(`ROUND ${this.roundNumber} STARTED — ${Math.round(this.roundSeconds / 60)} minute round`);
   }
 
-  /** Flags back on their stands: nothing carried, nothing lying on the ground. */
+  /** Flags back on their stands: nothing carried, nothing lying on the ground.
+   *  Crafted-but-unplaced blueprints are spent supply: they survive the player
+   *  respawning, but the round reset clears them with no refund, matching the
+   *  emplacements and workshop stock that also reset. */
   private resetFlags(): void {
     this.blueFlagAtBase = true;
     this.redFlagAtBase = true;
@@ -970,7 +1054,10 @@ export class ServerGame {
     this.blueFlagRespawnTimer = 0;
     this.redFlagRespawnTimer = 0;
     this.droppedFlags = [];
-    for (const player of this.players.values()) player.carryingFlag = false;
+    for (const player of this.players.values()) {
+      player.carryingFlag = false;
+    }
+    this.craftedBlueprints.clear();
     // Clients reposition the flag meshes from these events.
     this.broadcast({ type: 'flagReturned', flagTeam: 'blue' });
     this.broadcast({ type: 'flagReturned', flagTeam: 'red' });
@@ -1387,6 +1474,7 @@ export class ServerGame {
       workshops: this.getWorkshops(),
       jeeps: this.jeepSnapshots(),
       emplacements: this.emplacementSnapshots(),
+      blueprints: [...(this.craftedBlueprints.get(playerId) ?? [null, null, null])] as BlueprintSlots,
       voxelChanges: this.world.getModifiedVoxels(),
       // Full authoritative flag snapshot so late joiners see flags that were
       // picked up / dropped / captured BEFORE they connected (events alone
@@ -1426,6 +1514,7 @@ export class ServerGame {
     this.botJeepCooldown.delete(playerId);
 
     this.players.delete(playerId);
+    this.craftedBlueprints.delete(playerId);
     this.connections.delete(playerId);
     this.inventories.delete(playerId);
     this.depositableBlocks.delete(playerId);
@@ -1635,10 +1724,13 @@ export class ServerGame {
         this.buildJeep(playerId);
         break;
       case 'placeEmplacement':
-        this.placeEmplacement(playerId, message.kind, message.position, message.yaw);
+        this.placeEmplacement(playerId, message.kind, message.position, message.yaw, message.slot);
         break;
       case 'previewEmplacement':
-        this.previewEmplacement(playerId, message.kind, message.position, message.yaw);
+        this.previewEmplacement(playerId, message.kind, message.position, message.yaw, message.slot);
+        break;
+      case 'craftBlueprint':
+        this.craftBlueprint(playerId, message.kind, message.slot);
         break;
       case 'enterJeep':
         this.enterJeep(playerId, message.vehicleId);

@@ -58,8 +58,9 @@ export interface ChunkData {
 
 // Client -> Server messages
 export type ClientMessage =
-  | { type: 'placeEmplacement'; kind: EmplacementKind; position: Position; yaw: number }
-  | { type: 'previewEmplacement'; kind: EmplacementKind; position: Position; yaw: number }
+  | { type: 'placeEmplacement'; kind: EmplacementKind; position: Position; yaw: number; slot: number }
+  | { type: 'previewEmplacement'; kind: EmplacementKind; position: Position; yaw: number; slot: number }
+  | { type: 'craftBlueprint'; kind: EmplacementKind; slot: number }
   | { type: 'join'; team: 'red' | 'blue'; position?: Position; name?: string }
   | { type: 'playerInput'; input: PlayerInput }
   | { type: 'shoot'; origin: Position; direction: Position; targetId?: string; isHeadshot?: boolean }
@@ -145,7 +146,7 @@ export interface JeepSnapshot {
 }
 
 export type ServerMessage =
-  | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; depositable?: number; workshops?: Workshops;   jeeps?: JeepSnapshot[]; emplacements?: EmplacementSnapshot[]; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
+  | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; depositable?: number; workshops?: Workshops;   jeeps?: JeepSnapshot[]; emplacements?: EmplacementSnapshot[]; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot; blueprints?: BlueprintSlots }
   | { type: 'roundUpdate'; round: RoundSnapshot }
   | { type: 'roundEnded'; round: number; winner: RoundWinner; captures: { red: number; blue: number }; wins: { red: number; blue: number } }
   | { type: 'gameState'; state: GameState }
@@ -170,6 +171,7 @@ export type ServerMessage =
   | { type: 'emplacementsUpdated'; emplacements: EmplacementSnapshot[] }
   | { type: 'emplacementPreview'; ok: boolean; reason?: string; position?: Position; yaw?: number }
   | { type: 'emplacementMessage'; message: string }
+  | { type: 'blueprintsUpdated'; blueprints: BlueprintSlots }
   | { type: 'jeepExited'; position: Position }
   | { type: 'jeepMessage'; message: string }
   | { type: 'flagCaptured'; team: 'red' | 'blue'; flagTeam?: 'red' | 'blue'; playerId: string; captures: { red: number; blue: number } }
