@@ -290,6 +290,20 @@ export const PLAYER_HEIGHT = 1.7;
 export const CROUCH_HEIGHT = 1.2;
 export const PLAYER_RADIUS = 0.3;
 
+/**
+ * Hard ceiling on how far a client-reported position may travel per second.
+ * The client runs its own physics and then tells the server where it is, so
+ * without a budget a modified client can simply teleport (e.g. straight onto
+ * the enemy flag). Sprint is 5 * 1.6 = 8 u/s, so 12 u/s keeps 50% headroom for
+ * jitter, slope stepping and dropped packets while staying far below any
+ * teleport a cheat might attempt.
+ */
+export const PLAYER_MAX_SPEED = PLAYER_SPEED * SPRINT_MULTIPLIER * 1.5;
+/** Seconds of movement a stalled client may bank before it is throttled. */
+export const PLAYER_MOVE_BURST_SECONDS = 0.4;
+/** Fastest a falling player can legitimately descend, in units per second. */
+export const PLAYER_MAX_FALL_SPEED = 50;
+
 export type WeaponId = 'rifle' | 'smg';
 
 /** Everything a player can hold. Equipment ids arrive from the network, so the

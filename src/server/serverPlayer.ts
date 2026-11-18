@@ -8,6 +8,9 @@ import {
   CROUCH_MULTIPLIER,
   JUMP_FORCE,
   GRAVITY,
+  PLAYER_MAX_SPEED,
+  PLAYER_MOVE_BURST_SECONDS,
+  PLAYER_MAX_FALL_SPEED,
   PLAYER_HEIGHT,
   CROUCH_HEIGHT,
   PLAYER_RADIUS,
@@ -19,6 +22,13 @@ import {
   type EquipmentId,
 } from '../shared/types';
 import { ServerWorld } from './serverWorld';
+
+/**
+ * Client positions are validated by default. Only an operator can turn it off
+ * (via MOVE_VALIDATION=off), never a client; automated harnesses that script
+ * long-range teleports on purpose set it for their feature sweep.
+ */
+const MOVE_VALIDATION = process.env.MOVE_VALIDATION !== 'off';
 
 export class ServerPlayer {
   id: string;
@@ -43,6 +53,9 @@ export class ServerPlayer {
   isSpectating: boolean = false;
   /** Client IP (normalized), set by ServerGame.addPlayer for admin/kick/ban tooling */
   ip?: string;
+  /** Distance this player may still travel, credited by elapsed time. */
+  private moveBudget = PLAYER_MAX_SPEED * PLAYER_MOVE_BURST_SECONDS;
+  private lastMoveCreditAt = 0;
   
   // Footstep sound tracking
   lastFootstepTime: number = 0;
@@ -116,11 +129,45 @@ export class ServerPlayer {
         input.position.z >= -half && input.position.z <= half &&
         input.position.y >= -20 && input.position.y <= 60
       ) {
-        this.position.x = input.position.x;
-        this.position.y = input.position.y;
-        this.position.z = input.position.z;
+        const next = MOVE_VALIDATION ? this.clampClientPosition(input.position) : input.position;
+        this.position.x = next.x;
+        this.position.y = next.y;
+        this.position.z = next.z;
       }
     }
+  }
+
+  /**
+   * Accept the client's position only as far as it could have travelled since
+   * the previous update. Movement is client-simulated, so this is the one place
+   * a modified client could otherwise teleport — e.g. straight onto the enemy
+   * flag. Over-spending is clamped rather than rejected outright: a lagging
+   * client keeps moving at the legal rate instead of freezing out of sync with
+   * the server, while a teleport or speed hack gains no ground at all.
+   */
+  private clampClientPosition(target: Position): Position {
+    const now = Date.now();
+    const elapsed = Math.min(
+      Math.max(now - this.lastMoveCreditAt, 0) / 1000,
+      PLAYER_MOVE_BURST_SECONDS,
+    );
+    this.lastMoveCreditAt = now;
+    const capacity = PLAYER_MAX_SPEED * PLAYER_MOVE_BURST_SECONDS;
+    this.moveBudget = Math.min(this.moveBudget + PLAYER_MAX_SPEED * elapsed, capacity);
+
+    const dx = target.x - this.position.x;
+    const dz = target.z - this.position.z;
+    const distance = Math.hypot(dx, dz);
+    const allowed = Math.min(distance, this.moveBudget);
+    this.moveBudget -= allowed;
+    const scale = distance > 0 ? allowed / distance : 0;
+
+    // Vertical: jump/fall envelope only, so a hand-crafted y cannot levitate.
+    const maxUp = JUMP_FORCE * elapsed + 0.25;
+    const maxDown = PLAYER_MAX_FALL_SPEED * elapsed + 0.5;
+    const y = Math.min(Math.max(target.y, this.position.y - maxDown), this.position.y + maxUp);
+
+    return { x: this.position.x + dx * scale, y, z: this.position.z + dz * scale };
   }
 
   isAlive(): boolean {
