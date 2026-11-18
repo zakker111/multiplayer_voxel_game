@@ -3,11 +3,15 @@
 //              ping, spectator, respawn, second client  (safe with bots on)
 // PHASE=move : server movement validation — teleport refused, speed hack
 //              throttled, ordinary movement accepted (validation ON)
+// PHASE=limits: websocket socket cap + per-socket message flood throttle. Run
+//              that server with WS_MAX_PER_IP=2 WS_MSG_RATE=20 WS_MSG_BURST=30.
 // PHASE=all  : also workshop deposit, jeep build/enter/drive/exit and a flag
 //              capture (deterministic when the server runs without bots). It
 //              teleports the probe on purpose, so that server needs
 //              MOVE_VALIDATION=off, on a freshly started server: flag state
 //              persists between runs, so a dirty flag fails the CTF checks.
+import { WebSocket } from 'ws';
+
 const BASE = process.env.BASE || 'http://127.0.0.1:3000';
 const PHASE = process.env.PHASE || 'core';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -123,6 +127,65 @@ try {
   check('joined on the requested team', joined?.state?.team === 'blue');
   check('spawn position is finite', Number.isFinite(spawn?.x) && Number.isFinite(spawn?.y));
   const pos = { x: Math.floor(spawn.x) + 0.5, y: spawn.y, z: Math.floor(spawn.z) + 0.5 };
+
+  // ---------- transport limits: socket cap + per-socket message budget ----------
+  if (PHASE === 'limits') {
+    const wsUrl = BASE.replace(/^http/, 'ws');
+    const openSocket = () => new Promise((resolve) => {
+      const ws = new WebSocket(wsUrl);
+      let settled = false;
+      const done = (result) => { if (!settled) { settled = true; resolve({ ws, ...result }); } };
+      ws.on('open', () => done({ opened: true }));
+      ws.on('unexpected-response', (_req, res) => done({ opened: false, status: res.statusCode }));
+      ws.on('error', (err) => done({ opened: false, error: err.message }));
+      ws.on('message', () => {});
+    });
+
+    const sockets = [];
+    let refused = null;
+    for (let i = 0; i < 6; i++) {
+      const s = await openSocket();
+      if (s.opened) sockets.push(s.ws);
+      else { refused = s; break; }
+    }
+    check('sockets beyond the per-IP cap are refused', !!refused,
+      refused ? String(refused.status ?? refused.error) : 'six sockets all accepted');
+    check('the refusal is a 503 before the handshake', refused?.status === 503, String(refused?.status));
+    check('sockets under the cap stay open', sockets.length === 2, `${sockets.length} accepted`);
+
+    for (const ws of sockets) ws.close();
+    await sleep(500);
+
+    const pongs = new Set();
+    const listener = await openSocket();
+    check('closing sockets frees their slots', !!listener.opened);
+    if (listener.opened) {
+      listener.ws.on('message', (data) => {
+        try {
+          const m = JSON.parse(String(data));
+          if (m.type === 'pong') pongs.add(m.t);
+        } catch { /* ignore */ }
+      });
+
+      // A normal client must be unaffected: ten pings over ~500ms.
+      for (let i = 0; i < 10; i++) {
+        listener.ws.send(JSON.stringify({ type: 'ping', t: 1000 + i }));
+        await sleep(50);
+      }
+      await sleep(300);
+      const normalReplies = [...pongs].filter((t) => t >= 1000).length;
+      check('normal-rate traffic still gets replies', normalReplies >= 9, `${normalReplies}/10 pongs`);
+
+      // A flood is throttled to the budget instead of reaching the game loop.
+      pongs.clear();
+      for (let i = 0; i < 400; i++) listener.ws.send(JSON.stringify({ type: 'ping', t: i }));
+      await sleep(1200);
+      check('a message flood is throttled', pongs.size > 0 && pongs.size < 400,
+        `${pongs.size}/400 pongs answered`);
+      try { listener.ws.close(); } catch { /* already closed by the server */ }
+    }
+    throw { done: true };
+  }
 
   // ---------- movement validation: teleport / speed hack / normal ----------
   if (PHASE === 'move') {

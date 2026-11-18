@@ -5,6 +5,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { ServerGame, GameConnection } from './src/server/serverGame';
 import { normalizeIp } from './src/server/banStore';
+import { ConnectionLimiter, TokenBucket } from './src/server/limits';
 import type { ClientMessage } from './src/shared/types';
 import { createLogger } from './src/server/logger';
 
@@ -255,17 +256,40 @@ async function startServer() {
     });
   }, 25000);
 
+  // ---------------- WebSocket limits ----------------
+  // Every socket registers a player and every frame is handled on the 20Hz
+  // loop, so one client could otherwise open thousands of sockets or spam
+  // input. Bound the sockets (globally and per IP) and give each socket a
+  // message budget: 60/s sustained comfortably covers the client's 20Hz input
+  // stream plus shooting, building and driving actions.
+  const WS_MAX_CLIENTS = Number(process.env.WS_MAX_CLIENTS) || 64;
+  const WS_MAX_PER_IP = Number(process.env.WS_MAX_PER_IP) || 6;
+  const WS_MSG_RATE = Number(process.env.WS_MSG_RATE) || 60;
+  const WS_MSG_BURST = Number(process.env.WS_MSG_BURST) || 120;
+  const wsLimiter = new ConnectionLimiter(WS_MAX_CLIENTS, WS_MAX_PER_IP);
+  let lastWsRejectLog = 0;
+
+  /** Same proxy-aware parsing as the SSE path, so both caps see one client id. */
+  const requestIp = (request: http.IncomingMessage): string => {
+    const forwarded = request.headers['x-forwarded-for'];
+    return normalizeIp(
+      typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : request.socket.remoteAddress,
+    );
+  };
+
   wss.on('connection', (ws: WebSocket, request: http.IncomingMessage) => {
     const extWs = ws as AliveWebSocket;
     extWs.isAlive = true;
 
-    const forwarded = request.headers['x-forwarded-for'];
-    const clientIp = typeof forwarded === 'string'
-      ? forwarded.split(',')[0].trim()
-      : request.socket.remoteAddress || 'unknown';
+    const clientIp = requestIp(request);
     extWs.clientIp = clientIp;
+    wsLimiter.add(clientIp);
+    // Per-socket message budget: a flood is dropped here so it never reaches
+    // the game loop.
+    const messageBudget = new TokenBucket(WS_MSG_RATE, WS_MSG_BURST);
+    let droppedFrames = 0;
 
-    log.info(`ws client connected ip=${clientIp} total=${wss.clients.size}`);
+    log.info(`ws client connected ip=${clientIp} total=${wsLimiter.total}/${WS_MAX_CLIENTS}`);
     // Reject banned IPs immediately
     if (game.isIpBanned(clientIp)) {
       log.warn(`rejected banned ip=${clientIp}`);
@@ -279,6 +303,16 @@ async function startServer() {
     });
 
     ws.on('message', (data: Buffer | string) => {
+      if (!messageBudget.tryConsume()) {
+        // Over budget: drop the frame. A client that keeps flooding is hung up
+        // on rather than left burning parse time every frame (queued frames
+        // still arrive while closing, so only act on the open socket).
+        if (++droppedFrames > 200 && ws.readyState === WebSocket.OPEN) {
+          log.warn(`ws closing flooding client id=${playerId} ip=${clientIp}`);
+          ws.close(1008, 'message rate exceeded');
+        }
+        return;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(data.toString());
@@ -300,7 +334,8 @@ async function startServer() {
     });
 
     ws.on('close', () => {
-      log.info(`ws client disconnected id=${playerId} ip=${clientIp}`);
+      wsLimiter.remove(clientIp);
+      log.info(`ws client disconnected id=${playerId} ip=${clientIp} total=${wsLimiter.total}/${WS_MAX_CLIENTS}`);
       game.removePlayer(playerId);
     });
 
@@ -318,6 +353,19 @@ async function startServer() {
       url?.includes('vite') ||
       headers['sec-websocket-protocol'] === 'vite-hmr'
     ) {
+      return;
+    }
+    // Refuse over-cap sockets before the handshake completes, so a client
+    // cannot open thousands of connections just to be closed afterwards.
+    const upgradeIp = requestIp(request);
+    if (!wsLimiter.canAccept(upgradeIp)) {
+      const now = Date.now();
+      if (now - lastWsRejectLog > 10000) {
+        lastWsRejectLog = now;
+        log.warn(`ws upgrade rejected ip=${upgradeIp} (sockets ${wsLimiter.total}/${WS_MAX_CLIENTS}, this ip ${wsLimiter.countFor(upgradeIp)}/${WS_MAX_PER_IP})`);
+      }
+      socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      socket.destroy();
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) => {
