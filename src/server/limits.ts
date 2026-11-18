@@ -40,8 +40,9 @@ export class TokenBucket {
  * Counts live connections per key (client IP) with a global ceiling as well, so
  * one client cannot open thousands of sockets and starve everyone else.
  *
- * `canAccept` is a pure check; `add` is called once the socket really exists, so
- * a rejected upgrade can never leak a slot.
+ * `canAccept` is a pure check used to refuse an upgrade before the handshake, and
+ * `tryAdd` takes the slot in a single step once the socket exists: two upgrades
+ * racing for the last slot cannot both win, and a refusal never consumes one.
  */
 export class ConnectionLimiter {
   private readonly counts = new Map<string, number>();
@@ -53,13 +54,15 @@ export class ConnectionLimiter {
   ) {}
 
   canAccept(key: string): boolean {
-    if (this.totalCount >= this.maxTotal) return false;
-    return (this.counts.get(key) ?? 0) < this.maxPerKey;
+    return this.totalCount < this.maxTotal && (this.counts.get(key) ?? 0) < this.maxPerKey;
   }
 
-  add(key: string): void {
+  /** Check and count in one step. Returns false without touching the counts. */
+  tryAdd(key: string): boolean {
+    if (!this.canAccept(key)) return false;
     this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
     this.totalCount++;
+    return true;
   }
 
   /** Removing a key that was never added is a no-op (close and error can both fire). */

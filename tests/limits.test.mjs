@@ -48,8 +48,8 @@ test('each socket gets its own budget', () => {
 
 test('per-IP cap refuses the extra connection', () => {
   const limiter = new ConnectionLimiter(10, 2);
-  limiter.add('1.1.1.1');
-  limiter.add('1.1.1.1');
+  assert.ok(limiter.tryAdd('1.1.1.1'));
+  assert.ok(limiter.tryAdd('1.1.1.1'));
 
   assert.strictEqual(limiter.canAccept('1.1.1.1'), false, 'third socket from the same IP is refused');
   assert.ok(limiter.canAccept('2.2.2.2'), 'other clients are unaffected');
@@ -57,13 +57,34 @@ test('per-IP cap refuses the extra connection', () => {
 
 test('the global cap applies across IPs', () => {
   const limiter = new ConnectionLimiter(3, 10);
-  limiter.add('a');
-  limiter.add('b');
-  limiter.add('c');
+  assert.ok(limiter.tryAdd('a'));
+  assert.ok(limiter.tryAdd('b'));
+  assert.ok(limiter.tryAdd('c'));
 
   assert.strictEqual(limiter.canAccept('d'), false, 'global ceiling reached');
   limiter.remove('b');
   assert.ok(limiter.canAccept('d'), 'a freed slot is reusable');
+});
+
+test('a refused connection never takes a slot', () => {
+  const limiter = new ConnectionLimiter(1, 1);
+  assert.ok(limiter.tryAdd('a'));
+
+  assert.strictEqual(limiter.tryAdd('b'), false, 'global cap is full');
+  assert.strictEqual(limiter.total, 1, 'the refusal did not count');
+  assert.strictEqual(limiter.countFor('b'), 0);
+
+  limiter.remove('a');
+  assert.ok(limiter.tryAdd('b'), 'the freed slot goes to the next client');
+});
+
+test('upgrades racing for the last slots cannot overshoot the cap', () => {
+  const limiter = new ConnectionLimiter(2, 10);
+  let accepted = 0;
+  for (const ip of ['a', 'b', 'c', 'd', 'e']) if (limiter.tryAdd(ip)) accepted++;
+
+  assert.strictEqual(accepted, 2);
+  assert.strictEqual(limiter.total, 2, 'total matches the cap exactly');
 });
 
 test('releasing an unknown key is a no-op', () => {
@@ -76,8 +97,8 @@ test('releasing an unknown key is a no-op', () => {
 
 test('a closed connection frees exactly one slot', () => {
   const limiter = new ConnectionLimiter(5, 2);
-  limiter.add('ip');
-  limiter.add('ip');
+  assert.ok(limiter.tryAdd('ip'));
+  assert.ok(limiter.tryAdd('ip'));
 
   limiter.remove('ip');
   assert.strictEqual(limiter.countFor('ip'), 1);

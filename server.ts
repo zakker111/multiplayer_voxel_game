@@ -284,20 +284,37 @@ async function startServer() {
 
     const clientIp = clientIpOf(request);
     extWs.clientIp = clientIp;
-    wsLimiter.add(clientIp);
+
+    // Take the slot and register its release before any early return below, so
+    // a banned client or a throwing addPlayer cannot leak a slot for the rest of
+    // the process's life.
+    if (!wsLimiter.tryAdd(clientIp)) {
+      log.warn(`ws closed over-cap socket ip=${clientIp} (sockets ${wsLimiter.total}/${WS_MAX_CLIENTS})`);
+      ws.close(1013, 'server full');
+      return;
+    }
+
     // Per-socket message budget: a flood is dropped here so it never reaches
     // the game loop.
     const messageBudget = new TokenBucket(WS_MSG_RATE, WS_MSG_BURST);
     let droppedFrames = 0;
+    let playerId: string | undefined;
+
+    ws.on('close', () => {
+      wsLimiter.remove(clientIp);
+      if (playerId) game.removePlayer(playerId);
+      log.info(`ws client disconnected id=${playerId ?? 'unjoined'} ip=${clientIp} total=${wsLimiter.total}/${WS_MAX_CLIENTS}`);
+    });
 
     log.info(`ws client connected ip=${clientIp} total=${wsLimiter.total}/${WS_MAX_CLIENTS}`);
-    // Reject banned IPs immediately
+    // Reject banned IPs immediately (the close handler above still frees the slot)
     if (game.isIpBanned(clientIp)) {
       log.warn(`rejected banned ip=${clientIp}`);
       ws.close(4003, 'banned');
       return;
     }
-    const playerId = game.addPlayer(ws, clientIp);
+    const id = game.addPlayer(ws, clientIp);
+    playerId = id;
 
     ws.on('pong', () => {
       extWs.isAlive = true;
@@ -309,11 +326,14 @@ async function startServer() {
         // on rather than left burning parse time every frame (queued frames
         // still arrive while closing, so only act on the open socket).
         if (++droppedFrames > 200 && ws.readyState === WebSocket.OPEN) {
-          log.warn(`ws closing flooding client id=${playerId} ip=${clientIp}`);
+          log.warn(`ws closing flooding client id=${id} ip=${clientIp}`);
           ws.close(1008, 'message rate exceeded');
         }
         return;
       }
+      // Consecutive drops only: a socket that overruns its budget occasionally
+      // must not accumulate its way to a disconnect over hours of play.
+      droppedFrames = 0;
       let parsed: unknown;
       try {
         parsed = JSON.parse(data.toString());
@@ -328,16 +348,10 @@ async function startServer() {
         return;
       }
       try {
-        game.handleMessage(playerId, parsed as ClientMessage);
+        game.handleMessage(id, parsed as ClientMessage);
       } catch (error) {
         log.error('error handling message', (error as Error).message);
       }
-    });
-
-    ws.on('close', () => {
-      wsLimiter.remove(clientIp);
-      log.info(`ws client disconnected id=${playerId} ip=${clientIp} total=${wsLimiter.total}/${WS_MAX_CLIENTS}`);
-      game.removePlayer(playerId);
     });
 
     ws.on('error', (error) => {
@@ -365,8 +379,7 @@ async function startServer() {
         lastWsRejectLog = now;
         log.warn(`ws upgrade rejected ip=${upgradeIp} (sockets ${wsLimiter.total}/${WS_MAX_CLIENTS}, this ip ${wsLimiter.countFor(upgradeIp)}/${WS_MAX_PER_IP})`);
       }
-      socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-      socket.destroy();
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) => {
