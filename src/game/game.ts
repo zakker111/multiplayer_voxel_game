@@ -128,9 +128,7 @@ export interface GameState {
   benchOpen: boolean;
   /** Blueprints crafted into the bench slots, in slot order (5/6/7). */
   blueprints: BlueprintSlots;
-  /** Which slot 5/6/7 picked, i.e. where B will craft next. */
-  blueprintSlot: number;
-  /** What B builds into each slot, so the HUD can price an empty one. */
+  /** What each slot builds, so the HUD can name an empty one. */
   blueprintCatalogue: EmplacementKind[];
   /** The bench menu overlay is up; the cursor is free and the game keys idle. */
   benchMenuOpen: boolean;
@@ -386,9 +384,7 @@ export class Game {
    *  uses so the round you see is the round that lands. */
   private shells = new Map<string, { mesh: THREE.Mesh; spawn: THREE.Vector3; velocity: THREE.Vector3; spawnedAt: number }>();
   private shellBlasts: Array<{ mesh: THREE.Mesh; material: THREE.MeshBasicMaterial; until: number }> = [];
-  /** The slot 5/6/7 picks. It stays set on an empty slot so B knows where to
-   *  craft; `blueprintIndex` is the same slot only once its ghost is up. */
-  private blueprintSlot = 0;
+  /** The slot whose crafted blueprint is being placed (5/6/7). */
   private blueprintIndex: number | null = null;
   private ghost: THREE.Group | null = null;
   private ghostMaterial: THREE.MeshStandardMaterial | null = null;
@@ -2862,15 +2858,11 @@ export class Game {
 
   private toggleBlueprint(index: number): void {
     if (this.gameMode !== 'online' || this.isSpectating || this.player.isDead || this.drivingJeepId) return;
-    // Picking a slot always arms the bench, empty or not: otherwise only slot 1
-    // could ever be crafted, because B reads the slot from the live ghost.
-    this.blueprintSlot = index;
     const kind = this.craftedSlots[index];
     if (!kind) {
       this.clearGhost();
       this.blueprintIndex = null;
-      const wanted = this.blueprintCatalogue[index];
-      this.showMessage(`Slot ${index + 1} is empty — press B at the bench to craft ${wanted}`);
+      this.showMessage(`Slot ${index + 1} is empty — press B at the bench to craft it`);
       return;
     }
     if (this.blueprintIndex === index) { this.cancelBlueprint(); return; }
@@ -2925,7 +2917,6 @@ export class Game {
    *  reach check and the slot, so this only states the intent. */
   craftFromBench(kind: EmplacementKind, slot: number): void {
     if (!this.benchOpen) { this.showBenchMessage('Stand at your blueprint bench to craft'); return; }
-    this.blueprintSlot = slot;
     this.networkClient?.send({ type: 'craftBlueprint', kind, slot });
   }
 
@@ -6042,7 +6033,6 @@ export class Game {
         benchDistance,
         benchOpen: this.benchOpen,
         blueprints: [...this.craftedSlots],
-        blueprintSlot: this.blueprintSlot,
         blueprintCatalogue: this.blueprintCatalogue,
         benchMenuOpen: this.benchMenuOpen,
         benchFeedback: this.benchMenuOpen ? this.benchFeedback : '',

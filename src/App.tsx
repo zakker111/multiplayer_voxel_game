@@ -26,7 +26,7 @@ function App() {
     hp: 100, maxHp: 100, equipment: 'rifle', inventory: 0,
     depositable: 0, workshopStock: 0, workshopCapacity: 0, workshopDistance: null,
     benchDistance: null, benchOpen: false,
-    blueprints: [null, null, null], blueprintSlot: 0,
+    blueprints: [null, null, null],
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
     benchMenuOpen: false, benchFeedback: '',
     manningEmplacement: false, manningKind: null, manningAmmo: null, emplacementNearby: false,
@@ -934,29 +934,22 @@ function App() {
                 <div className="absolute bottom-44 left-8 z-10 w-64 bg-gray-900/90 backdrop-blur-sm rounded-xl px-4 py-3 border border-sky-500/50 text-sm text-gray-200">
                   <div className="font-bold text-sky-300">BLUEPRINT BENCH</div>
                   <div className="mt-1 space-y-0.5">
-                    {gameState.blueprintCatalogue.map((catalogue, index) => {
-                      const crafted = gameState.blueprints[index] ?? null;
-                      const spec = emplacementSpec(crafted ?? catalogue);
-                      const selected = gameState.blueprintSlot === index;
-                      return (
-                        <div
-                          key={index}
-                          className={`flex items-baseline gap-2 ${selected ? 'text-white' : 'text-gray-400'}`}
-                        >
-                          <span className="font-mono w-3">{index + 5}</span>
-                          <span className="truncate">{EMPLACEMENT_LABELS[crafted ?? catalogue]}</span>
-                          <span className="ml-auto text-xs text-amber-300/90">{spec ? `${spec.cost}b` : '—'}</span>
-                          <span className={`text-xs w-11 text-right ${crafted ? 'text-emerald-400' : 'text-gray-500'}`}>
-                            {crafted ? (selected ? '◂ ready' : 'ready') : 'empty'}
-                          </span>
-                        </div>
-                      );
-                    })}
+                    {gameState.blueprints.map((crafted, index) => (
+                      <div key={index} className="flex items-baseline gap-2 text-gray-400">
+                        <span className="font-mono w-3">{index + 5}</span>
+                        <span className="truncate">
+                          {EMPLACEMENT_LABELS[crafted ?? gameState.blueprintCatalogue[index]]}
+                        </span>
+                        <span className={`ml-auto text-xs ${crafted ? 'text-emerald-400' : 'text-gray-500'}`}>
+                          {crafted ? 'ready' : 'empty'}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                   <div className="text-xs text-gray-400 mt-1 border-t border-gray-700 pt-1">
                     {gameState.benchOpen
-                      ? 'Press B to craft the picked slot'
-                      : `Bench ${Math.round(gameState.benchDistance ?? 0)}m away · 5/6/7 pick a slot`}
+                      ? 'Press B to open the bench'
+                      : `Bench ${Math.round(gameState.benchDistance ?? 0)}m away`}
                   </div>
                 </div>
               )}
@@ -1055,31 +1048,32 @@ function App() {
                               </div>
                             </div>
                             {[0, 1, 2].map((slot) => {
-                              const taken = Boolean(gameState.blueprints[slot]);
-                              // Keep the button clickable even when it cannot
-                              // succeed: the server's refusal is the feedback,
-                              // and a disabled button made it look dead.
-                              const muted = taken || !affordable;
+                              // One reason per button drives its label, title and
+                              // styling. The button stays clickable so the server
+                              // can answer; a disabled one looked like a dead click.
+                              const block = gameState.blueprints[slot]
+                                ? 'taken'
+                                : affordable ? null : 'stock';
                               return (
                                 <button
                                   key={slot}
                                   type="button"
-                                  aria-disabled={muted}
+                                  aria-disabled={block !== null}
                                   title={
-                                    taken
+                                    block === 'taken'
                                       ? 'That slot already holds a blueprint'
-                                      : affordable
-                                        ? `Craft into slot ${slot + 1}`
-                                        : `Not enough team stock (needs ${spec.cost})`
+                                      : block === 'stock'
+                                        ? `Not enough team stock (needs ${spec.cost})`
+                                        : `Craft into slot ${slot + 1}`
                                   }
                                   onClick={() => gameRef.current?.craftFromBench(kind, slot)}
                                   className={`rounded-md border px-2 py-1 text-xs ${
-                                    muted
+                                    block
                                       ? 'cursor-pointer border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300'
                                       : 'border-sky-500/60 text-sky-200 hover:bg-sky-500/20'
                                   }`}
                                 >
-                                  {taken ? '—' : `Slot ${slot + 1}`}
+                                  {block === 'taken' ? '—' : `Slot ${slot + 1}`}
                                 </button>
                               );
                             })}
@@ -1093,8 +1087,7 @@ function App() {
                       aria-live="polite"
                       className="mt-3 min-h-[2.25rem] rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs text-sky-100"
                     >
-                      {gameState.benchFeedback
-                        || 'Pick a build and a slot — the server checks stock, reach and empty slots.'}
+                      {gameState.benchFeedback || 'Pick a build and a slot.'}
                     </div>
 
                     <div className="mt-4 flex items-center justify-between gap-3">
