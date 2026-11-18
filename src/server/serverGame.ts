@@ -1324,7 +1324,6 @@ export class ServerGame {
       canSee: (from, to) => this.hasLineOfSight(from, to),
       fireWeapon: (bot, target, aimDir, eyeY) => {
         const origin = { x: bot.position.x, y: bot.position.y + eyeY, z: bot.position.z };
-        // Small inaccuracy jitter so tracers look human
         const spread = bot.equipment === 'smg' ? 0.03 : 0.004;
         const dir = {
           x: aimDir.x + (Math.random() - 0.5) * spread,
@@ -1332,16 +1331,6 @@ export class ServerGame {
           z: aimDir.z + (Math.random() - 0.5) * spread,
         };
         this.botShoot(bot.id, origin, dir, target.id);
-      },
-      fireAtEmplacement: (bot, emplacementId, aimDir, eyeY) => {
-        const origin = { x: bot.position.x, y: bot.position.y + eyeY, z: bot.position.z };
-        const spread = bot.equipment === 'smg' ? 0.03 : 0.004;
-        const dir = {
-          x: aimDir.x + (Math.random() - 0.5) * spread,
-          y: aimDir.y + (Math.random() - 0.5) * spread,
-          z: aimDir.z + (Math.random() - 0.5) * spread,
-        };
-        this.botShootAtEmplacement(bot.id, origin, dir, emplacementId);
       },
       buildBlock: (bot, pos) => {
         this.botBuild(bot.id, pos);
@@ -1384,12 +1373,12 @@ export class ServerGame {
   }
 
   /** Bot fired at a validated target: apply weapon damage through the same
-   *  authoritative pipeline used for humans (no client-reported hits). */
+   *  authoritative pipeline used for humans (no client-reported hits). The target
+   *  may be a player or an emplacement; an emplacement blocks shots aimed through
+   *  it, and if the emplacement itself is the target the round damages it directly. */
   private botShoot(botId: string, origin: Position, direction: Position, targetId: string): void {
     const bot = this.players.get(botId);
-    const target = this.players.get(targetId);
-    if (!bot || !target || bot.isDead || target.isDead) return;
-    if (target.team === bot.team) return;
+    if (!bot) return;
 
     const weapon = WEAPONS[bot.equipment as 'rifle' | 'smg'];
     if (!weapon) return;
@@ -1404,20 +1393,40 @@ export class ServerGame {
     });
     this.broadcast({ type: 'playerUpdated', playerId: botId, state: bot.getState() });
 
-    // Terrain must not block the bullet
-    if (!this.hasLineOfSight(origin, { x: target.position.x, y: target.position.y + 1.1, z: target.position.z })) {
-      // Hit wall instead — damage voxel along the ray
-      const hit = this.world.raycast(origin, direction, 350);
-      if (hit && hit.voxelPos) {
-        this.damageAndBroadcastVoxel(hit.voxelPos);
+    // When the target is a build, shoot the build instead of sampling a player body.
+    if (targetId.startsWith('emplace-')) {
+      const emplacement = this.emplacements.get(targetId);
+      if (!emplacement || emplacement.team === bot.team) return;
+      const aimPoint = { x: emplacement.position.x, y: emplacement.position.y + 0.8, z: emplacement.position.z };
+      if (!this.hasLineOfSight(origin, aimPoint)) {
+        const hit = this.world.raycast(origin, direction, 350);
+        if (hit && hit.voxelPos) this.damageAndBroadcastVoxel(hit.voxelPos);
+        return;
+      }
+      const dist = Math.hypot(aimPoint.x - origin.x, aimPoint.y - origin.y, aimPoint.z - origin.z);
+      const structureHit = this.hitEmplacement(origin, direction, dist, bot.team);
+      if (structureHit && structureHit.emplacement.id === targetId) {
+        this.damageEmplacement(targetId, weaponDamage(weapon, false, dist));
       }
       return;
     }
 
+    const targetPlayer = this.players.get(targetId);
+    if (!targetPlayer || bot.isDead || targetPlayer.isDead) return;
+    if (targetPlayer.team === bot.team) return;
+
+    // Terrain must not block the bullet
+    if (!this.hasLineOfSight(origin, { x: targetPlayer.position.x, y: targetPlayer.position.y + 1.1, z: targetPlayer.position.z })) {
+      // Hit wall instead — damage voxel along the ray
+      const hit = this.world.raycast(origin, direction, 350);
+      if (hit && hit.voxelPos) this.damageAndBroadcastVoxel(hit.voxelPos);
+      return;
+    }
+
     const dist = Math.hypot(
-      target.position.x - origin.x,
-      target.position.y + 1.1 - origin.y,
-      target.position.z - origin.z,
+      targetPlayer.position.x - origin.x,
+      targetPlayer.position.y + 1.1 - origin.y,
+      targetPlayer.position.z - origin.z,
     );
     // Headshot chance scales with accuracy distance
     const isHeadshot = dist < 25 && Math.random() < 0.18;
@@ -1436,45 +1445,6 @@ export class ServerGame {
     else this.applyDamage(targetId, damage, botId, isHeadshot);
   }
 
-  /** Bot fired at an emplacement target: the round is aimed at the build itself
-   *  and damages it directly (no player-body sampling). */
-  private botShootAtEmplacement(botId: string, origin: Position, direction: Position, emplacementId: string): void {
-    const bot = this.players.get(botId);
-    const emplacement = this.emplacements.get(emplacementId);
-    if (!bot || bot.isDead || !emplacement || emplacement.team === bot.team) return;
-
-    const weapon = WEAPONS[bot.equipment as 'rifle' | 'smg'];
-    if (!weapon) return;
-
-    this.broadcastExcept(botId, {
-      type: 'playerShot',
-      playerId: botId,
-      origin,
-      direction,
-      weapon: bot.equipment,
-    });
-    this.broadcast({ type: 'playerUpdated', playerId: botId, state: bot.getState() });
-
-    if (!this.hasLineOfSight(origin, { x: emplacement.position.x, y: emplacement.position.y + 0.8, z: emplacement.position.z })) {
-      const hit = this.world.raycast(origin, direction, 350);
-      if (hit && hit.voxelPos) {
-        this.damageAndBroadcastVoxel(hit.voxelPos);
-      }
-      return;
-    }
-
-    const dist = Math.hypot(
-      emplacement.position.x - origin.x,
-      emplacement.position.y + 0.8 - origin.y,
-      emplacement.position.z - origin.z,
-    );
-    const damage = weaponDamage(weapon, false, dist);
-
-    const structureHit = this.hitEmplacement(origin, direction, dist, bot.team);
-    if (structureHit && structureHit.emplacement.id === emplacementId) {
-      this.damageEmplacement(emplacementId, damage);
-    }
-  }
 
   private damageAndBroadcastVoxel(pos: Position): void {
     const { x, y, z } = pos;

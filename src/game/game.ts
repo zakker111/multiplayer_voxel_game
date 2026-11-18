@@ -2427,11 +2427,11 @@ export class Game {
       if (!id || maxHp == null) return;
       const snapshot = this.emplacedSnapshots.get(id);
       if (snapshot && hp !== null) snapshot.hp = hp;
-      const teamColor = snapshot?.team === 'blue' ? 0x6aa0ff : 0xff7a5c;
       // Flash the build for a short beat so a far-away shot has visible
       // feedback even before the health bar reads out.
       if (damage > 0) {
         const intensity = Math.min(1, damage / maxHp);
+        const teamColor = snapshot?.team === 'blue' ? 0x6aa0ff : 0xff7a5c;
         this.emplacementFlashes.set(id, {
           until: performance.now() + 180,
           color: new THREE.Color(teamColor).lerp(new THREE.Color(0xffffff), intensity),
