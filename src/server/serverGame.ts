@@ -58,6 +58,7 @@ import {
   Workshops,
   JeepSnapshot,
   WORLD_HALF, vehicleSpec, emplacementSpec, BENCH_REACH, benchPosition, EmplacementKind,
+  MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH,
   type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots,
 } from '../shared/types';
 
@@ -186,6 +187,9 @@ export class ServerGame {
   private emplacements = new Map<string, EmplacementSnapshot>();
   private emplacementSequence = 0;
   private emplacementPreviewAt = new Map<string, number>();
+  /** Last round fired per emplacement, on the server clock. */
+  private emplacementFireAt = new Map<string, number>();
+  private emplacementSync = 0;
   private jeepSync = 0;
   private botJeepTasks = new Map<string, BotJeepTask>();
   private botJeepCooldown = new Map<string, number>();
@@ -297,6 +301,8 @@ export class ServerGame {
       yaw: verdict.rotation,
       hp: verdict.spec.maxHp,
       ammo: verdict.spec.ammo,
+      baseYaw: verdict.rotation,
+      gunnerId: null,
     };
     this.emplacements.set(emplacement.id, emplacement);
     this.broadcastBlueprints(playerId);
@@ -333,6 +339,188 @@ export class ServerGame {
         ? { type: 'emplacementPreview', ok: true, position: verdict.spot, yaw: verdict.rotation }
         : { type: 'emplacementPreview', ok: false, reason: verdict.reason },
     );
+  }
+
+  /** The nest this player is manning, if any. */
+  private gunnerEmplacement(playerId: string): EmplacementSnapshot | undefined {
+    for (const emplacement of this.emplacements.values()) {
+      if (emplacement.gunnerId === playerId) return emplacement;
+    }
+    return undefined;
+  }
+
+  /** The nearest nest this player could climb into right now (own team only). */
+  nearestMannableEmplacement(playerId: string): EmplacementSnapshot | undefined {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating) return undefined;
+    let best: EmplacementSnapshot | undefined;
+    let bestDistance = Infinity;
+    for (const emplacement of this.emplacements.values()) {
+      if (!MANNED_EMPLACEMENTS.includes(emplacement.kind) || emplacement.team !== player.team) continue;
+      const occupant = emplacement.gunnerId ? this.players.get(emplacement.gunnerId) : undefined;
+      if (occupant && occupant.id !== playerId && !occupant.isDead && !occupant.isSpectating) continue;
+      const distance = Math.hypot(
+        player.position.x - emplacement.position.x,
+        player.position.y - emplacement.position.y,
+        player.position.z - emplacement.position.z,
+      );
+      if (distance <= EMPLACEMENT_MOUNT_REACH && distance < bestDistance) { best = emplacement; bestDistance = distance; }
+    }
+    return best;
+  }
+
+  /** Climb into an MG nest. The server owns the seat: ownership, distance and
+   *  occupancy are all checked here, and the gunner is snapped onto the nest so
+   *  a modified client cannot man it from across the map. */
+  private mountEmplacement(playerId: string, emplacementId: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || typeof emplacementId !== 'string') return;
+    if (this.driverJeep(playerId) || this.gunnerEmplacement(playerId)) return;
+    if (player.carryingFlag) return this.emplacementMessage(playerId, 'Drop the flag before manning a nest');
+    const emplacement = this.emplacements.get(emplacementId);
+    if (!emplacement) return;
+    if (!MANNED_EMPLACEMENTS.includes(emplacement.kind)) return this.emplacementMessage(playerId, 'That build cannot be manned');
+    if (emplacement.team !== player.team) return this.emplacementMessage(playerId, 'That nest belongs to the other team');
+    const occupant = emplacement.gunnerId ? this.players.get(emplacement.gunnerId) : undefined;
+    if (occupant && !occupant.isDead && !occupant.isSpectating) return this.emplacementMessage(playerId, 'That nest is already manned');
+    const seat = emplacement.position;
+    if (Math.hypot(player.position.x - seat.x, player.position.y - seat.y, player.position.z - seat.z) > EMPLACEMENT_MOUNT_REACH) {
+      return this.emplacementMessage(playerId, 'Walk up to the nest to man it');
+    }
+
+    emplacement.gunnerId = playerId;
+    emplacement.yaw = emplacement.baseYaw;
+    player.position = { x: seat.x, y: seat.y, z: seat.z };
+    player.velocity = { x: 0, y: 0, z: 0 };
+    this.clearSpawnProtection(playerId);
+    this.sendToPlayer(playerId, {
+      type: 'emplacementMounted',
+      emplacementId: emplacement.id,
+      position: { ...seat },
+      yaw: emplacement.yaw,
+    });
+    this.broadcast({ type: 'playerUpdated', playerId, state: player.getState() });
+    this.broadcastEmplacements();
+  }
+
+  /** Stand clear of the nest. Mirrors the jeep exit: try a ring of spots, and
+   *  only fall back to the team spawn when the exit is forced (death, reset). */
+  private safeEmplacementExit(emplacement: EmplacementSnapshot, playerId: string): Position | null {
+    const player = this.players.get(playerId);
+    const spec = emplacementSpec(emplacement.kind);
+    if (!player || !spec) return null;
+    const base = Math.hypot(spec.halfWidth, spec.halfLength);
+    for (const radius of [base + 1.2, base + 2.2, base + 3.4]) {
+      for (let i = 0; i < 8; i++) {
+        const angle = emplacement.yaw + i * Math.PI / 4;
+        const x = emplacement.position.x + Math.cos(angle) * radius;
+        const z = emplacement.position.z + Math.sin(angle) * radius;
+        const y = this.jeepGround(x, z, emplacement.position.y);
+        if (y === null || Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) continue;
+        let clear = true;
+        for (const dx of [-0.45, 0.45]) for (const dz of [-0.45, 0.45]) for (const dy of [0.3, 1, 1.8]) {
+          if (this.world.isSolid(Math.round(x + dx), Math.round(y + dy), Math.round(z + dz))) clear = false;
+        }
+        if (!clear || [...this.players.values()].some(p => p.id !== playerId && !p.isDead && !p.isSpectating && Math.abs(p.position.y - y) < 2 && Math.hypot(p.position.x - x, p.position.z - z) < 1)) continue;
+        if ([...this.emplacements.values()].some(e => e.id !== emplacement.id && Math.abs(e.position.y - y) < 2 && Math.hypot(e.position.x - x, e.position.z - z) < 2)) continue;
+        return { x, y, z };
+      }
+    }
+    return null;
+  }
+
+  private dismountEmplacement(playerId: string, forced = false): boolean {
+    const emplacement = this.gunnerEmplacement(playerId);
+    if (!emplacement) return false;
+    const player = this.players.get(playerId);
+    const exit = this.safeEmplacementExit(emplacement, playerId);
+    if (!exit && !forced) { this.emplacementMessage(playerId, 'No clear way out of the nest'); return false; }
+    emplacement.gunnerId = null;
+    emplacement.yaw = emplacement.baseYaw;
+    this.emplacementFireAt.delete(emplacement.id);
+    if (player && !player.isDead) {
+      player.position = exit ?? this.getSpawnPosition(player.team);
+      this.sendToPlayer(playerId, { type: 'emplacementExited', position: { ...player.position } });
+      this.broadcast({ type: 'playerUpdated', playerId, state: player.getState() });
+    }
+    this.broadcastEmplacements();
+    return true;
+  }
+
+  /** Aim the manned nest from the gunner's look direction, clamped to its arc. */
+  private aimEmplacement(playerId: string, yaw: number, pitch: number): void {
+    const emplacement = this.gunnerEmplacement(playerId);
+    const spec = emplacement ? emplacementSpec(emplacement.kind) : undefined;
+    if (!emplacement || !spec) return;
+    const half = Math.max(0, spec.arc) / 2;
+    const offset = Math.atan2(Math.sin(yaw - emplacement.baseYaw), Math.cos(yaw - emplacement.baseYaw));
+    const clamped = offset > half || offset < -half ? emplacement.baseYaw + Math.sign(offset) * half : yaw;
+    emplacement.yaw = clamped;
+    void pitch; // pitch is read at fire time from the gunner's rotation
+  }
+
+  /** Fire one round from the manned nest. Direction comes from the nest's own
+   *  yaw and the gunner's pitch, never from the client's ray. */
+  private fireEmplacement(playerId: string): void {
+    const emplacement = this.gunnerEmplacement(playerId);
+    const player = this.players.get(playerId);
+    if (!emplacement || !player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
+    const spec = emplacementSpec(emplacement.kind);
+    if (!spec) return;
+    if (emplacement.ammo <= 0) return this.emplacementMessage(playerId, 'The nest is out of rounds');
+    const now = this.world.serverTime;
+    if (now - (this.emplacementFireAt.get(emplacement.id) ?? -1) < EMPLACEMENT_FIRE_INTERVAL) return;
+    this.emplacementFireAt.set(emplacement.id, now);
+    emplacement.ammo -= 1;
+
+    const yaw = emplacement.yaw;
+    const pitch = Math.max(-EMPLACEMENT_MAX_PITCH, Math.min(EMPLACEMENT_MAX_PITCH, player.rotation.pitch ?? 0));
+    const cosPitch = Math.cos(pitch);
+    const direction = { x: -Math.sin(yaw) * cosPitch, y: Math.sin(pitch), z: -Math.cos(yaw) * cosPitch };
+    const origin = {
+      x: emplacement.position.x + direction.x * 0.9,
+      y: emplacement.position.y + 1.15,
+      z: emplacement.position.z + direction.z * 0.9,
+    };
+
+    // Tracers and muzzle sound reuse the existing player-shot event.
+    this.broadcastExcept(playerId, { type: 'playerShot', playerId, origin, direction, weapon: 'mgNest' });
+
+    const terrainHit = this.world.raycast(origin, direction, spec.maxRange);
+    const maxDist = terrainHit ? terrainHit.distance : spec.maxRange;
+    const vehicleHit = this.hitJeep(origin, direction, maxDist, emplacement.team);
+    const limit = vehicleHit ? Math.min(maxDist, vehicleHit.distance) : maxDist;
+
+    if (vehicleHit) this.damageJeep(vehicleHit.jeep, EMPLACEMENT_ROUND_DAMAGE);
+
+    // Nearest enemy body intersecting the round; torso and head are sampled so a
+    // shot that clips the head counts as one.
+    let best: { id: string; distance: number; headshot: boolean } | null = null;
+    for (const [id, target] of this.players) {
+      if (id === playerId || target.isDead || target.isSpectating || target.team === emplacement.team) continue;
+      for (const [height, headshot] of [[1.55, true], [1.0, false]] as const) {
+        const to = {
+          x: target.position.x - origin.x,
+          y: target.position.y + height - origin.y,
+          z: target.position.z - origin.z,
+        };
+        const along = to.x * direction.x + to.y * direction.y + to.z * direction.z;
+        if (along <= 0 || along > limit) continue;
+        const perp = Math.hypot(
+          to.x - direction.x * along,
+          to.y - direction.y * along,
+          to.z - direction.z * along,
+        );
+        if (perp > (headshot ? 0.35 : 0.6)) continue;
+        if (!best || along < best.distance) best = { id, distance: along, headshot };
+      }
+    }
+
+    if (best) {
+      const damage = EMPLACEMENT_ROUND_DAMAGE * (best.headshot ? 1.5 : 1);
+      // applyDamage already confirms the hit to the shooter.
+      this.applyDamage(best.id, damage, playerId, best.headshot);
+    }
   }
 
   private driverJeep(playerId: string): ServerJeep | undefined {
@@ -1030,7 +1218,11 @@ export class ServerGame {
     for (const jeep of this.jeeps.values()) if (jeep.driverId) this.exitJeep(jeep.driverId, true);
     // Emplacements are spent supply, like a wrecked vehicle: nothing refunded.
     if (this.emplacements.size > 0) {
+      for (const emplacement of this.emplacements.values()) {
+        if (emplacement.gunnerId) this.dismountEmplacement(emplacement.gunnerId, true);
+      }
       this.emplacements.clear();
+      this.emplacementFireAt.clear();
       this.broadcastEmplacements();
     }
     this.jeeps.clear();
@@ -1510,6 +1702,7 @@ export class ServerGame {
     // on a disconnected ghost carrier and deadlock the round.
     this.dropCarriedFlag(playerId);
     this.exitJeep(playerId, true);
+    this.dismountEmplacement(playerId, true);
     this.botJeepTasks.delete(playerId);
     this.botJeepCooldown.delete(playerId);
 
@@ -1703,7 +1896,17 @@ export class ServerGame {
         });
         break;
 
-      case 'playerInput':
+      case 'playerInput': {
+        // A gunner may look around but not walk: the nest owns their position.
+        const manned = this.gunnerEmplacement(playerId);
+        if (manned) {
+          if (Number.isFinite(message.input?.yaw) && Number.isFinite(message.input?.pitch)) {
+            player.rotation.yaw = message.input.yaw;
+            player.rotation.pitch = message.input.pitch;
+            this.aimEmplacement(playerId, message.input.yaw, message.input.pitch);
+          }
+          break;
+        }
         // Reject movement from dead players (prevents ghost position updates
         // while the respawn timer runs) and spectators (no world presence)
         if (message.input && typeof message.input === 'object'
@@ -1719,6 +1922,7 @@ export class ServerGame {
           } else player.applyInput(message.input);
         }
         break;
+      }
 
       case 'buildJeep':
         this.buildJeep(playerId);
@@ -1731,6 +1935,15 @@ export class ServerGame {
         break;
       case 'craftBlueprint':
         this.craftBlueprint(playerId, message.kind, message.slot);
+        break;
+      case 'mountEmplacement':
+        this.mountEmplacement(playerId, message.emplacementId);
+        break;
+      case 'dismountEmplacement':
+        this.dismountEmplacement(playerId);
+        break;
+      case 'fireEmplacement':
+        this.fireEmplacement(playerId);
         break;
       case 'enterJeep':
         this.enterJeep(playerId, message.vehicleId);
@@ -2478,6 +2691,7 @@ export class ServerGame {
     this.clearSpawnProtection(playerId);
     this.dropCarriedFlag(playerId);
     this.exitJeep(playerId, true);
+    this.dismountEmplacement(playerId, true);
   }
 
   update(dt: number): void {
@@ -2487,6 +2701,15 @@ export class ServerGame {
     // Round clock + phase transitions (live -> intermission -> next round)
     this.updateRound(dt);
     this.updateJeeps(dt);
+    // A manned nest turns with its gunner; 10Hz is enough to read as smooth and
+    // keeps aim updates off the per-message broadcast path.
+    if (this.emplacements.size > 0) {
+      this.emplacementSync += dt;
+      if (this.emplacementSync >= 0.1) {
+        this.emplacementSync = 0;
+        if ([...this.emplacements.values()].some(e => e.gunnerId)) this.broadcastEmplacements();
+      }
+    }
 
     // Clear stale shooting flags once the 100ms window has elapsed.
     // Done in the game loop instead of per-shot setTimeout so state stays

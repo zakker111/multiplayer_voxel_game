@@ -61,6 +61,9 @@ export type ClientMessage =
   | { type: 'placeEmplacement'; kind: EmplacementKind; position: Position; yaw: number; slot: number }
   | { type: 'previewEmplacement'; kind: EmplacementKind; position: Position; yaw: number; slot: number }
   | { type: 'craftBlueprint'; kind: EmplacementKind; slot: number }
+  | { type: 'mountEmplacement'; emplacementId: string }
+  | { type: 'dismountEmplacement' }
+  | { type: 'fireEmplacement' }
   | { type: 'join'; team: 'red' | 'blue'; position?: Position; name?: string }
   | { type: 'playerInput'; input: PlayerInput }
   | { type: 'shoot'; origin: Position; direction: Position; targetId?: string; isHeadshot?: boolean }
@@ -171,6 +174,8 @@ export type ServerMessage =
   | { type: 'emplacementsUpdated'; emplacements: EmplacementSnapshot[] }
   | { type: 'emplacementPreview'; ok: boolean; reason?: string; position?: Position; yaw?: number }
   | { type: 'emplacementMessage'; message: string }
+  | { type: 'emplacementMounted'; emplacementId: string; position: Position; yaw: number }
+  | { type: 'emplacementExited'; position: Position }
   | { type: 'blueprintsUpdated'; blueprints: BlueprintSlots }
   | { type: 'jeepExited'; position: Position }
   | { type: 'jeepMessage'; message: string }
@@ -329,10 +334,27 @@ export interface EmplacementSnapshot {
   kind: EmplacementKind;
   team: 'red' | 'blue';
   position: Position;
+  /** Current facing. Tracked from the gunner's aim while the nest is manned. */
   yaw: number;
+  /** Facing chosen when it was placed; the gunner swings within `arc / 2`. */
+  baseYaw: number;
   hp: number;
   ammo: number;
+  /** Player manning it, or null. Only MANNED_EMPLACEMENTS can be manned. */
+  gunnerId: string | null;
 }
+
+/** Kinds a player can man with F. The cannon and mortar wait for the projectile
+ *  work; seating them now would promise a gun that cannot fire. */
+export const MANNED_EMPLACEMENTS: EmplacementKind[] = ['mgNest'];
+/** How close a player must stand to climb into a nest. */
+export const EMPLACEMENT_MOUNT_REACH = 3.5;
+/** Seconds between MG nest rounds: an emplaced nest outguns a rifle. */
+export const EMPLACEMENT_FIRE_INTERVAL = 0.09;
+/** Damage one MG nest round does to a body. */
+export const EMPLACEMENT_ROUND_DAMAGE = 30;
+/** How far up or down the gunner may tilt the nest, in radians. */
+export const EMPLACEMENT_MAX_PITCH = 0.6;
 
 // Named aliases keep existing call sites readable; VEHICLES is the only source.
 export const JEEP_COST = VEHICLES.jeep.cost;

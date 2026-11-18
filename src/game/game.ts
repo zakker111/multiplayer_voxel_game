@@ -20,7 +20,8 @@ import {
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
-  emplacementSpec, type EmplacementKind, type BlueprintSlots,
+  emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
+  MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH,
   isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
@@ -132,6 +133,12 @@ export interface GameState {
   blueprintCatalogue: EmplacementKind[];
   /** The bench menu overlay is up; the cursor is free and the game keys idle. */
   benchMenuOpen: boolean;
+  /** True while manning an emplacement; the HUD swaps to its gun hints. */
+  manningEmplacement: boolean;
+  /** Rounds left in the manned nest, or null when not manning one. */
+  manningAmmo: number | null;
+  /** A mannable nest of your own team is within reach. */
+  emplacementNearby: boolean;
   jeepNearby: boolean;
   jeepDriving: boolean;
   jeepHp: number;
@@ -358,6 +365,11 @@ export class Game {
   private craftedSlots: BlueprintSlots = [null, null, null];
   private benchOpen = false;
   private benchMenuOpen = false;
+  /** Emplacements the server has broadcast, and the meshes drawn for them. */
+  private emplacedSnapshots = new Map<string, EmplacementSnapshot>();
+  private emplacementMeshes = new Map<string, THREE.Group>();
+  private mountedEmplacementId: string | null = null;
+  private lastEmplacementFire = 0;
   /** The slot 5/6/7 picks. It stays set on an empty slot so B knows where to
    *  craft; `blueprintIndex` is the same slot only once its ghost is up. */
   private blueprintSlot = 0;
@@ -2378,6 +2390,30 @@ export class Game {
       }
       this.tintGhost(this.ghostValid);
     });
+    this.networkClient.onMessage('emplacementsUpdated', (msg: any) => {
+      if (Array.isArray(msg.emplacements)) this.applyEmplacements(msg.emplacements as EmplacementSnapshot[]);
+    });
+    this.networkClient.onMessage('emplacementMounted', (msg: any) => {
+      this.mountedEmplacementId = typeof msg.emplacementId === 'string' ? msg.emplacementId : null;
+      this.cancelBlueprint();
+      this.weaponContainer.visible = false;
+      if (msg.position) {
+        this.player.position.set(msg.position.x, msg.position.y, msg.position.z);
+        this.player.velocity.set(0, 0, 0);
+        this.player.updateCamera();
+      }
+      this.showMessage('🔫 Manning the MG nest · hold click to fire · F to step out');
+    });
+    this.networkClient.onMessage('emplacementExited', (msg: any) => {
+      this.mountedEmplacementId = null;
+      this.isLeftDown = false;
+      this.weaponContainer.visible = !this.isSpectating;
+      if (msg.position) {
+        this.player.position.set(msg.position.x, msg.position.y, msg.position.z);
+        this.player.velocity.set(0, 0, 0);
+        this.player.updateCamera();
+      }
+    });
     this.networkClient.onMessage('emplacementMessage', (msg: any) => {
       if (typeof msg.message === 'string') this.showMessage(msg.message);
     });
@@ -2877,6 +2913,70 @@ export class Game {
     return group;
   }
 
+  /** A mannable nest of your team within reach, or null. */
+  private nearbyMannableEmplacement(): EmplacementSnapshot | null {
+    if (this.gameMode !== 'online') return null;
+    let best: EmplacementSnapshot | null = null;
+    let bestDistance = Infinity;
+    for (const snapshot of this.emplacedSnapshots.values()) {
+      if (!MANNED_EMPLACEMENTS.includes(snapshot.kind)) continue;
+      if (snapshot.team !== this.playerTeam || snapshot.gunnerId) continue;
+      const distance = this.player.position.distanceTo(
+        new THREE.Vector3(snapshot.position.x, snapshot.position.y, snapshot.position.z),
+      );
+      if (distance <= EMPLACEMENT_MOUNT_REACH && distance < bestDistance) {
+        best = snapshot;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  /** Place, move, turn and remove the meshes for the server's emplacements.
+   *  They are static props, so each broadcast only touches what changed. */
+  private applyEmplacements(list: EmplacementSnapshot[]): void {
+    const seen = new Set<string>();
+    for (const snapshot of list) {
+      seen.add(snapshot.id);
+      this.emplacedSnapshots.set(snapshot.id, snapshot);
+      let mesh = this.emplacementMeshes.get(snapshot.id);
+      if (!mesh) {
+        const material = new THREE.MeshStandardMaterial({
+          color: snapshot.team === 'blue' ? 0x4a6fa8 : 0xa8544a,
+          roughness: 0.85,
+        });
+        mesh = this.createGhostMesh(snapshot.kind, material);
+        this.scene.add(mesh);
+        this.emplacementMeshes.set(snapshot.id, mesh);
+      }
+      mesh.position.set(snapshot.position.x, snapshot.position.y, snapshot.position.z);
+      mesh.rotation.y = snapshot.yaw;
+    }
+
+    for (const [id, mesh] of this.emplacementMeshes) {
+      if (seen.has(id)) continue;
+      // Destroyed or cleared with the round: the seat goes with it.
+      if (id === this.mountedEmplacementId) {
+        this.mountedEmplacementId = null;
+        this.weaponContainer.visible = !this.isSpectating;
+      }
+      this.scene.remove(mesh);
+      mesh.traverse((object) => (object as THREE.Mesh).geometry?.dispose?.());
+      (mesh.children[0] as THREE.Mesh | undefined)?.material instanceof THREE.Material
+        && ((mesh.children[0] as THREE.Mesh).material as THREE.Material).dispose();
+      this.emplacementMeshes.delete(id);
+      this.emplacedSnapshots.delete(id);
+    }
+  }
+
+  /** One trigger pull at the nest. The server rate-limits and aims it. */
+  private fireMannedEmplacement(): void {
+    const now = performance.now();
+    if (now - this.lastEmplacementFire < 100) return;
+    this.lastEmplacementFire = now;
+    this.networkClient?.send({ type: 'fireEmplacement' });
+  }
+
   private tintGhost(valid: boolean): void {
     this.ghostMaterial?.color.setHex(valid ? 0x49e06a : 0xe04949);
   }
@@ -2915,6 +3015,15 @@ export class Game {
 
   private onMouseDown(e: MouseEvent): void {
     if (this.drivingJeepId) return;
+    if (this.mountedEmplacementId) {
+      // The nest owns the trigger: no weapon, no ghost, no voxel building.
+      if (e.button === 0) {
+        this.isMouseDown = true;
+        this.isLeftDown = true;
+        this.fireMannedEmplacement();
+      }
+      return;
+    }
     if (this.blueprintIndex !== null) {
       // A ghost is up: clicks belong to the blueprint, never to the weapon.
       if (e.button === 0) this.placeBlueprint();
@@ -3051,9 +3160,14 @@ export class Game {
 
     if (this.gameMode === 'online' && !this.player.isDead && !e.repeat && e.code === 'KeyF') {
       if (this.drivingJeepId) this.networkClient?.send({ type: 'exitJeep' });
+      else if (this.mountedEmplacementId) this.networkClient?.send({ type: 'dismountEmplacement' });
       else {
-        const jeep = this.nearestJeep();
-        if (jeep) this.networkClient?.send({ type: 'enterJeep', vehicleId: jeep.id });
+        const nest = this.nearbyMannableEmplacement();
+        if (nest) this.networkClient?.send({ type: 'mountEmplacement', emplacementId: nest.id });
+        else {
+          const jeep = this.nearestJeep();
+          if (jeep) this.networkClient?.send({ type: 'enterJeep', vehicleId: jeep.id });
+        }
       }
       return;
     }
@@ -4009,6 +4123,12 @@ export class Game {
         this.lastDriveInput = now;
         this.networkClient?.send({ type: 'driveJeep', throttle: (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0), steering: (this.player.hasKey('KeyA') ? 1 : 0) - (this.player.hasKey('KeyD') ? 1 : 0), brake: this.jeepBrake });
       }
+    } else if (this.mountedEmplacementId) {
+      // The server pins the gunner to the nest; mirror that locally so the
+      // camera does not slide away from the gun while walking keys are held.
+      const nest = this.emplacedSnapshots.get(this.mountedEmplacementId);
+      if (nest) this.player.position.set(nest.position.x, nest.position.y, nest.position.z);
+      this.player.velocity.set(0, 0, 0);
     } else this.player.update(dt);
     for (const { state, mesh } of this.jeeps.values()) {
       mesh.position.lerp(new THREE.Vector3(state.position.x, state.position.y, state.position.z), Math.min(dt * 14, 1));
@@ -4029,7 +4149,10 @@ export class Game {
     // Continuous fire for SMG and tools while holding the LEFT mouse button.
     // Rifle fires exactly once per click (no burst). Right-click never fires —
     // it is reserved for building voxels.
-    if (this.isLeftDown && !this.player.isDead && !this.benchMenuOpen) {
+    if (this.mountedEmplacementId && this.isLeftDown && !this.player.isDead) {
+      this.fireMannedEmplacement();
+    }
+    if (this.isLeftDown && !this.player.isDead && !this.benchMenuOpen && !this.mountedEmplacementId) {
       if (this.equipment === 'smg' || this.equipment === 'pickaxe' || this.equipment === 'spade') {
         this.performAction();
       }
@@ -5808,6 +5931,11 @@ export class Game {
         blueprintSlot: this.blueprintSlot,
         blueprintCatalogue: this.blueprintCatalogue,
         benchMenuOpen: this.benchMenuOpen,
+        manningEmplacement: Boolean(this.mountedEmplacementId),
+        manningAmmo: this.mountedEmplacementId
+          ? (this.emplacedSnapshots.get(this.mountedEmplacementId)?.ammo ?? null)
+          : null,
+        emplacementNearby: this.nearbyMannableEmplacement() !== null,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,
         hitMarker: this.hitMarkerTimer > 0,
