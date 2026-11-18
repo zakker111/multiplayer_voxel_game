@@ -57,8 +57,13 @@ async function main() {
     || a.frames.some((f) => f.type === 'playerUpdated'));
 
   // Movement is observed from the other client: the server never echoes a
-  // player's own movement back to them.
-  const target = { x: 0, y: 12, z: -210 };
+  // player's own movement back to them. Spawn x is random within ±32, so the
+  // step must be small enough for the movement budget: the old fixed target
+  // (0, -210) was a cross-map teleport that validation rightly refused.
+  // Joining respawns the player at a fresh random spawn, so the init position
+  // is stale; use the authoritative `joined` state.
+  const spawn = a.frames.find((f) => f.type === 'joined')?.state?.position ?? init.state.position;
+  const target = { x: spawn.x, y: spawn.y, z: spawn.z + 2 };
   for (let i = 0; i < 15; i++) {
     a.ws.send(JSON.stringify({
       type: 'playerInput',
@@ -68,11 +73,29 @@ async function main() {
   }
   await sleep(300);
   const seenByB = b.frames.filter((f) => f.type === 'playerUpdated' && f.playerId === init.playerId).at(-1);
+  const legalStep = seenByB?.state.position
+    ? Math.hypot(seenByB.state.position.x - target.x, seenByB.state.position.z - target.z)
+    : Infinity;
   check(
     'player input reaches other clients',
-    !!seenByB && Math.abs(seenByB.state.position.z - target.z) < 0.01,
-    `observed z=${seenByB?.state.position?.z}`,
+    legalStep < 0.05,
+    `observed ${legalStep === Infinity ? 'nothing' : `${legalStep.toFixed(2)}u from the step`}`,
   );
+
+  // ...and an illegal teleport gains no ground under movement validation. The
+  // target is 150m away and stays far, however the spawn was rolled.
+  const hackTarget = { x: spawn.x > 0 ? spawn.x - 150 : spawn.x + 150, y: spawn.y, z: spawn.z };
+  for (let i = 0; i < 5; i++) {
+    a.ws.send(JSON.stringify({
+      type: 'playerInput',
+      input: { moveX: 0, moveZ: 1, yaw: 0, pitch: 0, sprint: true, position: hackTarget },
+    }));
+    await sleep(50);
+  }
+  await sleep(300);
+  const afterHack = b.frames.filter((f) => f.type === 'playerUpdated' && f.playerId === init.playerId).at(-1)?.state.position;
+  const gap = afterHack ? Math.hypot(afterHack.x - hackTarget.x, afterHack.z - hackTarget.z) : 0;
+  check('a teleport is clamped under movement validation', gap > 100, `still ${gap.toFixed(0)}u short`);
 
   // Garbage frames must not kill the connection or log errors.
   const wsClosed = { v: false };
