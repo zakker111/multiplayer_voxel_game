@@ -90,7 +90,9 @@ const BOT_JEEP_HUMAN_PRIORITY_RADIUS = 24;
 const BOT_JEEP_COOLDOWN = 25;
 const BOT_LOGISTICS_PER_TEAM = 1;
 const BOT_LOGISTICS_CAPACITY = 12;
-const BOT_LOGISTICS_MIN_STOCK = 30;
+// Watermark the logistics bots keep the workshop stocked to. It has to cover
+// the most expensive thing a bot buys on its own initiative: an emplacement.
+const BOT_LOGISTICS_MIN_STOCK = 120;
 const BOT_LOGISTICS_MINE_RADIUS = 8;
 
 // Emplacement placement rules (Phase 4). Your own base may be fortified, but
@@ -240,17 +242,14 @@ export class ServerGame {
    * where it may stand, whether the ground fits, and what it costs. Nothing is
    * charged unless the build is accepted, so a rejected ghost costs nothing.
    */
-  private emplacementVerdict(
-    playerId: string, kind: unknown, position: unknown, yaw: unknown, slot: unknown,
-  ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number; slot: number } | { ok: false; reason: string } {
+  private emplacementSpotVerdict(
+    playerId: string, kind: unknown, position: unknown, yaw: unknown,
+  ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number } | { ok: false; reason: string } {
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return { ok: false, reason: 'Cannot build right now' };
     if (typeof kind !== 'string' || !isVec3(position)) return { ok: false, reason: 'Bad blueprint' };
     const spec = emplacementSpec(kind);
     if (!spec) return { ok: false, reason: 'Unknown blueprint' };
-    if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > 2) {
-      return { ok: false, reason: 'No blueprint in that slot' };
-    }
 
     const extent = Math.hypot(spec.halfWidth, spec.halfLength);
     if (Math.abs(position.x) > WORLD_HALF - extent - 1 || Math.abs(position.z) > WORLD_HALF - extent - 1) {
@@ -289,17 +288,26 @@ export class ServerGame {
     const built = [...this.emplacements.values()].filter(e => e.team === player.team && e.kind === spec.kind).length;
     if (built >= spec.teamLimit) return { ok: false, reason: 'Team limit for that build reached' };
 
-    // Placement now consumes a crafted blueprint (one charge in the bench)
-    // instead of drawing from the team stockpile directly. The bench is the
-    // only place supply turns into deployment rights.
+    return { ok: true, spec, spot, rotation };
+  }
+
+  private emplacementVerdict(
+    playerId: string, kind: unknown, position: unknown, yaw: unknown, slot: unknown,
+  ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number; slot: number } | { ok: false; reason: string } {
+    const spotVerdict = this.emplacementSpotVerdict(playerId, kind, position, yaw);
+    if (!spotVerdict.ok) return spotVerdict;
+
+    // Placement consumes a crafted blueprint (one charge in the bench) instead
+    // of drawing from the team stockpile directly. The bench is the only place
+    // supply turns into deployment rights.
     if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > 2) {
       return { ok: false, reason: 'No blueprint in that slot' };
     }
-    if (!this.hasBlueprint(playerId, slot, kind)) {
+    if (!this.hasBlueprint(playerId, slot, spotVerdict.spec.kind)) {
       return { ok: false, reason: 'No blueprint in that slot' };
     }
 
-    return { ok: true, spec, spot, rotation, slot };
+    return { ...spotVerdict, ok: true, slot };
   }
 
   private placeEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown, slot: unknown): void {
@@ -309,21 +317,41 @@ export class ServerGame {
     if (!verdict.ok) return this.emplacementMessage(playerId, verdict.reason);
 
     this.consumeBlueprint(playerId, verdict.slot);
+    this.createEmplacement(player.team, verdict.spec, verdict.spot, verdict.rotation);
+    this.broadcastBlueprints(playerId);
+    this.broadcastWorkshops();
+  }
+
+  private createEmplacement(team: 'red' | 'blue', spec: EmplacementSpec, spot: Position, rotation: number): EmplacementSnapshot {
     const emplacement: EmplacementSnapshot = {
       id: `emp_${++this.emplacementSequence}`,
-      kind: verdict.spec.kind,
-      team: player.team,
-      position: verdict.spot,
-      yaw: verdict.rotation,
-      hp: verdict.spec.maxHp,
-      ammo: verdict.spec.ammo,
-      baseYaw: verdict.rotation,
+      kind: spec.kind,
+      team,
+      position: spot,
+      yaw: rotation,
+      hp: spec.maxHp,
+      ammo: spec.ammo,
+      baseYaw: rotation,
       gunnerId: null,
     };
     this.emplacements.set(emplacement.id, emplacement);
-    this.broadcastBlueprints(playerId);
-    this.broadcastWorkshops();
     this.broadcastEmplacements();
+    return emplacement;
+  }
+
+  /** Bots skip the bench but not the bill: a bot build pays the team stock
+   *  directly, through the same placement rules a player's ghost is judged by. */
+  private botPlaceEmplacement(bot: ServerBot, kind: unknown, position: unknown, yaw: unknown): boolean {
+    if (typeof kind !== 'string') return false;
+    const spec = emplacementSpec(kind);
+    if (!spec) return false;
+    const verdict = this.emplacementSpotVerdict(bot.id, kind, position, yaw);
+    if (!verdict.ok) return false;
+    if (this.workshopStock[bot.team] < spec.cost) return false;
+    this.workshopStock[bot.team] -= spec.cost;
+    this.createEmplacement(bot.team, verdict.spec, verdict.spot, verdict.rotation);
+    this.broadcastWorkshops();
+    return true;
   }
 
   /** Consume one crafted blueprint slot. Called only on a successful
@@ -1167,6 +1195,7 @@ export class ServerGame {
       digBlock: (bot, pos) => {
         this.botDig(bot.id, pos);
       },
+      placeEmplacement: (bot, kind, position, yaw) => this.botPlaceEmplacement(bot, kind, position, yaw),
       // Bots walk around built structures instead of grinding into them; a
       // manned nest especially must not be steppable, or a bot would stand
       // inside a gun that is shooting at its friends.

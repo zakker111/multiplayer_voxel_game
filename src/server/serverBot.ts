@@ -69,6 +69,9 @@ export interface BotContext {
   digBlock?: (bot: ServerBot, pos: Position) => void;
   /** Optional: is this ground point inside a built structure (nest, crate)? */
   blockedBy?: (x: number, z: number) => boolean;
+  /** Optional: try to emplace a build for this bot. False means refused (cost,
+   *  ground, team limit, another body in the way) and nothing was spent. */
+  placeEmplacement?: (bot: ServerBot, kind: string, position: Position, yaw: number) => boolean;
 }
 
 const EYE_HEIGHT = 1.6;
@@ -80,6 +83,9 @@ const VISIBLE_RANGE = 75;
 // How many ticks a single placed block "costs" in trench pace. Lowering this
 // makes bots wall their trench faster (one block every other tick by default).
 const TRENCH_BUILD_INTERVAL = 2;
+// How often an engineer will try to emplace a gun at its firebase. A refusal
+// (no stock, rough ground) is retried on the next window, not every tick.
+const GUN_BUILD_COOLDOWN = 20;
 // Withdrawal: how long a bot falls back before rejoining the fight, and how
 // long it waits before it is willing to fall back again.
 const RETREAT_MAX_SECONDS = 6;
@@ -176,6 +182,9 @@ export class ServerBot extends ServerPlayer {
     bunker: 0,
     'bunker-ports': 0,
   };
+  /** Guns this bot has emplaced for its team (telemetry + one-per-life gate). */
+  gunsBuilt = 0;
+  private lastGunAt = -Infinity;
   structuresStarted: Record<StructureKind, number> = {
     trench: 0,
     'l-trench': 0,
@@ -864,6 +873,8 @@ export class ServerBot extends ServerPlayer {
       // support bots died before placing more than a couple of blocks.
       const quietPost = !enemy || dist > 32;
       const underFire = t < this.pinnedDownUntil;
+      // A gun for the post, whenever the workshop can pay for one.
+      this.tryGunBuild(ctx, { x: Math.round(post.x), z: Math.round(post.z) }, t);
       if (
         this.engineer &&
         this.fortifyStage === 0 &&
@@ -925,8 +936,10 @@ export class ServerBot extends ServerPlayer {
       }
     }
     if (this.buildPlan.length === 0 || this.remainingBlocks <= 1 || t >= this.stateUntil + 8) {
-      if (this.buildPlan.length === 0 && this.structureBlocksPlaced > 0 && this.lastStructureKind) {
-        this.structuresCompleted[this.lastStructureKind]++;
+      if (this.buildPlan.length === 0 && this.structureBlocksPlaced > 0) {
+        if (this.lastStructureKind) this.structuresCompleted[this.lastStructureKind]++;
+        // Walls are up: the engineer's next job is a gun covering them.
+        this.tryGunBuild(ctx, { x: Math.round(this.position.x), z: Math.round(this.position.z) }, t);
       }
       this.buildPlan = null;
       this.structureBlocksPlaced = 0;
@@ -1000,6 +1013,44 @@ export class ServerBot extends ServerPlayer {
     this.trenchDoneAt = null;
     this.trenchCenter = { x: center.x, y: GROUND_LEVEL, z: center.z };
     this.transition('TRENCH', ctx.serverTime, 14);
+  }
+
+  /**
+   * Emplace a gun for the team, angled at the enemy base. Bots have no bench,
+   * so the server charges the build to the team stock and judges the spot with
+   * the same rules a player's ghost gets; candidates walk outward from the
+   * firebase because rough ground is the usual refusal.
+   */
+  tryGunBuild(ctx: BotContext, center: { x: number; z: number }, t: number): boolean {
+    if (!ctx.placeEmplacement || !this.engineer) return false;
+    if (t - this.lastGunAt < GUN_BUILD_COOLDOWN) return false;
+    this.lastGunAt = t;
+
+    const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    const dx = enemyFlag.x - center.x;
+    const dz = enemyFlag.z - center.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const fx = dx / len;
+    const fz = dz / len;
+    // Facing convention matches vehicles: forward is (-sin(yaw), -cos(yaw)).
+    const yaw = Math.atan2(-fx, -fz);
+
+    for (const radius of [2, 3, 4, 5, 6]) {
+      for (const turn of [0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.6, -1.6]) {
+        const cos = Math.cos(turn);
+        const sin = Math.sin(turn);
+        const spot = {
+          x: Math.round(center.x + (fx * cos - fz * sin) * radius),
+          y: this.position.y,
+          z: Math.round(center.z + (fx * sin + fz * cos) * radius),
+        };
+        if (ctx.placeEmplacement(this, 'mgNest', spot, yaw)) {
+          this.gunsBuilt++;
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /** Random valid structure for this ground and block budget (null = none). */
@@ -1301,6 +1352,10 @@ export class ServerBot extends ServerPlayer {
         this.trenchDoneAt = t;
         if (this.structureBlocksPlaced > 0 && this.lastStructureKind) {
           this.structuresCompleted[this.lastStructureKind]++;
+        }
+        // The dug position is a firebase: put a gun behind its parapet.
+        if (this.trenchCenter) {
+          this.tryGunBuild(ctx, { x: Math.round(this.trenchCenter.x), z: Math.round(this.trenchCenter.z) }, t);
         }
       }
       if (t - this.trenchDoneAt >= 2) {
