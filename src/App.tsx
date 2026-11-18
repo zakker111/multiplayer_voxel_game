@@ -28,6 +28,7 @@ function App() {
     benchDistance: null, benchOpen: false,
     blueprints: [null, null, null], blueprintSlot: 0,
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
+    benchMenuOpen: false,
     jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
@@ -991,6 +992,88 @@ function App() {
                   <div className="text-white font-bold text-xl">📦 {gameState.inventory}</div>
                 </div>
               </div>
+
+              {/* Bench menu: five builds, their prices, and a craft button per
+                  slot. B at the bench opens it with the pointer released. */}
+              {gameState.benchMenuOpen && (
+                <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60">
+                  <div className="w-[34rem] max-w-[92vw] rounded-2xl border-2 border-sky-500/60 bg-gray-900/95 p-5 text-gray-200 shadow-2xl">
+                    <div className="flex items-baseline justify-between gap-4">
+                      <h2 className="text-xl font-bold text-sky-300">Blueprint Bench</h2>
+                      <div className="text-xs text-gray-400">
+                        Team stock <span className="font-mono text-amber-300">{gameState.workshopStock}</span> / {gameState.workshopCapacity}
+                      </div>
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-3 gap-2">
+                      {gameState.blueprints.map((crafted, slot) => (
+                        <div
+                          key={slot}
+                          className={`rounded-lg border px-2 py-1 text-xs ${
+                            crafted
+                              ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                              : 'border-gray-700 bg-gray-800/60 text-gray-500'
+                          }`}
+                        >
+                          Slot {slot + 1}: {crafted ? EMPLACEMENT_LABELS[crafted] : 'empty'}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mt-3 space-y-2">
+                      {(Object.keys(EMPLACEMENT_LABELS) as EmplacementKind[]).map((kind) => {
+                        const spec = emplacementSpec(kind);
+                        if (!spec) return null;
+                        const affordable = gameState.workshopStock >= spec.cost;
+                        return (
+                          <div key={kind} className="flex items-center gap-3 rounded-lg bg-gray-800/70 px-3 py-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm text-white">{EMPLACEMENT_LABELS[kind]}</div>
+                              <div className="text-xs text-gray-400">
+                                {spec.cost} blocks · {spec.maxHp} HP · max {spec.teamLimit} per team
+                                {spec.ammo > 0 ? ` · ${spec.ammo} rounds` : ' · unarmed'}
+                              </div>
+                            </div>
+                            {[0, 1, 2].map((slot) => {
+                              const taken = Boolean(gameState.blueprints[slot]);
+                              const disabled = taken || !affordable;
+                              return (
+                                <button
+                                  key={slot}
+                                  type="button"
+                                  disabled={disabled}
+                                  title={taken ? 'That slot already holds a blueprint' : `Craft into slot ${slot + 1}`}
+                                  onClick={() => gameRef.current?.craftFromBench(kind, slot)}
+                                  className={`rounded-md border px-2 py-1 text-xs ${
+                                    disabled
+                                      ? 'cursor-not-allowed border-gray-700 text-gray-600'
+                                      : 'border-sky-500/60 text-sky-200 hover:bg-sky-500/20'
+                                  }`}
+                                >
+                                  {taken ? '—' : `Slot ${slot + 1}`}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-4 flex items-center justify-between gap-3">
+                      <div className="text-xs text-gray-500">
+                        B or Esc closes · craft costs come out of the team stockpile
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => gameRef.current?.closeBenchMenu()}
+                        className="rounded-md bg-gray-700 px-3 py-1 text-sm hover:bg-gray-600"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Dynamic Tactical Crosshair & Iron Sight Reticle */}
               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20">

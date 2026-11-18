@@ -130,6 +130,8 @@ export interface GameState {
   blueprintSlot: number;
   /** What B builds into each slot, so the HUD can price an empty one. */
   blueprintCatalogue: EmplacementKind[];
+  /** The bench menu overlay is up; the cursor is free and the game keys idle. */
+  benchMenuOpen: boolean;
   jeepNearby: boolean;
   jeepDriving: boolean;
   jeepHp: number;
@@ -355,6 +357,7 @@ export class Game {
    *  its ghost can go green; placing consumes it. */
   private craftedSlots: BlueprintSlots = [null, null, null];
   private benchOpen = false;
+  private benchMenuOpen = false;
   /** The slot 5/6/7 picks. It stays set on an empty slot so B knows where to
    *  craft; `blueprintIndex` is the same slot only once its ghost is up. */
   private blueprintSlot = 0;
@@ -2803,15 +2806,42 @@ export class Game {
     this.showMessage(`🔧 ${spec.kind} blueprint in slot ${index + 1} · Q rotate · click place · right-click cancel`);
   }
 
-  /** Craft the catalogue blueprint for the selected slot. The server owns the
-   *  cost and the reach check; the client only says which slot it wants. */
-  private craftAtBench(): void {
+  /** B at the bench opens the build menu. Opening it frees the cursor so the
+   *  pointer can reach the buttons, like the workshop pad does for E/G. */
+  private toggleBenchMenu(): void {
+    if (this.benchMenuOpen) { this.closeBenchMenu(); return; }
     if (!this.benchOpen || this.isSpectating || this.player.isDead || this.drivingJeepId) {
       this.showMessage('Stand at your blueprint bench to craft');
       return;
     }
-    const slot = this.blueprintSlot;
-    this.networkClient?.send({ type: 'craftBlueprint', kind: this.blueprintCatalogue[slot], slot });
+    this.benchMenuOpen = true;
+    // A ghost left over from a previous pick would sit behind the panel.
+    this.cancelBlueprint();
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  /** Close the bench menu and hand the mouse back to the game. */
+  closeBenchMenu(): void {
+    if (!this.benchMenuOpen) return;
+    this.benchMenuOpen = false;
+    // Re-locking needs a user gesture; closing from a click on the panel has
+    // one, closing from a key press falls back to the canvas click path, so a
+    // rejected request must not surface as an unhandled promise.
+    if (!document.pointerLockElement) {
+      try {
+        this.canvas.requestPointerLock?.();
+      } catch {
+        /* the canvas click path re-locks the pointer */
+      }
+    }
+  }
+
+  /** Craft one build into one slot from the menu. The server owns the cost, the
+   *  reach check and the slot, so this only states the intent. */
+  craftFromBench(kind: EmplacementKind, slot: number): void {
+    if (!this.benchOpen) { this.showMessage('Stand at your blueprint bench to craft'); return; }
+    this.blueprintSlot = slot;
+    this.networkClient?.send({ type: 'craftBlueprint', kind, slot });
   }
 
   private cancelBlueprint(): void {
@@ -2960,6 +2990,14 @@ export class Game {
       return;
     }
 
+    // The bench menu owns the keyboard while it is up, so no game key leaks
+    // through to a panel that already has the cursor.
+    if (this.benchMenuOpen) {
+      if (e.code === 'Escape' || (e.code === 'KeyB' && !e.repeat)) this.closeBenchMenu();
+      e.preventDefault();
+      return;
+    }
+
     // Spectator mode controls: WASD/Arrows to fly & pan, Space/E to ascend, Q/Shift to descend, C to toggle modes
     if (this.isSpectating) {
       if (e.code === 'KeyC') {
@@ -3048,7 +3086,7 @@ export class Game {
       this.ghostYaw += Math.PI / 2;
       this.ghostRequestedAt = 0; // re-ask the server for this rotation
     }
-    if (e.code === 'KeyB' && !e.repeat && this.gameMode === 'online') this.craftAtBench();
+    if (e.code === 'KeyB' && !e.repeat && this.gameMode === 'online') { this.toggleBenchMenu(); return; }
     if (e.code === 'KeyR') this.startReload();
 
     this.player.handleKeyDown(e.code);
@@ -3214,7 +3252,7 @@ export class Game {
   }
 
   private performAction(): void {
-    if (this.player.isDead) return;
+    if (this.player.isDead || this.benchMenuOpen) return;
     if (this.blueprintIndex !== null) return; // ghost up: no shooting or mining
     const now = performance.now() / 1000;
     if (this.equipment === 'rifle' || this.equipment === 'smg') {
@@ -3978,6 +4016,9 @@ export class Game {
       mesh.rotation.y += delta * Math.min(dt * 14, 1);
     }
 
+    if (this.benchMenuOpen && (!this.benchOpen || this.isSpectating || this.player.isDead || this.drivingJeepId)) {
+      this.benchMenuOpen = false;
+    }
     if (this.blueprintIndex !== null) {
       // Dying, spectating or boarding a vehicle puts the ghost away.
       if (this.isSpectating || this.player.isDead || this.drivingJeepId) this.cancelBlueprint();
@@ -3988,7 +4029,7 @@ export class Game {
     // Continuous fire for SMG and tools while holding the LEFT mouse button.
     // Rifle fires exactly once per click (no burst). Right-click never fires —
     // it is reserved for building voxels.
-    if (this.isLeftDown && !this.player.isDead) {
+    if (this.isLeftDown && !this.player.isDead && !this.benchMenuOpen) {
       if (this.equipment === 'smg' || this.equipment === 'pickaxe' || this.equipment === 'spade') {
         this.performAction();
       }
@@ -5766,6 +5807,7 @@ export class Game {
         blueprints: [...this.craftedSlots],
         blueprintSlot: this.blueprintSlot,
         blueprintCatalogue: this.blueprintCatalogue,
+        benchMenuOpen: this.benchMenuOpen,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,
         hitMarker: this.hitMarkerTimer > 0,
