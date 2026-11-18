@@ -63,18 +63,30 @@ async function startServer() {
     log.warn('ADMIN_TOKEN not set — admin API open to localhost only. Set ADMIN_TOKEN to allow remote access.');
   }
 
+  // Client identity for per-IP caps and IP bans. X-Forwarded-For is client
+  // controlled, so it is only honoured when the deployment really sits behind a
+  // reverse proxy (TRUST_PROXY=1). Otherwise a caller could rotate fake IPs to
+  // dodge the caps and bans, or forge one to get another player banned.
+  const TRUST_PROXY = process.env.TRUST_PROXY === '1';
+  const clientIpOf = (req: {
+    headers: http.IncomingHttpHeaders;
+    socket: { remoteAddress?: string };
+  }): string => {
+    if (TRUST_PROXY) {
+      const forwarded = req.headers['x-forwarded-for'];
+      if (typeof forwarded === 'string' && forwarded.trim()) {
+        return normalizeIp(forwarded.split(',')[0].trim());
+      }
+    }
+    return normalizeIp(req.socket.remoteAddress);
+  };
+
   const adminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    // The "localhost-only" fallback must be decided from the REAL socket address.
-    // X-Forwarded-For is client-controlled: behind a proxy (Render et al.) any
-    // remote caller could send "X-Forwarded-For: 127.0.0.1" and reach the
-    // kick/ban endpoints while ADMIN_TOKEN is unset. The forwarded value is
-    // still used for logging, and an unresolvable address is never "local".
+    // The "localhost-only" fallback is decided from the REAL socket address, so
+    // a forged X-Forwarded-For can never reach kick/ban while ADMIN_TOKEN is
+    // unset. The forwarded value, when trusted, is only used for logging.
     const socketIp = normalizeIp(req.socket.remoteAddress);
-    const ip = normalizeIp(
-      typeof req.headers['x-forwarded-for'] === 'string'
-        ? String(req.headers['x-forwarded-for']).split(',')[0].trim()
-        : req.socket.remoteAddress,
-    );
+    const ip = clientIpOf(req);
     const isLocal = socketIp === '127.0.0.1' || socketIp === '::1' || socketIp === '::ffff:127.0.0.1';
     const header = req.headers.authorization || '';
     const provided = header.startsWith('Bearer ') ? header.slice(7) : (req.query.token as string) || '';
@@ -175,10 +187,7 @@ async function startServer() {
 
   // SSE Game stream fallback (guarantees connectivity behind HTTP proxies, iframes, and restrictive firewalls)
   app.get('/api/game/events', (req, res) => {
-    const forwarded = req.headers['x-forwarded-for'];
-    const ip = normalizeIp(
-      typeof forwarded === 'string' ? String(forwarded).split(',')[0].trim() : req.socket.remoteAddress,
-    );
+    const ip = clientIpOf(req);
 
     let ipSessions = 0;
     for (const session of sseSessions.values()) if (session.ip === ip) ipSessions++;
@@ -269,19 +278,11 @@ async function startServer() {
   const wsLimiter = new ConnectionLimiter(WS_MAX_CLIENTS, WS_MAX_PER_IP);
   let lastWsRejectLog = 0;
 
-  /** Same proxy-aware parsing as the SSE path, so both caps see one client id. */
-  const requestIp = (request: http.IncomingMessage): string => {
-    const forwarded = request.headers['x-forwarded-for'];
-    return normalizeIp(
-      typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : request.socket.remoteAddress,
-    );
-  };
-
   wss.on('connection', (ws: WebSocket, request: http.IncomingMessage) => {
     const extWs = ws as AliveWebSocket;
     extWs.isAlive = true;
 
-    const clientIp = requestIp(request);
+    const clientIp = clientIpOf(request);
     extWs.clientIp = clientIp;
     wsLimiter.add(clientIp);
     // Per-socket message budget: a flood is dropped here so it never reaches
@@ -357,7 +358,7 @@ async function startServer() {
     }
     // Refuse over-cap sockets before the handshake completes, so a client
     // cannot open thousands of connections just to be closed afterwards.
-    const upgradeIp = requestIp(request);
+    const upgradeIp = clientIpOf(request);
     if (!wsLimiter.canAccept(upgradeIp)) {
       const now = Date.now();
       if (now - lastWsRejectLog > 10000) {

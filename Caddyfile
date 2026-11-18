@@ -1,0 +1,19 @@
+# Voxel FPS — Caddy front door for a VPS (or any Docker host).
+#
+# Caddy gets a free Let's Encrypt certificate for the domain, terminates TLS and
+# proxies both the HTTP game API and the WebSocket upgrade to the Node server on
+# :3000, which can then stay bound to loopback behind it.
+#
+#   1. Point the domain's A record at the server.
+#   2. Run the game with:  docker compose up -d
+#      and export TRUST_PROXY=1 for that container (see docker-compose.yml), so
+#      per-IP socket caps and IP bans read the real client address.
+#   3. Run Caddy with this file:  GAME_DOMAIN=voxel.example.com caddy run
+#      (or install the caddy service and point it at this Caddyfile).
+#
+# Volume is deliberately not gzipped: the SSE fallback (/api/game/events) is a
+# live stream and compression would buffer it.
+
+{$GAME_DOMAIN:localhost} {
+	reverse_proxy 127.0.0.1:3000
+}

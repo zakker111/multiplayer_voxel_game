@@ -6,7 +6,16 @@ services:
     container_name: voxel-fps-game
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Behind a TLS reverse proxy (Caddy/Nginx) set BIND_ADDR=127.0.0.1 so the
+      # raw port is not reachable around the proxy.
+      - "${BIND_ADDR:-0.0.0.0}:3000:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
+      # 1 only when a reverse proxy terminates TLS in front: X-Forwarded-For is
+      # client-controlled otherwise and would let players dodge IP caps/bans.
+      - TRUST_PROXY=${TRUST_PROXY:-0}
+      # Optional: enables kick/ban over HTTP from anywhere. Leave empty and the
+      # admin API stays reachable from the server itself only. Put it in a .env
+      # file next to this file, never in git.
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
