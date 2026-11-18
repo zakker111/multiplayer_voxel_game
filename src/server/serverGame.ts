@@ -915,7 +915,18 @@ export class ServerGame {
   private damageEmplacement(emplacementId: string, damage: number): void {
     const emplacement = this.emplacements.get(emplacementId);
     if (!emplacement || damage <= 0) return;
+    const maxHp = emplacementSpec(emplacement.kind)?.maxHp ?? 0;
     emplacement.hp = Math.max(0, emplacement.hp - damage);
+    // Send a discrete hit event so the client can flash the build and show a
+    // health bar; the full-list broadcast that follows is only for position/
+    // yaw sync and removal, not for damage feedback.
+    this.broadcast({
+      type: 'emplacementDamaged',
+      emplacementId,
+      damage,
+      hp: emplacement.hp,
+      maxHp,
+    });
     if (emplacement.hp > 0) {
       this.broadcastEmplacements();
       return;

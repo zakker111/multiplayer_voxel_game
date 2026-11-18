@@ -387,6 +387,10 @@ export class Game {
   /** Emplacements the server has broadcast, and the meshes drawn for them. */
   private emplacedSnapshots = new Map<string, EmplacementSnapshot>();
   private emplacementMeshes = new Map<string, THREE.Group>();
+  /** World-space health-bar bar+background for each emplacement, hidden when full. */
+  private emplacementHealthBars = new Map<string, { bar: THREE.Mesh; bg: THREE.Mesh; material: THREE.MeshBasicMaterial }>();
+  /** Brief white flash applied to a build right after it takes a hit. */
+  private emplacementFlashes = new Map<string, { until: number; color: THREE.Color }>();
   private mountedEmplacementId: string | null = null;
   private lastEmplacementFire = 0;
   /** Shells in flight, drawn from the same spawn/velocity/gravity the server
@@ -2414,6 +2418,26 @@ export class Game {
     this.networkClient.onMessage('emplacementsUpdated', (msg: any) => {
       if (Array.isArray(msg.emplacements)) this.applyEmplacements(msg.emplacements as EmplacementSnapshot[]);
     });
+    this.networkClient.onMessage('emplacementDamaged', (msg: any) => {
+      const m = msg as { emplacementId?: string; damage?: number; hp?: number; maxHp?: number };
+      const id = typeof m.emplacementId === 'string' ? m.emplacementId : null;
+      const hp = typeof m.hp === 'number' ? m.hp : null;
+      const maxHp = typeof m.maxHp === 'number' ? m.maxHp : null;
+      const damage = typeof m.damage === 'number' ? m.damage : 0;
+      if (!id || maxHp == null) return;
+      const snapshot = this.emplacedSnapshots.get(id);
+      if (snapshot && hp !== null) snapshot.hp = hp;
+      const teamColor = snapshot?.team === 'blue' ? 0x6aa0ff : 0xff7a5c;
+      // Flash the build for a short beat so a far-away shot has visible
+      // feedback even before the health bar reads out.
+      if (damage > 0) {
+        const intensity = Math.min(1, damage / maxHp);
+        this.emplacementFlashes.set(id, {
+          until: performance.now() + 180,
+          color: new THREE.Color(teamColor).lerp(new THREE.Color(0xffffff), intensity),
+        });
+      }
+    });
     this.networkClient.onMessage('emplacementMounted', (msg: any) => {
       this.mountedEmplacementId = typeof msg.emplacementId === 'string' ? msg.emplacementId : null;
       this.cancelBlueprint();
@@ -3013,9 +3037,11 @@ export class Game {
         mesh = this.createGhostMesh(snapshot.kind, material);
         this.scene.add(mesh);
         this.emplacementMeshes.set(snapshot.id, mesh);
+        this.attachHealthBar(snapshot.id, snapshot.team, material);
       }
       mesh.position.set(snapshot.position.x, snapshot.position.y, snapshot.position.z);
       mesh.rotation.y = snapshot.yaw;
+      this.updateHealthBarVisibility(snapshot.id, snapshot.hp, emplacementSpec(snapshot.kind)?.maxHp ?? 0);
     }
 
     for (const [id, mesh] of this.emplacementMeshes) {
@@ -3026,6 +3052,8 @@ export class Game {
         this.weaponContainer.visible = !this.isSpectating;
       }
       this.scene.remove(mesh);
+      this.detachHealthBar(id);
+      this.emplacementFlashes.delete(id);
       mesh.traverse((object) => {
         const part = object as THREE.Mesh;
         part.geometry?.dispose();
@@ -3044,6 +3072,94 @@ export class Game {
     if (now - this.lastEmplacementFire < 100) return;
     this.lastEmplacementFire = now;
     this.networkClient?.send({ type: 'fireEmplacement' });
+  }
+
+  /** A small bar hovering just above the build: full = hidden, empty = fully red. */
+  private attachHealthBar(id: string, team: 'red' | 'blue', _parentMaterial: THREE.Material): void {
+    const color = team === 'blue' ? 0x4a6fa8 : 0xa8544a;
+    const bg = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.4, 0.2),
+      new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.55, depthWrite: false }),
+    );
+    bg.position.set(0, 2.1, 0);
+    bg.rotation.x = -0.35;
+    const barMat = new THREE.MeshBasicMaterial({ color, depthWrite: false });
+    const bar = new THREE.Mesh(new THREE.PlaneGeometry(2.24, 0.13), barMat);
+    bar.position.set(0, 2.1, 0.001);
+    bar.rotation.x = -0.35;
+    // Keep the bar glued to the build: parent it to the emplacement group so it
+    // moves/rotates with the mesh, but keep its scale in local space.
+    const mesh = this.emplacementMeshes.get(id);
+    if (mesh) mesh.add(bg);
+    if (mesh) mesh.add(bar);
+    this.emplacementHealthBars.set(id, { bar, bg, material: barMat });
+  }
+
+  private detachHealthBar(id: string): void {
+    const entry = this.emplacementHealthBars.get(id);
+    if (!entry) return;
+    entry.bar.geometry.dispose();
+    entry.bg.geometry.dispose();
+    entry.material.dispose();
+    entry.bar.removeFromParent();
+    entry.bg.removeFromParent();
+    this.emplacementHealthBars.delete(id);
+  }
+
+  private updateHealthBarVisibility(id: string, hp: number, maxHp: number): void {
+    const entry = this.emplacementHealthBars.get(id);
+    if (!entry) return;
+    const fraction = maxHp > 0 ? Math.max(0, hp / maxHp) : 0;
+    const visible = fraction < 1;
+    entry.bar.visible = visible;
+    entry.bg.visible = visible;
+    if (visible) {
+      entry.bar.scale.x = fraction;
+      entry.bar.position.x = -1.12 * (1 - fraction);
+    }
+  }
+
+  /** Per-frame decay of hit flashes; resets the material tint when done. */
+  private updateEmplacementFlashes(now: number): void {
+    for (const [id, flash] of this.emplacementFlashes) {
+      if (now >= flash.until) {
+        this.emplacementFlashes.delete(id);
+        const mesh = this.emplacementMeshes.get(id);
+        if (!mesh) continue;
+        // Reset each material back to its base team color.
+        const snapshot = this.emplacedSnapshots.get(id);
+        const baseColor = snapshot?.team === 'blue' ? 0x4a6fa8 : 0xa8544a;
+        mesh.traverse((object) => {
+          const part = object as THREE.Mesh;
+          if (!part.isMesh) return;
+          const mats = Array.isArray(part.material) ? part.material : [part.material];
+          for (const m of mats) {
+            if (m instanceof THREE.MeshStandardMaterial) {
+              m.color.setHex(baseColor);
+              m.emissive.setHex(0x000000);
+            }
+          }
+        });
+        continue;
+      }
+      // While flashing: tint each material toward the flash color.
+      const mesh = this.emplacementMeshes.get(id);
+      if (!mesh) continue;
+      const t = 1 - (flash.until - now) / 180;
+      const snapshot = this.emplacedSnapshots.get(id);
+      const baseColor = new THREE.Color(snapshot?.team === 'blue' ? 0x4a6fa8 : 0xa8544a);
+      mesh.traverse((object) => {
+        const part = object as THREE.Mesh;
+        if (!part.isMesh) return;
+        const mats = Array.isArray(part.material) ? part.material : [part.material];
+        for (const m of mats) {
+          if (m instanceof THREE.MeshStandardMaterial) {
+            m.color.copy(baseColor).lerp(flash.color, Math.max(0, 1 - t * 2));
+            m.emissive.copy(flash.color).multiplyScalar(Math.max(0, 0.6 * (1 - t)));
+          }
+        }
+      });
+    }
   }
 
   private tintGhost(valid: boolean): void {
@@ -4697,6 +4813,7 @@ export class Game {
     }
 
     this.emitState();
+    this.updateEmplacementFlashes(performance.now());
     this.renderer.render(this.scene, this.player.camera);
   };
 

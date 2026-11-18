@@ -173,6 +173,7 @@ export type ServerMessage =
   | { type: 'workshopsUpdated'; workshops: Workshops }
   | { type: 'jeepsUpdated'; jeeps: JeepSnapshot[] }
   | { type: 'emplacementsUpdated'; emplacements: EmplacementSnapshot[] }
+  | { type: 'emplacementDamaged'; emplacementId: string; damage: number; hp: number; maxHp: number }
   | { type: 'emplacementPreview'; ok: boolean; reason?: string; position?: Position; yaw?: number }
   | { type: 'emplacementMessage'; message: string }
   | { type: 'emplacementMounted'; emplacementId: string; position: Position; yaw: number }
