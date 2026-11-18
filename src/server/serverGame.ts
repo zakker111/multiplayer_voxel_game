@@ -57,7 +57,7 @@ import {
   isWorkshopProtectedCell,
   Workshops,
   JeepSnapshot,
-  JEEP_ENTER_REACH, WORLD_HALF, vehicleSpec, emplacementSpec,
+  WORLD_HALF, vehicleSpec, emplacementSpec,
   type VehicleSpec, type Footprint, type EmplacementKind, type EmplacementSnapshot,
 } from '../shared/types';
 
@@ -373,7 +373,7 @@ export class ServerGame {
     if (!player || player.isDead || player.isSpectating || player.carryingFlag || this.blueFlagCarrier === playerId || this.redFlagCarrier === playerId || this.driverJeep(playerId) || typeof vehicleId !== 'string') return;
     if (!(player instanceof ServerBot) && !this.joinedPlayers.has(playerId)) return;
     const jeep = this.jeeps.get(vehicleId);
-    if (!jeep || jeep.wreck || jeep.team !== player.team || Math.hypot(player.position.x - jeep.position.x, player.position.y - jeep.position.y, player.position.z - jeep.position.z) > JEEP_ENTER_REACH) return;
+    if (!jeep || jeep.wreck || jeep.team !== player.team || Math.hypot(player.position.x - jeep.position.x, player.position.y - jeep.position.y, player.position.z - jeep.position.z) > vehicleSpec(jeep.kind).enterReach) return;
     if (jeep.driverId && !(player instanceof ServerBot)) {
       const occupant = this.players.get(jeep.driverId);
       const workshop = this.getWorkshops()[player.team].position;
@@ -393,7 +393,9 @@ export class ServerGame {
   private safeJeepExit(jeep: ServerJeep, playerId: string): Position | null {
     const player = this.players.get(playerId);
     if (!player) return null;
-    for (const radius of [3.5, 4.5, 6]) {
+    const spec = vehicleSpec(jeep.kind);
+    // Step out sideways, then further: the first ring clears the body itself.
+    for (const radius of [spec.halfLength + 1.5, spec.halfLength + 2.5, spec.halfLength + 4]) {
       for (let i = 0; i < 8; i++) {
         const angle = jeep.yaw + i * Math.PI / 4;
         const x = jeep.position.x + Math.cos(angle) * radius, z = jeep.position.z + Math.sin(angle) * radius;
@@ -438,14 +440,15 @@ export class ServerGame {
       const driver = jeep.driverId ? this.players.get(jeep.driverId) : undefined;
       if (!driver || driver.isDead || driver.isSpectating) { if (jeep.driverId) this.exitJeep(jeep.driverId, true); continue; }
       if (this.world.serverTime - jeep.lastInput > 0.5) { jeep.throttle = 0; jeep.steering = 0; jeep.brake = true; }
-      const targetSpeed = jeep.brake ? 0 : jeep.throttle * (jeep.throttle < 0 ? 5 : 12);
-      jeep.speed += Math.max(-10 * step, Math.min(10 * step, targetSpeed - jeep.speed));
-      const turn = jeep.steering * Math.min(Math.abs(jeep.speed) / 4, 1) * (jeep.speed < 0 ? -1 : 1) * 1.4 * step;
+      const spec = vehicleSpec(jeep.kind);
+      const targetSpeed = jeep.brake ? 0 : jeep.throttle * (jeep.throttle < 0 ? spec.reverseSpeed : spec.topSpeed);
+      jeep.speed += Math.max(-spec.acceleration * step, Math.min(spec.acceleration * step, targetSpeed - jeep.speed));
+      const turn = jeep.steering * Math.min(Math.abs(jeep.speed) / spec.fullTurnSpeed, 1) * (jeep.speed < 0 ? -1 : 1) * spec.turnRate * step;
       const yaw = jeep.yaw + turn;
       const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
       const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
       const y = this.jeepGround(x, z, jeep.position.y);
-      if (y !== null && this.jeepClear({ x, y, z }, yaw, vehicleSpec(jeep.kind), jeep.id, driver.id)) {
+      if (y !== null && this.jeepClear({ x, y, z }, yaw, spec, jeep.id, driver.id)) {
         jeep.position = { x, y, z }; jeep.yaw = yaw;
       } else jeep.speed = 0;
       driver.position = { ...jeep.position };
@@ -1128,7 +1131,7 @@ export class ServerGame {
         this.finishBotJeepTask(bot, 'unavailable'); return false;
       }
       const distance = Math.hypot(bot.position.x - jeep.position.x, bot.position.y - jeep.position.y, bot.position.z - jeep.position.z);
-      if (distance <= JEEP_ENTER_REACH - 0.25) {
+      if (distance <= vehicleSpec(jeep.kind).enterReach - 0.25) {
         this.enterJeep(bot.id, jeep.id);
         if (jeep.driverId === bot.id) {
           this.botJeepStats.entered++;

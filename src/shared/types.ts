@@ -248,10 +248,25 @@ export interface VehicleSpec extends Footprint {
   teamLimit: number;
   /** How close a player must stand to board. */
   enterReach: number;
+  // Arcade handling. A tank and a jeep differ here far more than in their HP.
+  /** Forward speed cap in metres per second. */
+  topSpeed: number;
+  /** Reverse speed cap (a positive number; applied backwards). */
+  reverseSpeed: number;
+  /** How fast speed may change, m/s². */
+  acceleration: number;
+  /** Steering rate in radians per second at full authority. */
+  turnRate: number;
+  /** Speed at which steering reaches full authority. */
+  fullTurnSpeed: number;
 }
 
 export const VEHICLES: Record<VehicleKind, VehicleSpec> = {
-  jeep: { kind: 'jeep', cost: 40, maxHp: 250, teamLimit: 2, halfWidth: 1.3, halfLength: 2, height: 2, enterReach: 4 },
+  jeep: {
+    kind: 'jeep', cost: 40, maxHp: 250, teamLimit: 2,
+    halfWidth: 1.3, halfLength: 2, height: 2, enterReach: 4,
+    topSpeed: 12, reverseSpeed: 5, acceleration: 10, turnRate: 1.4, fullTurnSpeed: 4,
+  },
 };
 
 export function vehicleSpec(kind: VehicleKind): VehicleSpec {
@@ -308,9 +323,7 @@ export const JEEP_COST = VEHICLES.jeep.cost;
 export const JEEP_TEAM_LIMIT = VEHICLES.jeep.teamLimit;
 export const JEEP_MAX_HP = VEHICLES.jeep.maxHp;
 export const JEEP_ENTER_REACH = VEHICLES.jeep.enterReach;
-export const JEEP_HALF_WIDTH = VEHICLES.jeep.halfWidth;
-export const JEEP_HALF_LENGTH = VEHICLES.jeep.halfLength;
-export const JEEP_HEIGHT = VEHICLES.jeep.height;
+
 
 export function isWorkshopProtectedCell(x: number, z: number): boolean {
   return Object.values(WORKSHOP_CENTERS).some(

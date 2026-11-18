@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
-import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP } from './shared/types';
+import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT } from './shared/types';
 import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX } from 'lucide-react';
 
 /** Round clock as m:ss (rounds are half an hour long, so no hour component). */
@@ -927,7 +927,7 @@ function App() {
                   </div>
                   {gameState.workshopDistance <= WORKSHOP_REACH && (
                     <div className="text-xs text-gray-400 mt-1 border-t border-gray-700 pt-1">
-                      Press G to build a jeep · {JEEP_COST} blocks (max 2 per team)
+                      Press G to build a jeep · {JEEP_COST} blocks (max {JEEP_TEAM_LIMIT} per team)
                     </div>
                   )}
                 </div>

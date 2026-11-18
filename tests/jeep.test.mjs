@@ -5,23 +5,34 @@ const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
 const {
   JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, JEEP_ENTER_REACH,
-  JEEP_HALF_WIDTH, JEEP_HALF_LENGTH, JEEP_HEIGHT,
   VEHICLES, RED_FLAG_POS, VOXEL_BUILT,
 } = require('../dist/tests/sharedTypes.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 const conn = frames => ({ send: data => frames.push(JSON.parse(data)), isOpen: () => true });
 
 test('the VEHICLES table is the single source of the jeep numbers', () => {
+  // Literal values, not aliases: this pins the balance numbers themselves so a
+  // change to any of them has to be deliberate.
   assert.deepEqual(VEHICLES.jeep, {
     kind: 'jeep',
-    cost: JEEP_COST,
-    maxHp: JEEP_MAX_HP,
-    teamLimit: JEEP_TEAM_LIMIT,
-    halfWidth: JEEP_HALF_WIDTH,
-    halfLength: JEEP_HALF_LENGTH,
-    height: JEEP_HEIGHT,
-    enterReach: JEEP_ENTER_REACH,
+    cost: 40,
+    maxHp: 250,
+    teamLimit: 2,
+    halfWidth: 1.3,
+    halfLength: 2,
+    height: 2,
+    enterReach: 4,
+    topSpeed: 12,
+    reverseSpeed: 5,
+    acceleration: 10,
+    turnRate: 1.4,
+    fullTurnSpeed: 4,
   });
+  // The public aliases stay in step with the table.
+  assert.equal(JEEP_COST, VEHICLES.jeep.cost);
+  assert.equal(JEEP_MAX_HP, VEHICLES.jeep.maxHp);
+  assert.equal(JEEP_TEAM_LIMIT, VEHICLES.jeep.teamLimit);
+  assert.equal(JEEP_ENTER_REACH, VEHICLES.jeep.enterReach);
 });
 
 test('jeep construction, authority, terrain, exits, damage and lifecycle', () => {
