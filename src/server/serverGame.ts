@@ -57,8 +57,7 @@ import {
   isWorkshopProtectedCell,
   Workshops,
   JeepSnapshot,
-  JEEP_COST, JEEP_TEAM_LIMIT, JEEP_MAX_HP, JEEP_ENTER_REACH,
-  JEEP_HALF_WIDTH, JEEP_HALF_LENGTH, JEEP_HEIGHT, WORLD_HALF,
+  JEEP_ENTER_REACH, WORLD_HALF, vehicleSpec, type VehicleSpec,
 } from '../shared/types';
 
 export interface GameConnection {
@@ -99,11 +98,12 @@ interface ServerJeep extends JeepSnapshot {
   wreckUntil: number;
 }
 
-/** Separating-axis test for two oriented jeep rectangles on the XZ plane.
- *  Touching edges count as clear, so parked vehicles can be adjacent. */
+/** Separating-axis test for two oriented vehicle rectangles on the XZ plane.
+ *  Touching edges count as clear, so parked vehicles can be adjacent. Each side
+ *  uses its own spec footprint, so vehicles of different sizes can be compared. */
 function jeepRectsOverlap(
-  ax: number, az: number, ayaw: number,
-  bx: number, bz: number, byaw: number,
+  ax: number, az: number, ayaw: number, aSpec: VehicleSpec,
+  bx: number, bz: number, byaw: number, bSpec: VehicleSpec,
 ): boolean {
   const rect = (yaw: number) => ({
     f: { x: -Math.sin(yaw), z: -Math.cos(yaw) },
@@ -113,10 +113,10 @@ function jeepRectsOverlap(
   for (const axis of [a.f, a.s, b.f, b.s]) {
     const pa = ax * axis.x + az * axis.z;
     const pb = bx * axis.x + bz * axis.z;
-    const ha = JEEP_HALF_LENGTH * Math.abs(a.f.x * axis.x + a.f.z * axis.z) +
-      JEEP_HALF_WIDTH * Math.abs(a.s.x * axis.x + a.s.z * axis.z);
-    const hb = JEEP_HALF_LENGTH * Math.abs(b.f.x * axis.x + b.f.z * axis.z) +
-      JEEP_HALF_WIDTH * Math.abs(b.s.x * axis.x + b.s.z * axis.z);
+    const ha = aSpec.halfLength * Math.abs(a.f.x * axis.x + a.f.z * axis.z) +
+      aSpec.halfWidth * Math.abs(a.s.x * axis.x + a.s.z * axis.z);
+    const hb = bSpec.halfLength * Math.abs(b.f.x * axis.x + b.f.z * axis.z) +
+      bSpec.halfWidth * Math.abs(b.s.x * axis.x + b.s.z * axis.z);
     if (Math.abs(pa - pb) >= ha + hb) return false;
   }
   return true;
@@ -178,8 +178,8 @@ export class ServerGame {
   readonly botJeepStats = { built: 0, entered: 0, arrived: 0, damagedExits: 0, recoveries: 0, abandoned: 0, humanYields: 0 };
 
   private jeepSnapshots(): JeepSnapshot[] {
-    return [...this.jeeps.values()].map(({ id, team, position, yaw, speed, hp, driverId, wreck }) =>
-      ({ id, team, position: { ...position }, yaw, speed, hp, driverId, wreck }));
+    return [...this.jeeps.values()].map(({ id, kind, team, position, yaw, speed, hp, driverId, wreck }) =>
+      ({ id, kind, team, position: { ...position }, yaw, speed, hp, driverId, wreck }));
   }
 
   private broadcastJeeps(): void {
@@ -197,21 +197,21 @@ export class ServerGame {
   /** Exact oriented-box footprint: movement collision uses the same 1.3×2m
    *  rectangle bullets already raycast, rather than a circumscribed circle
    *  (radius ≈2.4m) that rejected gaps the jeep physically fits through. */
-  private jeepClear(position: Position, yaw: number, ignoreId?: string, ignorePlayerId?: string): boolean {
+  private jeepClear(position: Position, yaw: number, spec: VehicleSpec, ignoreId?: string, ignorePlayerId?: string): boolean {
     const sin = Math.sin(yaw), cos = Math.cos(yaw);
     // Heading used by the movement equation; side is perpendicular to it.
     const forward = { x: -sin, z: -cos };
     const side = { x: cos, z: -sin };
-    const extentX = JEEP_HALF_LENGTH * Math.abs(forward.x) + JEEP_HALF_WIDTH * Math.abs(side.x);
-    const extentZ = JEEP_HALF_LENGTH * Math.abs(forward.z) + JEEP_HALF_WIDTH * Math.abs(side.z);
+    const extentX = spec.halfLength * Math.abs(forward.x) + spec.halfWidth * Math.abs(side.x);
+    const extentZ = spec.halfLength * Math.abs(forward.z) + spec.halfWidth * Math.abs(side.z);
     if (Math.abs(position.x) + extentX >= WORLD_HALF || Math.abs(position.z) + extentZ >= WORLD_HALF) return false;
     const axes = [forward, side, { x: 1, z: 0 }, { x: 0, z: 1 }];
     // Separating-axis test of the jeep rectangle against each candidate cell
     // (a 1×1 square centred on integer coordinates).
     const cellOverlaps = (x: number, z: number): boolean => axes.every(axis => {
       const jeepAt = position.x * axis.x + position.z * axis.z;
-      const jeepHalf = JEEP_HALF_LENGTH * Math.abs(forward.x * axis.x + forward.z * axis.z) +
-        JEEP_HALF_WIDTH * Math.abs(side.x * axis.x + side.z * axis.z);
+      const jeepHalf = spec.halfLength * Math.abs(forward.x * axis.x + forward.z * axis.z) +
+        spec.halfWidth * Math.abs(side.x * axis.x + side.z * axis.z);
       const cellAt = x * axis.x + z * axis.z;
       const cellHalf = 0.5 * (Math.abs(axis.x) + Math.abs(axis.z));
       return Math.abs(jeepAt - cellAt) <= jeepHalf + cellHalf;
@@ -219,24 +219,25 @@ export class ServerGame {
     for (let x = Math.floor(position.x - extentX - 0.5); x <= Math.ceil(position.x + extentX + 0.5); x++) {
       for (let z = Math.floor(position.z - extentZ - 0.5); z <= Math.ceil(position.z + extentZ + 0.5); z++) {
         if (!cellOverlaps(x, z)) continue;
-        for (let y = Math.floor(position.y + 0.5); y <= Math.ceil(position.y + JEEP_HEIGHT - 0.5); y++) {
+        for (let y = Math.floor(position.y + 0.5); y <= Math.ceil(position.y + spec.height - 0.5); y++) {
           if (this.world.isSolid(x, y, z)) return false;
         }
       }
     }
     for (const other of this.jeeps.values()) {
-      if (other.id === ignoreId || Math.abs(other.position.y - position.y) >= JEEP_HEIGHT) continue;
-      if (jeepRectsOverlap(position.x, position.z, yaw, other.position.x, other.position.z, other.yaw)) return false;
+      const otherSpec = vehicleSpec(other.kind);
+      if (other.id === ignoreId || Math.abs(other.position.y - position.y) >= (spec.height + otherSpec.height) / 2) continue;
+      if (jeepRectsOverlap(position.x, position.z, yaw, spec, other.position.x, other.position.z, other.yaw, otherSpec)) return false;
     }
     for (const p of this.players.values()) {
       if (p.id === ignorePlayerId || p.isDead || p.isSpectating) continue;
-      if (Math.abs(p.position.y - position.y) >= JEEP_HEIGHT) continue;
+      if (Math.abs(p.position.y - position.y) >= spec.height) continue;
       // Infantry capsule (0.5m radius) against the jeep rectangle.
       const dx = p.position.x - position.x, dz = p.position.z - position.z;
       const localForward = dx * forward.x + dz * forward.z;
       const localSide = dx * side.x + dz * side.z;
-      const clampedForward = Math.max(-JEEP_HALF_LENGTH, Math.min(JEEP_HALF_LENGTH, localForward));
-      const clampedSide = Math.max(-JEEP_HALF_WIDTH, Math.min(JEEP_HALF_WIDTH, localSide));
+      const clampedForward = Math.max(-spec.halfLength, Math.min(spec.halfLength, localForward));
+      const clampedSide = Math.max(-spec.halfWidth, Math.min(spec.halfWidth, localSide));
       if (Math.hypot(localForward - clampedForward, localSide - clampedSide) < 0.5) return false;
     }
     return true;
@@ -262,13 +263,14 @@ export class ServerGame {
     if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId) || this.roundPhase !== 'live') return;
     const workshop = this.getWorkshops()[player.team];
     if (Math.hypot(player.position.x - workshop.position.x, player.position.y - workshop.position.y, player.position.z - workshop.position.z) > WORKSHOP_REACH) return;
-    if (this.workshopStock[player.team] < JEEP_COST) return this.jeepMessage(playerId, 'Not enough workshop blocks');
-    if ([...this.jeeps.values()].filter(v => v.team === player.team && !v.wreck).length >= JEEP_TEAM_LIMIT) return this.jeepMessage(playerId, 'Team jeep limit reached');
+    const spec = vehicleSpec('jeep');
+    if (this.workshopStock[player.team] < spec.cost) return this.jeepMessage(playerId, 'Not enough workshop blocks');
+    if ([...this.jeeps.values()].filter(v => v.team === player.team && !v.wreck).length >= spec.teamLimit) return this.jeepMessage(playerId, 'Team jeep limit reached');
     const position = { x: workshop.position.x + 11, y: workshop.position.y, z: workshop.position.z };
     const yaw = player.team === 'blue' ? Math.PI : 0;
-    if (this.jeepGround(position.x, position.z, position.y) === null || !this.jeepClear(position, yaw)) return this.jeepMessage(playerId, 'Garage pad is blocked');
-    const jeep: ServerJeep = { id: `jeep_${++this.jeepSequence}`, team: player.team, position, yaw, speed: 0, hp: JEEP_MAX_HP, driverId: null, wreck: false, throttle: 0, steering: 0, brake: false, lastInput: this.world.serverTime, wreckUntil: 0 };
-    this.workshopStock[player.team] -= JEEP_COST;
+    if (this.jeepGround(position.x, position.z, position.y) === null || !this.jeepClear(position, yaw, spec)) return this.jeepMessage(playerId, 'Garage pad is blocked');
+    const jeep: ServerJeep = { id: `jeep_${++this.jeepSequence}`, kind: spec.kind, team: player.team, position, yaw, speed: 0, hp: spec.maxHp, driverId: null, wreck: false, throttle: 0, steering: 0, brake: false, lastInput: this.world.serverTime, wreckUntil: 0 };
+    this.workshopStock[player.team] -= spec.cost;
     this.jeeps.set(jeep.id, jeep);
     this.broadcastWorkshops();
     this.broadcastJeeps();
@@ -356,7 +358,7 @@ export class ServerGame {
       const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
       const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
       const y = this.jeepGround(x, z, jeep.position.y);
-      if (y !== null && this.jeepClear({ x, y, z }, yaw, jeep.id, driver.id)) {
+      if (y !== null && this.jeepClear({ x, y, z }, yaw, vehicleSpec(jeep.kind), jeep.id, driver.id)) {
         jeep.position = { x, y, z }; jeep.yaw = yaw;
       } else jeep.speed = 0;
       driver.position = { ...jeep.position };
@@ -385,7 +387,8 @@ export class ServerGame {
       const cos = Math.cos(jeep.yaw), sin = Math.sin(jeep.yaw);
       const localX = cos * dx - sin * dz, localZ = sin * dx + cos * dz;
       const localDirX = cos * direction.x - sin * direction.z, localDirZ = sin * direction.x + cos * direction.z;
-      for (const [o, d, low, high] of [[localX, localDirX, -JEEP_HALF_WIDTH, JEEP_HALF_WIDTH], [origin.y, direction.y, jeep.position.y, jeep.position.y + JEEP_HEIGHT], [localZ, localDirZ, -JEEP_HALF_LENGTH, JEEP_HALF_LENGTH]]) {
+      const spec = vehicleSpec(jeep.kind);
+      for (const [o, d, low, high] of [[localX, localDirX, -spec.halfWidth, spec.halfWidth], [origin.y, direction.y, jeep.position.y, jeep.position.y + spec.height], [localZ, localDirZ, -spec.halfLength, spec.halfLength]]) {
         if (Math.abs(d) < 1e-8) { if (o < low || o > high) { far = -1; break; } continue; }
         const a = (low - o) / d, b = (high - o) / d;
         near = Math.max(near, Math.min(a, b)); far = Math.min(far, Math.max(a, b));
@@ -957,9 +960,10 @@ export class ServerGame {
       if ([...this.botJeepTasks.keys()].filter(id => this.players.get(id)?.team === team).length >= BOT_JEEP_MAX_DRIVERS_PER_TEAM) continue;
       const workshop = this.getWorkshops()[team].position;
       if (this.humanNearJeep(team, workshop)) continue;
-      const available = [...this.jeeps.values()].find(j => j.team === team && !j.wreck && j.hp > JEEP_MAX_HP * 0.3 && !j.driverId && this.world.serverTime >= (this.botJeepVehicleCooldown.get(j.id) ?? 0) &&
+      const jeepSpec = vehicleSpec('jeep');
+      const available = [...this.jeeps.values()].find(j => j.team === team && !j.wreck && j.hp > jeepSpec.maxHp * 0.3 && !j.driverId && this.world.serverTime >= (this.botJeepVehicleCooldown.get(j.id) ?? 0) &&
         Math.hypot(j.position.x - workshop.x, j.position.z - workshop.z) <= 35 && !this.humanNearJeep(team, j.position));
-      if (!available && (this.workshopStock[team] < JEEP_COST || [...this.jeeps.values()].some(j => j.team === team && !j.wreck && !j.driverId &&
+      if (!available && (this.workshopStock[team] < jeepSpec.cost || [...this.jeeps.values()].some(j => j.team === team && !j.wreck && !j.driverId &&
         Math.hypot(j.position.x - workshop.x, j.position.z - workshop.z) <= 35))) continue;
       const target = available?.position ?? workshop;
       const candidates = [...this.players.values()].filter((p): p is ServerBot =>
@@ -993,7 +997,7 @@ export class ServerGame {
           const nx = x - Math.sin(yaw) * speed * 0.05;
           const nz = z - Math.cos(yaw) * speed * 0.05;
           const ground = this.jeepGround(nx, nz, y);
-          if (ground === null || !this.jeepClear({ x: nx, y: ground, z: nz }, yaw, jeep.id, jeep.driverId ?? undefined)) { blocked = true; break; }
+          if (ground === null || !this.jeepClear({ x: nx, y: ground, z: nz }, yaw, vehicleSpec(jeep.kind), jeep.id, jeep.driverId ?? undefined)) { blocked = true; break; }
           travelled += Math.hypot(nx - x, nz - z);
           x = nx; y = ground; z = nz;
         }
@@ -1028,7 +1032,7 @@ export class ServerGame {
         this.botJeepStats.built++;
         task.jeepId = jeep.id;
       }
-      if (jeep.wreck || jeep.hp <= JEEP_MAX_HP * 0.3 || jeep.driverId || this.humanNearJeep(bot.team, jeep.position)) {
+      if (jeep.wreck || jeep.hp <= vehicleSpec(jeep.kind).maxHp * 0.3 || jeep.driverId || this.humanNearJeep(bot.team, jeep.position)) {
         this.finishBotJeepTask(bot, 'unavailable'); return false;
       }
       const distance = Math.hypot(bot.position.x - jeep.position.x, bot.position.y - jeep.position.y, bot.position.z - jeep.position.z);
@@ -1048,7 +1052,7 @@ export class ServerGame {
     }
     const enemyFlag = bot.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
     const distance = Math.hypot(jeep.position.x - enemyFlag.x, jeep.position.z - enemyFlag.z);
-    if (distance < 75 || jeep.hp <= JEEP_MAX_HP * 0.3 || this.roundPhase !== 'live') {
+    if (distance < 75 || jeep.hp <= vehicleSpec(jeep.kind).maxHp * 0.3 || this.roundPhase !== 'live') {
       this.finishBotJeepTask(bot, distance < 75 ? 'arrived' : 'damaged'); return this.botJeepTasks.has(bot.id);
     }
     if (nearHuman && Math.hypot(jeep.position.x - workshop.x, jeep.position.z - workshop.z) < BOT_JEEP_HUMAN_PRIORITY_RADIUS && Math.abs(jeep.speed) < 1) {
@@ -1492,9 +1496,11 @@ export class ServerGame {
         if (message.input && typeof message.input === 'object'
           && !player.isDead && !player.isSpectating && !this.driverJeep(playerId)) {
           const pos = message.input.position;
-          if (isVec3(pos) && [...this.jeeps.values()].some(jeep =>
-            Math.abs(pos.y - jeep.position.y) < JEEP_HEIGHT &&
-            Math.hypot(pos.x - jeep.position.x, pos.z - jeep.position.z) < Math.hypot(JEEP_HALF_WIDTH, JEEP_HALF_LENGTH) + 0.45)) {
+          if (isVec3(pos) && [...this.jeeps.values()].some(jeep => {
+            const spec = vehicleSpec(jeep.kind);
+            return Math.abs(pos.y - jeep.position.y) < spec.height &&
+              Math.hypot(pos.x - jeep.position.x, pos.z - jeep.position.z) < Math.hypot(spec.halfWidth, spec.halfLength) + 0.45;
+          })) {
             const { position: _blocked, ...input } = message.input;
             player.applyInput(input);
           } else player.applyInput(message.input);
@@ -1996,8 +2002,11 @@ export class ServerGame {
 
   private canBuildAt(x: number, y: number, z: number): boolean {
     if (!this.world.canBuild(x, y, z)) return false;
-    const radius = Math.hypot(JEEP_HALF_WIDTH, JEEP_HALF_LENGTH);
-    if ([...this.jeeps.values()].some(jeep => Math.abs(y - jeep.position.y) < JEEP_HEIGHT + 0.5 && Math.hypot(x - jeep.position.x, z - jeep.position.z) < radius + 0.71)) return false;
+    if ([...this.jeeps.values()].some(jeep => {
+      const spec = vehicleSpec(jeep.kind);
+      return Math.abs(y - jeep.position.y) < spec.height + 0.5 &&
+        Math.hypot(x - jeep.position.x, z - jeep.position.z) < Math.hypot(spec.halfWidth, spec.halfLength) + 0.71;
+    })) return false;
     
     // Check if block intersects any connected player
     for (const player of this.players.values()) {

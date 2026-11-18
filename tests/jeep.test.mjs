@@ -3,9 +3,26 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
-const { JEEP_COST, JEEP_MAX_HP, RED_FLAG_POS, VOXEL_BUILT } = require('../dist/tests/sharedTypes.cjs');
+const {
+  JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, JEEP_ENTER_REACH,
+  JEEP_HALF_WIDTH, JEEP_HALF_LENGTH, JEEP_HEIGHT,
+  VEHICLES, RED_FLAG_POS, VOXEL_BUILT,
+} = require('../dist/tests/sharedTypes.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 const conn = frames => ({ send: data => frames.push(JSON.parse(data)), isOpen: () => true });
+
+test('the VEHICLES table is the single source of the jeep numbers', () => {
+  assert.deepEqual(VEHICLES.jeep, {
+    kind: 'jeep',
+    cost: JEEP_COST,
+    maxHp: JEEP_MAX_HP,
+    teamLimit: JEEP_TEAM_LIMIT,
+    halfWidth: JEEP_HALF_WIDTH,
+    halfLength: JEEP_HALF_LENGTH,
+    height: JEEP_HEIGHT,
+    enterReach: JEEP_ENTER_REACH,
+  });
+});
 
 test('jeep construction, authority, terrain, exits, damage and lifecycle', () => {
   const game = new ServerGame();
@@ -33,6 +50,7 @@ test('jeep construction, authority, terrain, exits, damage and lifecycle', () =>
   game.handleMessage(id, { type: 'buildJeep' });
   assert.equal(game.workshopStock.blue, stock - JEEP_COST);
   const jeep = [...game.jeeps.values()][0];
+  assert.equal(jeep.kind, 'jeep', 'snapshot names the vehicle kind');
   assert.equal(jeep.hp, JEEP_MAX_HP);
   assert.equal(jeep.driverId, null);
   assert.equal(game.jeeps.size, 1);
@@ -103,9 +121,13 @@ test('jeep construction, authority, terrain, exits, damage and lifecycle', () =>
   const blocker = { ...jeep, id: 'blocker', position: { ...jeep.position, x: jeep.position.x + 4 }, driverId: null };
   game.jeeps.set(blocker.id, blocker);
   // The rectangle is 1.3m half-width, so a 3m lateral gap is genuinely passable.
-  assert.equal(game.jeepClear({ ...jeep.position, x: jeep.position.x + 1 }, jeep.yaw, jeep.id, id), true, 'a passable lateral gap stays clear');
+  assert.equal(game.jeepClear({ ...jeep.position, x: jeep.position.x + 1 }, jeep.yaw, VEHICLES.jeep, jeep.id, id), true, 'a passable lateral gap stays clear');
   blocker.position.x = jeep.position.x + 3;
-  assert.equal(game.jeepClear({ ...jeep.position, x: jeep.position.x + 1 }, jeep.yaw, jeep.id, id), false, 'vehicle collision');
+  assert.equal(game.jeepClear({ ...jeep.position, x: jeep.position.x + 1 }, jeep.yaw, VEHICLES.jeep, jeep.id, id), false, 'vehicle collision');
+  // The same spot with a wider spec is blocked, so the footprint really comes
+  // from the spec rather than a hardcoded jeep size.
+  const wideSpec = { ...VEHICLES.jeep, halfWidth: 8, halfLength: 8 };
+  assert.equal(game.jeepClear({ ...jeep.position, x: jeep.position.x + 1 }, jeep.yaw, wideSpec, jeep.id, id), false, 'collision uses the spec footprint');
   game.jeeps.delete(blocker.id);
   const savedExit = game.safeJeepExit.bind(game);
   game.safeJeepExit = () => null;

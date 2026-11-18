@@ -131,6 +131,8 @@ export type Workshops = Record<'red' | 'blue', WorkshopSnapshot>;
 
 export interface JeepSnapshot {
   id: string;
+  /** Which VEHICLES record drives this vehicle's stats and footprint. */
+  kind: VehicleKind;
   team: 'red' | 'blue';
   position: Position;
   yaw: number;
@@ -221,13 +223,42 @@ export const WORKSHOP_CENTERS = {
 export const WORKSHOP_START_STOCK = 50;
 export const WORKSHOP_CAPACITY = 200;
 export const WORKSHOP_REACH = 8;
-export const JEEP_COST = 40;
-export const JEEP_TEAM_LIMIT = 2;
-export const JEEP_MAX_HP = 250;
-export const JEEP_ENTER_REACH = 4;
-export const JEEP_HALF_WIDTH = 1.3;
-export const JEEP_HALF_LENGTH = 2;
-export const JEEP_HEIGHT = 2;
+/** Vehicles are data, not code: one record per kind carries the workshop cost,
+ *  durability, per-team limit and physical footprint, so the build/enter/drive/
+ *  damage path is shared instead of copied for every new vehicle. */
+export type VehicleKind = 'jeep';
+
+export interface VehicleSpec {
+  kind: VehicleKind;
+  /** Team workshop blocks spent to build one. */
+  cost: number;
+  maxHp: number;
+  /** Live vehicles a team may field at once. */
+  teamLimit: number;
+  /** Oriented box half-extents — the shape collision and bullets both use. */
+  halfWidth: number;
+  halfLength: number;
+  height: number;
+  /** How close a player must stand to board. */
+  enterReach: number;
+}
+
+export const VEHICLES: Record<VehicleKind, VehicleSpec> = {
+  jeep: { kind: 'jeep', cost: 40, maxHp: 250, teamLimit: 2, halfWidth: 1.3, halfLength: 2, height: 2, enterReach: 4 },
+};
+
+export function vehicleSpec(kind: VehicleKind): VehicleSpec {
+  return VEHICLES[kind];
+}
+
+// Named aliases keep existing call sites readable; VEHICLES is the only source.
+export const JEEP_COST = VEHICLES.jeep.cost;
+export const JEEP_TEAM_LIMIT = VEHICLES.jeep.teamLimit;
+export const JEEP_MAX_HP = VEHICLES.jeep.maxHp;
+export const JEEP_ENTER_REACH = VEHICLES.jeep.enterReach;
+export const JEEP_HALF_WIDTH = VEHICLES.jeep.halfWidth;
+export const JEEP_HALF_LENGTH = VEHICLES.jeep.halfLength;
+export const JEEP_HEIGHT = VEHICLES.jeep.height;
 
 export function isWorkshopProtectedCell(x: number, z: number): boolean {
   return Object.values(WORKSHOP_CENTERS).some(
