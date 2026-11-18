@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
-import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT } from './shared/types';
+import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, emplacementSpec, type EmplacementKind } from './shared/types';
 import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX } from 'lucide-react';
+
+/** HUD names for the bench blueprints; the shared table only carries numbers. */
+const EMPLACEMENT_LABELS: Record<EmplacementKind, string> = {
+  mgNest: 'MG nest',
+  cannon: 'Cannon',
+  mortar: 'Mortar',
+  supplyCrate: 'Supply crate',
+  spottingPost: 'Spotting post',
+};
 
 /** Round clock as m:ss (rounds are half an hour long, so no hour component). */
 function formatRoundClock(seconds: number): string {
@@ -17,6 +26,8 @@ function App() {
     hp: 100, maxHp: 100, equipment: 'rifle', inventory: 0,
     depositable: 0, workshopStock: 0, workshopCapacity: 0, workshopDistance: null,
     benchDistance: null, benchOpen: false,
+    blueprints: [null, null, null], blueprintSlot: 0,
+    blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
     jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
@@ -912,6 +923,37 @@ function App() {
                         🔄 Reloading...
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {(gameMode === 'online' || gameMode === 'beta') && (
+                <div className="absolute bottom-44 left-8 z-10 w-64 bg-gray-900/90 backdrop-blur-sm rounded-xl px-4 py-3 border border-sky-500/50 text-sm text-gray-200">
+                  <div className="font-bold text-sky-300">BLUEPRINT BENCH</div>
+                  <div className="mt-1 space-y-0.5">
+                    {gameState.blueprintCatalogue.map((catalogue, index) => {
+                      const crafted = gameState.blueprints[index] ?? null;
+                      const spec = emplacementSpec(crafted ?? catalogue);
+                      const selected = gameState.blueprintSlot === index;
+                      return (
+                        <div
+                          key={index}
+                          className={`flex items-baseline gap-2 ${selected ? 'text-white' : 'text-gray-400'}`}
+                        >
+                          <span className="font-mono w-3">{index + 5}</span>
+                          <span className="truncate">{EMPLACEMENT_LABELS[crafted ?? catalogue]}</span>
+                          <span className="ml-auto text-xs text-amber-300/90">{spec ? `${spec.cost}b` : '—'}</span>
+                          <span className={`text-xs w-11 text-right ${crafted ? 'text-emerald-400' : 'text-gray-500'}`}>
+                            {crafted ? (selected ? '◂ ready' : 'ready') : 'empty'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-1 border-t border-gray-700 pt-1">
+                    {gameState.benchOpen
+                      ? 'Press B to craft the picked slot'
+                      : `Bench ${Math.round(gameState.benchDistance ?? 0)}m away · 5/6/7 pick a slot`}
                   </div>
                 </div>
               )}

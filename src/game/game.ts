@@ -124,6 +124,12 @@ export interface GameState {
   /** The bench panel is open. Opening it frees the cursor, so it is UI state
    *  owned by the game loop rather than by React. */
   benchOpen: boolean;
+  /** Blueprints crafted into the bench slots, in slot order (5/6/7). */
+  blueprints: BlueprintSlots;
+  /** Which slot 5/6/7 picked, i.e. where B will craft next. */
+  blueprintSlot: number;
+  /** What B builds into each slot, so the HUD can price an empty one. */
+  blueprintCatalogue: EmplacementKind[];
   jeepNearby: boolean;
   jeepDriving: boolean;
   jeepHp: number;
@@ -2342,7 +2348,15 @@ export class Game {
     });
     this.networkClient.onMessage('blueprintsUpdated', (msg: any) => {
       if (!Array.isArray(msg.blueprints)) return;
+      const previous = this.craftedSlots;
       this.craftedSlots = msg.blueprints as BlueprintSlots;
+      // Say what the bench just built; the slot update alone is invisible in a
+      // busy HUD. Only a slot that went from empty to filled counts as a craft.
+      const craftedAt = this.craftedSlots.findIndex((kind, i) => kind !== null && previous[i] === null);
+      if (craftedAt >= 0) {
+        const spec = emplacementSpec(this.craftedSlots[craftedAt]!);
+        if (spec) this.showMessage(`🔧 Crafted ${spec.kind} into slot ${craftedAt + 1} · -${spec.cost} blocks`);
+      }
       // Placing a blueprint empties its slot, so the ghost must go away rather
       // than linger as a ghost the server would refuse.
       if (this.blueprintIndex !== null && !this.craftedSlots[this.blueprintIndex]) this.cancelBlueprint();
@@ -5749,6 +5763,9 @@ export class Game {
         )) : null,
         benchDistance,
         benchOpen: this.benchOpen,
+        blueprints: [...this.craftedSlots],
+        blueprintSlot: this.blueprintSlot,
+        blueprintCatalogue: this.blueprintCatalogue,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,
         hitMarker: this.hitMarkerTimer > 0,
