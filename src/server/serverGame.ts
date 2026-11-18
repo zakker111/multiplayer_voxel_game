@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { ServerPlayer } from './serverPlayer';
 import { ServerWorld } from './serverWorld';
-import { ServerBot, BotContext, BotTargetInfo } from './serverBot';
+import { ServerBot, BotContext, BotTargetInfo, BotGunContext, BotGunSeat } from './serverBot';
 import { createLogger } from './logger';
 const log = createLogger('game');
 
@@ -1161,6 +1161,71 @@ export class ServerGame {
     this.broadcast({ type: 'playerLeft', playerId: botId });
   }
 
+  /** Snapshot a gun for the AI: only what aiming and firing need. */
+  private botGunSeat(emplacement: EmplacementSnapshot | undefined): BotGunSeat | null {
+    if (!emplacement) return null;
+    const spec = emplacementSpec(emplacement.kind);
+    if (!spec) return null;
+    return {
+      id: emplacement.id,
+      kind: emplacement.kind,
+      position: { ...emplacement.position },
+      yaw: emplacement.yaw,
+      baseYaw: emplacement.baseYaw,
+      ammo: emplacement.ammo,
+      arc: spec.arc,
+      minRange: spec.minRange,
+      maxRange: spec.maxRange,
+    };
+  }
+
+  /** The gun hooks bots use. Mount, aim and fire all go through the same
+   *  private seat methods humans use, so a bot can never do more than a player.
+   *  Only the hitscan nest is bot-crewed for now: cannon and mortar shells need
+   *  ballistic aiming, which is a separate problem from taking a seat. */
+  private botGunContext(): BotGunContext {
+    const crewable = (emplacement: EmplacementSnapshot) => emplacement.kind === 'mgNest';
+    return {
+      manned: (bot) => this.botGunSeat(this.gunnerEmplacement(bot.id)),
+      freeNear: (bot, radius) => {
+        let best: EmplacementSnapshot | undefined;
+        let bestDistance = radius;
+        for (const emplacement of this.emplacements.values()) {
+          if (emplacement.team !== bot.team || !crewable(emplacement) || emplacement.ammo <= 0) continue;
+          if (emplacement.gunnerId && emplacement.gunnerId !== bot.id) continue;
+          const distance = Math.hypot(
+            emplacement.position.x - bot.position.x,
+            emplacement.position.z - bot.position.z,
+          );
+          if (distance <= bestDistance) { best = emplacement; bestDistance = distance; }
+        }
+        return this.botGunSeat(best);
+      },
+      mount: (bot, emplacementId) => {
+        this.mountEmplacement(bot.id, emplacementId);
+        return this.gunnerEmplacement(bot.id)?.id === emplacementId;
+      },
+      leave: (bot) => {
+        this.dismountEmplacement(bot.id);
+      },
+      aim: (bot, point) => {
+        const gun = this.gunnerEmplacement(bot.id);
+        if (!gun) return;
+        const dx = point.x - gun.position.x;
+        const dz = point.z - gun.position.z;
+        const yaw = Math.atan2(-dx, -dz);
+        const flat = Math.hypot(dx, dz) || 1;
+        const pitch = Math.atan2(point.y - (gun.position.y + 1.15), flat);
+        bot.rotation.yaw = yaw;
+        bot.rotation.pitch = pitch;
+        this.aimEmplacement(bot.id, yaw, pitch);
+      },
+      fire: (bot) => {
+        this.fireEmplacement(bot.id);
+      },
+    };
+  }
+
   private getBotContext(): BotContext {
     const targets: BotTargetInfo[] = [];
     for (const [id, p] of this.players) {
@@ -1196,6 +1261,7 @@ export class ServerGame {
         this.botDig(bot.id, pos);
       },
       placeEmplacement: (bot, kind, position, yaw) => this.botPlaceEmplacement(bot, kind, position, yaw),
+      guns: this.botGunContext(),
       // Bots walk around built structures instead of grinding into them; a
       // manned nest especially must not be steppable, or a bot would stand
       // inside a gun that is shooting at its friends.
@@ -1868,8 +1934,14 @@ export class ServerGame {
     for (const [id, player] of this.players) {
       if (!(player instanceof ServerBot)) continue;
       if (player.isDead) { this.botJeepTasks.delete(id); this.botLogisticsTasks.delete(id); continue; }
-      if (this.updateBotJeepTask(player, ctx)) continue;
-      if (this.updateBotLogisticsTask(player, ctx)) continue;
+      // A bot in a gun is run by the seat, not by the jeep/logistics tasks.
+      if (this.gunnerEmplacement(id)) {
+        this.botJeepTasks.delete(id);
+        this.botLogisticsTasks.delete(id);
+      } else {
+        if (this.updateBotJeepTask(player, ctx)) continue;
+        if (this.updateBotLogisticsTask(player, ctx)) continue;
+      }
       // Per-bot view of dropped flags belonging to its own team
       const own = ctx.friendlyDroppedFlagPos;
       const drop = this.droppedFlags.find((f) => f.team === player.team);

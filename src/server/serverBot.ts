@@ -34,6 +34,7 @@ import {
   WORLD_SIZE,
   CHUNK_SIZE,
   VOXEL_BUILT,
+  EMPLACEMENT_MOUNT_REACH,
 } from '../shared/types';
 
 export type BotState =
@@ -47,6 +48,7 @@ export type BotState =
   | 'DEFEND'
   | 'BUILD'
   | 'TRENCH'
+  | 'MAN_GUN'
   | 'RETREAT';
 
 export interface BotTargetInfo {
@@ -55,6 +57,37 @@ export interface BotTargetInfo {
   team: 'red' | 'blue';
   isDead: boolean;
   carryingFlag: boolean;
+}
+
+/** The part of a placed gun the AI needs to work it. */
+export interface BotGunSeat {
+  id: string;
+  kind: string;
+  position: Position;
+  yaw: number;
+  /** Facing chosen at placement; the gun may swing `arc / 2` either way. */
+  baseYaw: number;
+  ammo: number;
+  arc: number;
+  minRange: number;
+  maxRange: number;
+}
+
+/** Server-owned gun hooks: every mount, aim and shot is re-checked there, so a
+ *  bot can only do what a human gunner could. */
+export interface BotGunContext {
+  /** The gun this bot is seated at, or null. */
+  manned: (bot: ServerBot) => BotGunSeat | null;
+  /** Closest loaded friendly gun with a free seat within `radius`. */
+  freeNear: (bot: ServerBot, radius: number) => BotGunSeat | null;
+  /** Try to climb in; false when the seat was refused. */
+  mount: (bot: ServerBot, emplacementId: string) => boolean;
+  /** Step out; the server finds a safe spot. */
+  leave: (bot: ServerBot) => void;
+  /** Point the gun at a world position (the server clamps it to the arc). */
+  aim: (bot: ServerBot, point: Position) => void;
+  /** Fire one round if the belt has ammo and the reload is done. */
+  fire: (bot: ServerBot) => void;
 }
 
 export interface BotContext {
@@ -72,6 +105,8 @@ export interface BotContext {
   /** Optional: try to emplace a build for this bot. False means refused (cost,
    *  ground, team limit, another body in the way) and nothing was spent. */
   placeEmplacement?: (bot: ServerBot, kind: string, position: Position, yaw: number) => boolean;
+  /** Optional: guns left behind by engineers can be worked by nearby bots. */
+  guns?: BotGunContext;
 }
 
 const EYE_HEIGHT = 1.6;
@@ -86,6 +121,13 @@ const TRENCH_BUILD_INTERVAL = 2;
 // How often an engineer will try to emplace a gun at its firebase. A refusal
 // (no stock, rough ground) is retried on the next window, not every tick.
 const GUN_BUILD_COOLDOWN = 20;
+// Bots work the guns engineers leave behind: a defender walks to a free nest
+// within this radius, then shoots what it sees until the belt runs dry or it
+// has stared at an empty approach for a while.
+const GUN_RECRUIT_RANGE = 16;
+const GUN_IDLE_SECONDS = 12;
+// Leave the seat at this fraction of max HP instead of dying in it.
+const GUN_LEAVE_HP = 0.35;
 // Withdrawal: how long a bot falls back before rejoining the fight, and how
 // long it waits before it is willing to fall back again.
 const RETREAT_MAX_SECONDS = 6;
@@ -173,6 +215,10 @@ export class ServerBot extends ServerPlayer {
   private progressPos: Position = { x: 0, y: 0, z: 0 };
   private stuckStrikes: number = 0;
   private lastRecoveryAt: number = -100;
+  /** When this bot last had a target in its gun (idle gunners eventually leave). */
+  private gunIdleAt: number = 0;
+  /** After leaving a gun, keep the bot from walking straight back into it. */
+  private gunCooldownUntil: number = -100;
 
   /** Diagnostics for headless simulations/tests (not used for gameplay). */
   blocksPlaced: number = 0;
@@ -347,6 +393,37 @@ export class ServerBot extends ServerPlayer {
       ? { x: friendlyCarrier.position.x, y: friendlyCarrier.position.y, z: friendlyCarrier.position.z }
       : null;
 
+    // A seated gunner is run by the emplacement, not by a movement state: the
+    // seat owns the bot's position, so nothing below may walk it away. It
+    // still aims and fires, and leaves on its own when the gun is done.
+    const seat = ctx.guns?.manned(this) ?? null;
+    if (seat) {
+      this.doManGun(seat, nearest, ctx, t);
+      this.isSprinting = false;
+      this.isCrouching = false;
+      this.isGrounded = true;
+      return;
+    }
+
+    // A defender beside a free gun takes it, even with an enemy in sight: the
+    // nest beats its rifle. Knife-range contacts and low HP still come first.
+    if (
+      ctx.guns &&
+      (this.role === 'support' || this.engineer) &&
+      this.hp > this.maxHp * 0.5 &&
+      !this.carryingFlag &&
+      this.botState !== 'MAN_GUN' &&
+      this.botState !== 'RETREAT' &&
+      this.botState !== 'GRABFLAG' &&
+      this.botState !== 'RETURN' &&
+      this.botState !== 'ESCORT' &&
+      t >= this.gunCooldownUntil &&
+      nearestDist > 10
+    ) {
+      const gun = ctx.guns.freeNear(this, GUN_RECRUIT_RANGE);
+      if (gun) this.transition('MAN_GUN', t, 20);
+    }
+
     // --- Reactive overrides (checked every tick) ---
     const distToEnemyFlag = Math.hypot(
       enemyFlag.x - this.position.x,
@@ -426,6 +503,17 @@ export class ServerBot extends ServerPlayer {
       case 'TRENCH':
         this.doTrench(ctx, t);
         break;
+      case 'MAN_GUN': {
+        // Not seated yet: the recruit check above chose the closest free gun,
+        // so keep walking to it; a gun taken by someone else is dropped below.
+        const gun = ctx.guns?.freeNear(this, GUN_RECRUIT_RANGE) ?? null;
+        if (gun) this.doManGun(gun, nearest, ctx, t);
+        else {
+          this.gunCooldownUntil = t + 10;
+          this.transition(this.role === 'support' ? 'DEFEND' : 'ADVANCE', t, 8);
+        }
+        break;
+      }
       case 'RETREAT':
         this.doRetreat(ctx, homeBase, t);
         break;
@@ -483,6 +571,8 @@ export class ServerBot extends ServerPlayer {
   }
 
   private combatReaction(enemy: BotTargetInfo, dist: number, ctx: BotContext, t: number): void {
+    // A gun is a plan: do not detour to a duel on the way to the seat.
+    if (this.botState === 'MAN_GUN') return;
     // Only re-decide occasionally so bots don't flip states every tick
     if (t - this.lastDecisionAt < 0.8) return;
     this.lastDecisionAt = t;
@@ -891,6 +981,86 @@ export class ServerBot extends ServerPlayer {
     if (enemy && dist < 25) this.buildPanicCover(enemy.position, ctx, t);
   }
 
+  /**
+   * Work a friendly gun: walk up to it, then aim and fire through the seat.
+   * The server owns the seat, so its arc, reload, ammo and exit spot are all
+   * re-checked there; the AI only picks which visible enemy to point at.
+   */
+  private doManGun(seat: BotGunSeat, enemy: BotTargetInfo | null, ctx: BotContext, t: number): void {
+    const guns = ctx.guns;
+    if (!guns) return;
+    const seated = guns.manned(this);
+
+    // A flag comes first: the seat would hold a carrier in place.
+    if (this.carryingFlag) {
+      if (seated) guns.leave(this);
+      this.transition('RETURN', t, 60);
+      return;
+    }
+    // A dry belt, a wrecked nest or a losing fight sends the bot back to its
+    // post; the seat stays ready for the next defender.
+    if (seat.ammo <= 0 || this.hp <= GUN_LEAVE_HP * this.maxHp) {
+      if (seated) guns.leave(this);
+      this.gunCooldownUntil = t + 10;
+      this.transition(this.role === 'support' ? 'DEFEND' : 'ADVANCE', t, 8);
+      return;
+    }
+
+    if (!seated) {
+      // Walk to the nest, but give up if it cannot be reached inside one state
+      // window instead of grinding against its sandbags forever.
+      if (t >= this.stateUntil) {
+        this.gunCooldownUntil = t + 15;
+        this.transition(this.role === 'support' ? 'DEFEND' : 'ADVANCE', t, 8);
+        return;
+      }
+      const distance = Math.hypot(seat.position.x - this.position.x, seat.position.z - this.position.z);
+      if (distance > EMPLACEMENT_MOUNT_REACH - 0.25) {
+        this.moveTo(seat.position, dtOf(ctx), ctx, false);
+        return;
+      }
+      if (guns.mount(this, seat.id)) this.gunIdleAt = t;
+      return;
+    }
+
+    if (enemy) this.gunIdleAt = t;
+    if (!enemy) {
+      // Nothing to shoot at for a long stretch: go back to holding the post.
+      if (t - this.gunIdleAt > GUN_IDLE_SECONDS) {
+        guns.leave(this);
+        this.gunCooldownUntil = t + 10;
+        this.transition(this.role === 'support' ? 'DEFEND' : 'ADVANCE', t, 8);
+      }
+      return;
+    }
+
+    // Aim from the nest's own muzzle at the target's torso. The server clamps
+    // the yaw to the gun's arc and reads the pitch when the round leaves.
+    const origin = { x: seated.position.x, y: seated.position.y + 1.15, z: seated.position.z };
+    const aim = { x: enemy.position.x, y: enemy.position.y + 1.0, z: enemy.position.z };
+    const dx = aim.x - origin.x;
+    const dz = aim.z - origin.z;
+    const flat = Math.hypot(dx, dz) || 1;
+    const distance = Math.hypot(dx, aim.y - origin.y, dz);
+    const yaw = Math.atan2(-dx, -dz);
+    guns.aim(this, aim);
+
+    // Fire only at targets the gun actually bears on: a clamped shot would
+    // just chew the belt against its own sandbags.
+    const offset = Math.atan2(Math.sin(yaw - seated.baseYaw), Math.cos(yaw - seated.baseYaw));
+    if (Math.abs(offset) > seated.arc / 2 + 1e-3) return;
+    if (distance < seated.minRange || distance > seated.maxRange) return;
+    if (!ctx.canSee(origin, aim)) return;
+
+    // The same human reaction beat as a rifle shot, for a new target only.
+    if (this.aimTargetId !== enemy.id) {
+      this.aimTargetId = enemy.id;
+      this.aimTargetAt = t + TARGET_ACQUISITION_MIN + Math.random() * TARGET_ACQUISITION_VARIANCE;
+    }
+    if (t < this.aimTargetAt) return;
+    guns.fire(this);
+  }
+
   private doBuild(ctx: BotContext, enemyFlag: { x: number; z: number }, t: number): void {
     // Engineer work: generate one blueprint (bastion + L ramp) on entry, then
     // consume it cell by cell. If a friendly structure already exists in the
@@ -1243,6 +1413,7 @@ export class ServerBot extends ServerPlayer {
       this.botState === 'TRENCH' ||
       this.botState === 'BUILD' ||
       this.botState === 'DEFEND' ||
+      this.botState === 'MAN_GUN' ||
       waitingAtStand;
     if (stationaryByDesign || moved > 0.6) {
       this.stuckStrikes = 0;
@@ -1738,6 +1909,8 @@ export class ServerBot extends ServerPlayer {
     this.stagingSince = null;
     this.trenchCenter = null;
     this.trenchDoneAt = null;
+    this.gunCooldownUntil = -100;
+    this.gunIdleAt = 0;
   }
 }
 
