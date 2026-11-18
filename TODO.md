@@ -10,6 +10,7 @@ Add playful blocky vehicles and team workshops that make the large CTF map more 
 - Tanks with wide blocky tracks and oversized turrets.
 - Mortars that look like simple homemade machines.
 - Simple sounds and easily recognised silhouettes rather than realistic military models.
+- Player-placed hardware should read as improvised: sandbags, welded plate, a crate with team paint.
 
 ## Initial rules and scope
 
@@ -76,51 +77,81 @@ These are starting choices for playtesting, not final balance numbers.
 
 **Done when:** Bot matches show bots building or taking jeeps, reaching useful positions, exiting and returning to normal CTF behaviour without indefinitely circling, blocking the garage or abandoning defence.
 
-## Phase 4 — Team logistics and passengers
+**Foundation (done):** vehicle numbers now live in one `VEHICLES` table per kind (cost, HP, team limit, footprint, height, boarding reach) and the server reads them through `vehicleSpec()`; snapshots carry the vehicle kind. A new vehicle is a table record plus a mesh, not a copy of the jeep path.
+
+## Phase 4 — Blueprints and player-built emplacements
+
+**Goal:** Let players spend team supply on static hardware they place themselves, picked from three hotkey slots, with one shared implementation instead of a copy of the jeep code per build.
+
+**How building works (v1 design — playtest, then tune)**
+
+- **Three blueprint slots per player**, selected with `5`, `6`, `7`. Weapons and tools stay on `1`–`4`, so nothing existing moves. Pressing the active slot again cancels.
+- Selecting a slot enters **placement mode**: a ghost of that structure follows the ground under the crosshair, tinted green where the server would accept it and red where it would not. `Q` rotates in 90° steps, left click places, right click cancels. Firing is suppressed while a ghost is up.
+- **The server is the only judge.** `placeEmplacement { kind, position, yaw }` is validated for flat ground, clearance from players/vehicles/other emplacements, map bounds, and the no-build rings around spawns, flags and enemy workshops. Cost is charged from the team stockpile only on success — a rejected placement costs nothing.
+- The ghost tint is **advisory**: it comes from a server "can I place here?" reply for the current ghost position, so a crafted client cannot build inside a wall.
+- **Blueprints are a team-shared loadout**, not a personal inventory: the workshop HUD lists the three slots with their costs, and a player who has not chosen gets a default trio (MG nest, supply crate, spotting post).
+- Every emplacement is a **server entity** with team ownership, health, a per-team limit and round-reset cleanup, following the same pattern as `ServerJeep`. Nothing is client-authoritative.
+- Indirect-fire and automated emplacements get a **minimum range** and a no-build ring so they cannot be dropped onto their own base or the enemy spawn.
+
+**Emplacements**
+
+- [ ] **MG nest / sentry** — sandbagged heavy MG. 70 blocks, 300 HP, 2 per team, 180° arc, 200 rounds, manned with `F`. Uses the existing hitscan; the server picks targets. AI control only after manned behaviour is proven fun.
+- [ ] **Cannon** — direct-fire anti-vehicle gun. 90 blocks, 350 HP, 1 per team, narrow arc, 10 shells, slow reload, small splash. Needs the projectile work below.
+- [ ] **Mortar** — indirect fire. 80 blocks, 250 HP, 1 per team, 25–120 m range, 6 shells, arcing shell with a visible impact warning and a reload the enemy can hear.
+- [ ] **Supply crate** — 20 blocks, 150 HP, 3 per team, forward stockpile teammates can deposit into and draw from, so a squad does not shuttle to base every trip.
+- [ ] **Spotting post** — 40 blocks, 200 HP, 1 per team, a tower whose radius marks enemies on the owning team's HUD. Counts as a structure, not a seat.
+
+**Shared work**
+
+- [ ] Put every emplacement kind in one data table (cost, HP, team limit, footprint, arc, ammo, range) the way `VEHICLES` now works for vehicles.
+- [ ] Projectiles for cannon and mortar: server-stepped shells with travel time, collision against terrain, players and vehicles, and blast damage reusing `damageVoxel`.
+- [ ] Manning: `F` on an emplacement with the same occupancy and safe-exit rules as a jeep seat.
+- [ ] Bot awareness: emplacements are obstacles for pathing and valid targets for `ENGAGE`; a manned nest must not be walked into.
+- [ ] Blueprint HUD and ghost meshes per kind, with the validity tint driven by the server reply.
+- [ ] Round reset clears emplacements and refunds nothing, matching vehicles.
+- [ ] Automated coverage: placement validation (charged exactly once, rejected placements free), per-team limits, arc/ammo/range, round cleanup, and a `PHASE=emplacements` probe pass over the real protocol.
+
+**Done when:** A player picks one of three blueprint slots, places each emplacement kind with the ghost, is charged exactly once, sees it survive, fire or supply as designed, watches it be destroyed, and finds it gone after a round reset — while a bot match still plays the objective and a nest or crate cannot camp a spawn.
+
+## Phase 5 — Team logistics and passengers
 
 **Goal:** Make the workshop a shared team activity.
 
 - [x] Let engineer or logistics bots gather and deposit resources under the same server rules as humans.
 - [ ] Add a jeep passenger seat for bots and humans.
 - [ ] Make bots collect resources when supplies are low and request a jeep when it helps an attack, without wasting the entire team stockpile.
-- [ ] Show useful feedback such as low supplies, build progress and vehicle availability.
+- [ ] Show useful feedback such as low supplies, build progress and vehicle or emplacement availability.
 - [ ] Decide how teams recover from repeated vehicle losses without forcing repetitive mining.
 
 **Done when:** A mostly bot-filled team can keep the workshop supplied and use vehicles while still playing the objective.
 
-## Phase 5 — Tank and anti-vehicle balance
+## Phase 6 — Tank and anti-vehicle balance
 
 **Goal:** Add a slower, tougher vehicle with clear counters.
 
-- [ ] Build a chunky, slow tank with a rotating block turret.
-- [ ] Add a server-controlled cannon, limited fire rate and visible projectile or shot effect.
+- [ ] Build a chunky, slow tank with a rotating block turret, as a `VEHICLES` record plus its own mesh.
+- [ ] Add a server-controlled cannon, limited fire rate and visible projectile or shot effect, reusing the projectile work from Phase 4.
 - [ ] Make tanks cost more than jeeps and limit their numbers.
 - [ ] Give infantry a practical anti-vehicle counter, such as a workshop-built weapon, before tanks can dominate matches.
 - [ ] Protect spawn areas and garage exits from long-range tank camping.
 
 **Done when:** Tanks support attacks, infantry can counter them, and neither team can lock down the other's spawn.
 
-## Phase 6 — Mortars and other workshop equipment
-
-**Goal:** Add tactical support without overwhelming the map.
-
-- [ ] Add a simple stationary mortar built at the workshop and deployed at a suitable location.
-- [ ] Give it limited range, slow reload, visible warning and capped ammunition.
-- [ ] Let an assigned bot use it against useful targets and stop when the situation changes.
-- [ ] Protect spawn areas from bombardment and control terrain destruction to avoid erasing bases or overwhelming the server.
-- [ ] Consider other workshop items only after the mortar is balanced, such as barricade kits, repair tools or supply carts.
-
-**Done when:** Mortars help break a defensive position without making spawning, defending or approaching the flag unfair.
-
 ## Phase 7 — Balance, polish and release
 
 - [ ] Run real multiplayer browser playtests with humans and bots on both teams.
-- [ ] Measure vehicle builds, deposits, time spent stuck, captures and deaths, not just whether vehicles appear.
-- [ ] Tune costs, health, speeds, supply rates and limits against the existing on-foot game.
+- [ ] Measure vehicle and emplacement builds, deposits, time spent stuck, captures and deaths, not just whether they appear.
+- [ ] Tune costs, health, speeds, supply rates, ammo and limits against the existing on-foot game.
 - [ ] Test network interruptions, late joins, occupancy, griefing, round transitions and server performance with the full bot roster.
-- [ ] Add sounds, workshop guidance and clear HUD prompts.
+- [ ] Add sounds, workshop guidance and clear HUD prompts (including the three blueprint slots).
 - [ ] Decide whether to bring the new systems to offline bot matches and sandbox.
+
+**Parked until the above is balanced:** barricade kits, repair tools, supply carts, per-team workshop upgrades and blueprints unlocked by play. Add them only after nests, cannons and mortars prove fun.
 
 ## First milestone
 
 Complete **Phases 1–3**: two workshops, one blocky jeep and bots that can drive it. Playtest this complete slice before investing in tanks and mortars.
+
+## Next milestone
+
+Complete **Phase 4**: three blueprint slots, five emplacement kinds and the ghost placement flow, with the shared table and projectile work that the tank then reuses. Playtest one emplacement of each kind before Phase 6 begins.
