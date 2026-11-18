@@ -103,7 +103,8 @@ These are starting choices for playtesting, not final balance numbers.
 
 **Shared work**
 
-- [ ] Put every emplacement kind in one data table (cost, HP, team limit, footprint, arc, ammo, range) the way `VEHICLES` now works for vehicles.
+- [x] Put every emplacement kind in one data table (cost, HP, team limit, footprint, arc, ammo, range) the way `VEHICLES` now works for vehicles.
+- [x] Server-side placement: ground/clearance/bounds checks, enemy-base ring, per-team limits and cost charged only on success (`placeEmplacement`), with tests. UI and the validity reply are still to come.
 - [ ] Projectiles for cannon and mortar: server-stepped shells with travel time, collision against terrain, players and vehicles, and blast damage reusing `damageVoxel`.
 - [ ] Manning: `F` on an emplacement with the same occupancy and safe-exit rules as a jeep seat.
 - [ ] Bot awareness: emplacements are obstacles for pathing and valid targets for `ENGAGE`; a manned nest must not be walked into.

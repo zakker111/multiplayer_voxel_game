@@ -57,7 +57,8 @@ import {
   isWorkshopProtectedCell,
   Workshops,
   JeepSnapshot,
-  JEEP_ENTER_REACH, WORLD_HALF, vehicleSpec, type VehicleSpec,
+  JEEP_ENTER_REACH, WORLD_HALF, vehicleSpec, emplacementSpec,
+  type VehicleSpec, type Footprint, type EmplacementKind, type EmplacementSnapshot,
 } from '../shared/types';
 
 export interface GameConnection {
@@ -90,6 +91,13 @@ const BOT_LOGISTICS_CAPACITY = 12;
 const BOT_LOGISTICS_MIN_STOCK = 30;
 const BOT_LOGISTICS_MINE_RADIUS = 8;
 
+// Emplacement placement rules (Phase 4). Your own base may be fortified, but
+// nothing goes near the enemy base, on the flag stand or on the workshop pad.
+const EMPLACEMENT_ENEMY_BASE_RING = 40;
+const EMPLACEMENT_OWN_FLAG_CLEARANCE = 10;
+const EMPLACEMENT_WORKSHOP_CLEARANCE = 8;
+const EMPLACEMENT_SEPARATION = 0.5;
+
 interface ServerJeep extends JeepSnapshot {
   throttle: number;
   steering: number;
@@ -102,8 +110,8 @@ interface ServerJeep extends JeepSnapshot {
  *  Touching edges count as clear, so parked vehicles can be adjacent. Each side
  *  uses its own spec footprint, so vehicles of different sizes can be compared. */
 function jeepRectsOverlap(
-  ax: number, az: number, ayaw: number, aSpec: VehicleSpec,
-  bx: number, bz: number, byaw: number, bSpec: VehicleSpec,
+  ax: number, az: number, ayaw: number, aSpec: Footprint,
+  bx: number, bz: number, byaw: number, bSpec: Footprint,
 ): boolean {
   const rect = (yaw: number) => ({
     f: { x: -Math.sin(yaw), z: -Math.cos(yaw) },
@@ -169,6 +177,8 @@ export class ServerGame {
   private workshopStock = { red: WORKSHOP_START_STOCK, blue: WORKSHOP_START_STOCK };
   private jeeps = new Map<string, ServerJeep>();
   private jeepSequence = 0;
+  private emplacements = new Map<string, EmplacementSnapshot>();
+  private emplacementSequence = 0;
   private jeepSync = 0;
   private botJeepTasks = new Map<string, BotJeepTask>();
   private botJeepCooldown = new Map<string, number>();
@@ -186,6 +196,83 @@ export class ServerGame {
     this.broadcast({ type: 'jeepsUpdated', jeeps: this.jeepSnapshots() });
   }
 
+  private emplacementSnapshots(): EmplacementSnapshot[] {
+    return [...this.emplacements.values()].map(e => ({ ...e, position: { ...e.position } }));
+  }
+
+  private broadcastEmplacements(): void {
+    this.broadcast({ type: 'emplacementsUpdated', emplacements: this.emplacementSnapshots() });
+  }
+
+  private emplacementMessage(playerId: string, message: string): void {
+    this.sendToPlayer(playerId, { type: 'emplacementMessage', message });
+  }
+
+  /**
+   * Place player-built hardware from a blueprint. The server owns every rule:
+   * where it may stand, whether the ground fits, and what it costs. Nothing is
+   * charged unless the build is accepted, so a rejected ghost costs nothing.
+   */
+  private placeEmplacement(playerId: string, kind: unknown, position: unknown, yaw: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
+    if (typeof kind !== 'string' || !isVec3(position)) return;
+    const spec = emplacementSpec(kind);
+    if (!spec) return;
+
+    const extent = Math.hypot(spec.halfWidth, spec.halfLength);
+    if (Math.abs(position.x) > WORLD_HALF - extent - 1 || Math.abs(position.z) > WORLD_HALF - extent - 1) {
+      return this.emplacementMessage(playerId, 'Outside the map');
+    }
+
+    const ownFlag = player.team === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
+    const enemyFlag = player.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    if (Math.hypot(position.x - enemyFlag.x, position.z - enemyFlag.z) < EMPLACEMENT_ENEMY_BASE_RING) {
+      return this.emplacementMessage(playerId, 'Too close to the enemy base');
+    }
+    if (Math.hypot(position.x - ownFlag.x, position.z - ownFlag.z) < EMPLACEMENT_OWN_FLAG_CLEARANCE) {
+      return this.emplacementMessage(playerId, 'Too close to your flag stand');
+    }
+    const workshop = this.getWorkshops()[player.team].position;
+    if (Math.hypot(position.x - workshop.x, position.z - workshop.z) < EMPLACEMENT_WORKSHOP_CLEARANCE) {
+      return this.emplacementMessage(playerId, 'Keep the workshop pad clear');
+    }
+
+    // Snap to the ground the server sees, never to the client's y.
+    const ground = this.jeepGround(position.x, position.z, position.y);
+    if (ground === null) return this.emplacementMessage(playerId, 'Needs flat, solid ground');
+    const spot = { x: position.x, y: ground, z: position.z };
+    const rotation = typeof yaw === 'number' && Number.isFinite(yaw) ? yaw : 0;
+
+    if (!this.jeepClear(spot, rotation, spec)) return this.emplacementMessage(playerId, 'No room there');
+    const padded = { ...spec, halfWidth: spec.halfWidth + EMPLACEMENT_SEPARATION, halfLength: spec.halfLength + EMPLACEMENT_SEPARATION };
+    for (const other of this.emplacements.values()) {
+      const otherSpec = emplacementSpec(other.kind) ?? spec;
+      if (Math.abs(other.position.y - ground) >= (spec.height + otherSpec.height) / 2) continue;
+      if (jeepRectsOverlap(spot.x, spot.z, rotation, padded, other.position.x, other.position.z, other.yaw, otherSpec)) {
+        return this.emplacementMessage(playerId, 'Too close to another emplacement');
+      }
+    }
+
+    const built = [...this.emplacements.values()].filter(e => e.team === player.team && e.kind === spec.kind).length;
+    if (built >= spec.teamLimit) return this.emplacementMessage(playerId, 'Team limit for that build reached');
+    if (this.workshopStock[player.team] < spec.cost) return this.emplacementMessage(playerId, 'Not enough workshop blocks');
+
+    this.workshopStock[player.team] -= spec.cost;
+    const emplacement: EmplacementSnapshot = {
+      id: `emp_${++this.emplacementSequence}`,
+      kind: spec.kind,
+      team: player.team,
+      position: spot,
+      yaw: rotation,
+      hp: spec.maxHp,
+      ammo: spec.ammo,
+    };
+    this.emplacements.set(emplacement.id, emplacement);
+    this.broadcastWorkshops();
+    this.broadcastEmplacements();
+  }
+
   private driverJeep(playerId: string): ServerJeep | undefined {
     return [...this.jeeps.values()].find(jeep => jeep.driverId === playerId && !jeep.wreck);
   }
@@ -197,7 +284,7 @@ export class ServerGame {
   /** Exact oriented-box footprint: movement collision uses the same 1.3×2m
    *  rectangle bullets already raycast, rather than a circumscribed circle
    *  (radius ≈2.4m) that rejected gaps the jeep physically fits through. */
-  private jeepClear(position: Position, yaw: number, spec: VehicleSpec, ignoreId?: string, ignorePlayerId?: string): boolean {
+  private jeepClear(position: Position, yaw: number, spec: Footprint, ignoreId?: string, ignorePlayerId?: string): boolean {
     const sin = Math.sin(yaw), cos = Math.cos(yaw);
     // Heading used by the movement equation; side is perpendicular to it.
     const forward = { x: -sin, z: -cos };
@@ -829,6 +916,11 @@ export class ServerGame {
     this.botJeepCooldown.clear();
     this.botJeepVehicleCooldown.clear();
     for (const jeep of this.jeeps.values()) if (jeep.driverId) this.exitJeep(jeep.driverId, true);
+    // Emplacements are spent supply, like a wrecked vehicle: nothing refunded.
+    if (this.emplacements.size > 0) {
+      this.emplacements.clear();
+      this.broadcastEmplacements();
+    }
     this.jeeps.clear();
     this.broadcastJeeps();
     this.workshopStock = { red: WORKSHOP_START_STOCK, blue: WORKSHOP_START_STOCK };
@@ -1263,6 +1355,7 @@ export class ServerGame {
       depositable: this.depositableBlocks.get(playerId) ?? 0,
       workshops: this.getWorkshops(),
       jeeps: this.jeepSnapshots(),
+      emplacements: this.emplacementSnapshots(),
       voxelChanges: this.world.getModifiedVoxels(),
       // Full authoritative flag snapshot so late joiners see flags that were
       // picked up / dropped / captured BEFORE they connected (events alone
@@ -1509,6 +1602,9 @@ export class ServerGame {
 
       case 'buildJeep':
         this.buildJeep(playerId);
+        break;
+      case 'placeEmplacement':
+        this.placeEmplacement(playerId, message.kind, message.position, message.yaw);
         break;
       case 'enterJeep':
         this.enterJeep(playerId, message.vehicleId);

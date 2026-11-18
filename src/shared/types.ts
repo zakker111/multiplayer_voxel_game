@@ -58,6 +58,7 @@ export interface ChunkData {
 
 // Client -> Server messages
 export type ClientMessage =
+  | { type: 'placeEmplacement'; kind: EmplacementKind; position: Position; yaw: number }
   | { type: 'join'; team: 'red' | 'blue'; position?: Position; name?: string }
   | { type: 'playerInput'; input: PlayerInput }
   | { type: 'shoot'; origin: Position; direction: Position; targetId?: string; isHeadshot?: boolean }
@@ -143,7 +144,7 @@ export interface JeepSnapshot {
 }
 
 export type ServerMessage =
-  | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; depositable?: number; workshops?: Workshops; jeeps?: JeepSnapshot[]; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
+  | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; depositable?: number; workshops?: Workshops;   jeeps?: JeepSnapshot[]; emplacements?: EmplacementSnapshot[]; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot }
   | { type: 'roundUpdate'; round: RoundSnapshot }
   | { type: 'roundEnded'; round: number; winner: RoundWinner; captures: { red: number; blue: number }; wins: { red: number; blue: number } }
   | { type: 'gameState'; state: GameState }
@@ -165,6 +166,8 @@ export type ServerMessage =
   | { type: 'resourcesUpdated'; depositable: number }
   | { type: 'workshopsUpdated'; workshops: Workshops }
   | { type: 'jeepsUpdated'; jeeps: JeepSnapshot[] }
+  | { type: 'emplacementsUpdated'; emplacements: EmplacementSnapshot[] }
+  | { type: 'emplacementMessage'; message: string }
   | { type: 'jeepExited'; position: Position }
   | { type: 'jeepMessage'; message: string }
   | { type: 'flagCaptured'; team: 'red' | 'blue'; flagTeam?: 'red' | 'blue'; playerId: string; captures: { red: number; blue: number } }
@@ -228,17 +231,21 @@ export const WORKSHOP_REACH = 8;
  *  damage path is shared instead of copied for every new vehicle. */
 export type VehicleKind = 'jeep';
 
-export interface VehicleSpec {
+/** Physical shape shared by anything solid the server places in the world:
+ *  oriented box half-extents, the same rectangle collision and bullets use. */
+export interface Footprint {
+  halfWidth: number;
+  halfLength: number;
+  height: number;
+}
+
+export interface VehicleSpec extends Footprint {
   kind: VehicleKind;
   /** Team workshop blocks spent to build one. */
   cost: number;
   maxHp: number;
   /** Live vehicles a team may field at once. */
   teamLimit: number;
-  /** Oriented box half-extents — the shape collision and bullets both use. */
-  halfWidth: number;
-  halfLength: number;
-  height: number;
   /** How close a player must stand to board. */
   enterReach: number;
 }
@@ -249,6 +256,51 @@ export const VEHICLES: Record<VehicleKind, VehicleSpec> = {
 
 export function vehicleSpec(kind: VehicleKind): VehicleSpec {
   return VEHICLES[kind];
+}
+
+export type EmplacementKind = 'mgNest' | 'cannon' | 'mortar' | 'supplyCrate' | 'spottingPost';
+
+/** Static hardware a player places from a blueprint. `arc`, `ammo` and the
+ *  range pair describe the weapon case; support builds leave them at zero. */
+export interface EmplacementSpec extends Footprint {
+  kind: EmplacementKind;
+  /** Team workshop blocks spent to place one. */
+  cost: number;
+  maxHp: number;
+  /** How many of this kind a team may have standing at once. */
+  teamLimit: number;
+  /** Firing arc in radians, centred on the placement yaw. 0 = unarmed. */
+  arc: number;
+  /** Rounds carried when placed. 0 = unarmed. */
+  ammo: number;
+  /** Closest useful target; indirect fire needs this so it cannot hit its base. */
+  minRange: number;
+  maxRange: number;
+}
+
+export const EMPLACEMENTS: Record<EmplacementKind, EmplacementSpec> = {
+  mgNest: { kind: 'mgNest', cost: 70, maxHp: 300, teamLimit: 2, halfWidth: 1.1, halfLength: 1.1, height: 1.6, arc: Math.PI, ammo: 200, minRange: 0, maxRange: 90 },
+  cannon: { kind: 'cannon', cost: 90, maxHp: 350, teamLimit: 1, halfWidth: 1.2, halfLength: 1.6, height: 1.5, arc: Math.PI / 3, ammo: 10, minRange: 8, maxRange: 120 },
+  mortar: { kind: 'mortar', cost: 80, maxHp: 250, teamLimit: 1, halfWidth: 0.9, halfLength: 0.9, height: 1.2, arc: Math.PI, ammo: 6, minRange: 25, maxRange: 120 },
+  supplyCrate: { kind: 'supplyCrate', cost: 20, maxHp: 150, teamLimit: 3, halfWidth: 0.9, halfLength: 0.9, height: 1.1, arc: 0, ammo: 0, minRange: 0, maxRange: 0 },
+  spottingPost: { kind: 'spottingPost', cost: 40, maxHp: 200, teamLimit: 1, halfWidth: 0.9, halfLength: 0.9, height: 4, arc: 0, ammo: 0, minRange: 0, maxRange: 0 },
+};
+
+/** Unknown kinds come straight from the wire, so this is a lookup, not a cast. */
+export function emplacementSpec(kind: string): EmplacementSpec | undefined {
+  return Object.prototype.hasOwnProperty.call(EMPLACEMENTS, kind)
+    ? EMPLACEMENTS[kind as EmplacementKind]
+    : undefined;
+}
+
+export interface EmplacementSnapshot {
+  id: string;
+  kind: EmplacementKind;
+  team: 'red' | 'blue';
+  position: Position;
+  yaw: number;
+  hp: number;
+  ammo: number;
 }
 
 // Named aliases keep existing call sites readable; VEHICLES is the only source.
