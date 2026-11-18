@@ -228,6 +228,14 @@ export const WORKSHOP_CENTERS = {
 export const WORKSHOP_START_STOCK = 50;
 export const WORKSHOP_CAPACITY = 200;
 export const WORKSHOP_REACH = 8;
+/** The blueprint bench sits inside the workshop's protected cells (clear of the
+ *  jeep pad at x+11), so a bench can never be dug out or built over. */
+export const BENCH_OFFSET = { x: -3, z: 5 } as const;
+export const BENCH_REACH = 6;
+
+export function benchPosition(workshop: Position): Position {
+  return { x: workshop.x + BENCH_OFFSET.x, y: workshop.y, z: workshop.z + BENCH_OFFSET.z };
+}
 /** Vehicles are data, not code: one record per kind carries the workshop cost,
  *  durability, per-team limit and physical footprint, so the build/enter/drive/
  *  damage path is shared instead of copied for every new vehicle. */
@@ -276,6 +284,10 @@ export function vehicleSpec(kind: VehicleKind): VehicleSpec {
 }
 
 export type EmplacementKind = 'mgNest' | 'cannon' | 'mortar' | 'supplyCrate' | 'spottingPost';
+
+/** The three blueprint slots a player carries. A crafted slot holds one kind and
+ *  is emptied when that blueprint is placed. */
+export type BlueprintSlots = [EmplacementKind | null, EmplacementKind | null, EmplacementKind | null];
 
 /** Static hardware a player places from a blueprint. `arc`, `ammo` and the
  *  range pair describe the weapon case; support builds leave them at zero. */

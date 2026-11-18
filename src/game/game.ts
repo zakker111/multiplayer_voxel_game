@@ -19,7 +19,7 @@ import {
   DEFAULT_ROUND_MINUTES,
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
-  WORKSHOP_REACH, JEEP_ENTER_REACH,
+  WORKSHOP_REACH, JEEP_ENTER_REACH, benchPosition,
   emplacementSpec, type EmplacementKind,
   isWorkshopProtectedCell,
   type WeaponStats,
@@ -118,6 +118,12 @@ export interface GameState {
   workshopStock: number;
   workshopCapacity: number;
   workshopDistance: number | null;
+  /** Distance to this team's blueprint bench; null before the workshop state
+   *  arrives or outside online play. */
+  benchDistance: number | null;
+  /** The bench panel is open. Opening it frees the cursor, so it is UI state
+   *  owned by the game loop rather than by React. */
+  benchOpen: boolean;
   jeepNearby: boolean;
   jeepDriving: boolean;
   jeepHp: number;
@@ -338,6 +344,7 @@ export class Game {
 
   // ---- Blueprint placement (Phase 4 prototype) ----
   private blueprintSlots: EmplacementKind[] = ['mgNest', 'supplyCrate', 'spottingPost'];
+  private benchOpen = false;
   private blueprintIndex: number | null = null;
   private ghost: THREE.Group | null = null;
   private ghostMaterial: THREE.MeshStandardMaterial | null = null;
@@ -5676,6 +5683,8 @@ export class Game {
         Math.round(relativeBearingDegrees(this.player.position, viewForward, src)),
       );
 
+      const bench = this.workshops ? benchPosition(this.workshops[this.playerTeam].position) : null;
+
       this.onStateChange({
         hp: this.player.hp,
         maxHp: this.player.maxHp,
@@ -5693,6 +5702,8 @@ export class Game {
           this.workshops[this.playerTeam].position.y,
           this.workshops[this.playerTeam].position.z,
         )) : null,
+        benchDistance: bench ? this.player.position.distanceTo(new THREE.Vector3(bench.x, bench.y, bench.z)) : null,
+        benchOpen: this.benchOpen,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,
         hitMarker: this.hitMarkerTimer > 0,

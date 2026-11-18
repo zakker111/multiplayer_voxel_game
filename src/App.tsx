@@ -16,6 +16,7 @@ function App() {
   const [gameState, setGameState] = useState<GameState>({
     hp: 100, maxHp: 100, equipment: 'rifle', inventory: 0,
     depositable: 0, workshopStock: 0, workshopCapacity: 0, workshopDistance: null,
+    benchDistance: null, benchOpen: false,
     jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
