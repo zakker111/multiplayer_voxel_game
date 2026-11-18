@@ -11,6 +11,9 @@
 //              The SSE check reads SSE_MAX_PER_IP from this environment, so pass
 //              it whenever the server overrides it (it must be at least 2: the
 //              probe's own clients share one address).
+// PHASE=structures: craft, place, man and fire a cannon, watch the shell reach
+//              another client, then wreck the gun with rifle fire. Needs a
+//              botless server with MOVE_VALIDATION=off (it teleports).
 // PHASE=all  : also workshop deposit, jeep build/enter/drive/exit and a flag
 //              capture (deterministic when the server runs without bots). It
 //              teleports the probe on purpose, so that server needs
@@ -114,10 +117,11 @@ try {
     typeof A.token === 'string' && typeof A.playerId === 'string');
   const bots = init.players.filter((p) => p.id.startsWith('bot_'));
   // Phase 2 deliberately runs the server botless so jeeps/CTF are deterministic.
-  const expectedBots = PHASE === 'all' ? 0 : 20;
+  const botless = PHASE === 'all' || PHASE === 'structures';
+  const expectedBots = botless ? 0 : 20;
   // Bots refill on a timer, so a server that recently had a human can be one
   // bot short of the target for a few seconds.
-  const botsOk = PHASE === 'all' ? bots.length === 0 : bots.length >= 18 && bots.length <= 20;
+  const botsOk = botless ? bots.length === 0 : bots.length >= 18 && bots.length <= 20;
   check('init roster holds the expected bots', botsOk, `${bots.length} bots`);
   if (expectedBots > 0) {
     check('both teams in the roster', new Set(bots.map((b) => b.state.team)).size === 2);
@@ -338,13 +342,17 @@ try {
   await sleep(120);
   A.messages.length = 0;
   let dug = null;
-  for (const dy of [1, 2, 3, 4]) {
-    const target = { x: Math.floor(pos.x), y: Math.floor(pos.y) - dy, z: Math.floor(pos.z) };
-    A.messages.length = 0;
-    await A.send({ type: 'useTool', tool: 'spade', target });
-    // Attribute the change to our own coordinate: bots dig too and broadcast.
-    dug = await A.waitFor('voxelChanged', 700,
-      (m) => m.change.x === target.x && m.change.y === target.y && m.change.z === target.z);
+  // The spawn can sit on a lip with air beneath it, so sweep a few columns.
+  for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [2, 2], [-2, -2]]) {
+    for (const dy of [1, 2, 3, 4]) {
+      const target = { x: Math.floor(pos.x) + ox, y: Math.floor(pos.y) - dy, z: Math.floor(pos.z) + oz };
+      A.messages.length = 0;
+      await A.send({ type: 'useTool', tool: 'spade', target });
+      // Attribute the change to our own coordinate: bots dig too and broadcast.
+      dug = await A.waitFor('voxelChanged', 700,
+        (m) => m.change.x === target.x && m.change.y === target.y && m.change.z === target.z);
+      if (dug) break;
+    }
     if (dug) break;
   }
   check('digging removes a voxel and broadcasts it', !!dug,
@@ -410,6 +418,129 @@ try {
   B.close();
   const leftSeen = await A.waitFor('playerLeft', 3000, (m) => m.playerId === B.playerId);
   check('disconnect removes the player for others', !!leftSeen);
+
+  // ---------- player-built emplacements: craft, place, man, fire, wreck ----------
+  if (PHASE === 'structures') {
+    const shop = init.workshops.blue.position;
+    // Stock starts at 50 and a cannon costs 90, so dig and deposit first.
+    let stock = init.workshops.blue.stock;
+    // A voxel is worth one block, so mining a cannon's cost takes a few trips.
+    const seams = [];
+    for (const r of [8, 12, 16, 20]) {
+      for (const [ox, oz] of [[0, r], [r, 0], [0, -r], [-r, 0], [r, r], [-r, r], [r, -r], [-r, -r]]) seams.push([ox, oz]);
+    }
+    for (let seam = 0; seam < seams.length && stock < 90; seam++) {
+      const [ox, oz] = seams[seam];
+      await A.place({ x: shop.x + ox + 0.5, y: shop.y, z: shop.z + oz + 0.5 }, 'pickaxe');
+      await sleep(180);
+      for (const dy of [1, 2, 3, 4, 5, 6, 7, 8]) {
+        await A.send({
+          type: 'useTool', tool: 'pickaxe',
+          target: { x: Math.floor(shop.x + ox), y: Math.floor(shop.y) - dy, z: Math.floor(shop.z + oz) },
+        });
+        await sleep(520);
+      }
+      await A.place(shop, 'rifle');
+      await sleep(180);
+      await A.send({ type: 'depositWorkshop', team: 'blue' });
+      const upd = await A.waitFor('workshopsUpdated', 2500, (m) => m.workshops.blue.stock > stock);
+      if (upd) stock = upd.workshops.blue.stock;
+      A.messages.length = 0;
+    }
+    check('the workshop can fund a cannon', stock >= 90, `stock=${stock}`);
+    const bench = { x: shop.x - 3, y: shop.y, z: shop.z + 5 };
+    await A.place(bench);
+    await sleep(150);
+    A.messages.length = 0;
+    await A.send({ type: 'craftBlueprint', kind: 'cannon', slot: 0 });
+    const crafted = await A.waitFor('blueprintsUpdated', 2000, (m) => m.blueprints?.[0] === 'cannon');
+    check('crafting at the bench fills a blueprint slot', !!crafted,
+      crafted ? JSON.stringify(crafted.blueprints) : `saw ${A.types()}`);
+
+    let gun = null;
+    let refusal = '';
+    // Preview is a cheap 90 ms server-side check: scan for a pad the server
+    // accepts, then place there. The map is only flat in bands, so sweep it.
+    let pad = null;
+    let scans = 0;
+    outer:
+    for (let z = -32; z <= 32; z += 4) {
+      for (let x = -64; x <= 64; x += 4) {
+        if (Math.abs(x) < 16 || scans >= 220) continue;
+        scans++;
+        A.messages.length = 0;
+        await A.send({ type: 'previewEmplacement', kind: 'cannon', position: { x, y: shop.y, z }, yaw: 0, slot: 0 });
+        await sleep(105);
+        const good = A.last('emplacementPreview');
+        if (good?.ok && good.position) { pad = good.position; break outer; }
+        if (good && !good.ok) refusal = good.reason ?? refusal;
+      }
+    }
+    if (pad) {
+      A.messages.length = 0;
+      await A.send({ type: 'placeEmplacement', kind: 'cannon', position: pad, yaw: 0, slot: 0 });
+      const upd = await A.waitFor('emplacementsUpdated', 1500,
+        (m) => (m.emplacements ?? []).some((e) => e.kind === 'cannon'));
+      gun = upd?.emplacements?.find((e) => e.kind === 'cannon') ?? null;
+    }
+    check('a crafted cannon can be placed', !!gun,
+      gun ? `at ${gun.position.x},${gun.position.z} hp=${gun.hp}`
+        : `no accepted spot after ${scans} previews (${refusal || 'silent'})`);
+
+    if (gun) {
+      // Climb in from beside the gun; manning needs to be within reach.
+      await A.place({ x: gun.position.x + 1.5, y: gun.position.y, z: gun.position.z }, 'rifle');
+      await sleep(150);
+      await A.send({ type: 'mountEmplacement', emplacementId: gun.id });
+      const mounted = await A.waitFor('emplacementMounted', 2000, (m) => m.emplacementId === gun.id);
+      check('the cannon can be manned with F', !!mounted, mounted ? '' : `saw ${A.types()}`);
+
+      observer.messages.length = 0;
+      await A.send({ type: 'fireEmplacement' });
+      const fired = await observer.waitFor('shellFired', 3000, (m) => m.kind === 'cannon');
+      check('firing the cannon sends a shell to other clients', !!fired,
+        fired ? `v=(${fired.velocity.x.toFixed(1)},${fired.velocity.y.toFixed(1)},${fired.velocity.z.toFixed(1)})`
+          : `observer saw ${observer.types()}`);
+      const impact = fired ? await observer.waitFor('shellImpact', 6000, (m) => m.id === fired.id) : null;
+      check('the shell lands and reports its impact', !!impact,
+        impact ? `radius=${impact.radius}` : 'no shellImpact');
+
+      // An enemy rifleman tears the gun down.
+      const R = new Client('R');
+      await R.connect();
+      const initR = await R.waitFor('init', 6000);
+      R.token = initR?.sessionToken;
+      R.playerId = initR?.playerId;
+      await R.send({ type: 'join', team: 'red', name: 'Probe_R' });
+      await R.waitFor('joined', 4000);
+      const muzzle = { x: gun.position.x, y: gun.position.y, z: gun.position.z + 3 };
+      await R.place(muzzle);
+      await sleep(150);
+      const origin = { x: muzzle.x, y: gun.position.y + 1.6, z: muzzle.z };
+      const dx = gun.position.x - origin.x;
+      const dy = gun.position.y + 0.8 - origin.y;
+      const dz = gun.position.z - origin.z;
+      const len = Math.hypot(dx, dy, dz);
+      const aim = { x: dx / len, y: dy / len, z: dz / len };
+      let damaged = false;
+      let gone = false;
+      const startHp = gun.hp;
+      R.messages.length = 0;
+      for (let shot = 0; shot < 30 && !gone; shot++) {
+        await R.send({ type: 'shoot', origin, direction: aim });
+        await sleep(140);
+        const upd = R.last('emplacementsUpdated');
+        const live = upd?.emplacements?.find((e) => e.id === gun.id);
+        if (upd) {
+          if (!live) gone = true;
+          else if (live.hp < startHp) damaged = true;
+        }
+      }
+      check('rifle fire damages and eventually wrecks an enemy emplacement', damaged || gone,
+        gone ? 'destroyed' : damaged ? 'damaged but standing' : 'no damage seen');
+      check('a wrecked cannon leaves the map', gone, gone ? '' : `hp ${startHp} -> ${R.last('emplacementsUpdated')?.emplacements?.find((e) => e.id === gun.id)?.hp}`);
+    }
+  }
 
   if (PHASE !== 'all') throw { done: true };
 

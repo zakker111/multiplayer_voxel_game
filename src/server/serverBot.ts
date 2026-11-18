@@ -67,6 +67,8 @@ export interface BotContext {
   buildBlock: (bot: ServerBot, pos: Position) => void;
   /** Optional: clear a blocking voxel (used by stuck recovery when available). */
   digBlock?: (bot: ServerBot, pos: Position) => void;
+  /** Optional: is this ground point inside a built structure (nest, crate)? */
+  blockedBy?: (x: number, z: number) => boolean;
 }
 
 const EYE_HEIGHT = 1.6;
@@ -1396,6 +1398,7 @@ export class ServerBot extends ServerPlayer {
       const tx = this.position.x + px * lookAhead;
       const tz = this.position.z + pz * lookAhead;
       const ty = this.groundProbe(ctx, tx, tz);
+      if (ctx.blockedBy?.(tx, tz)) continue; // structures are not steppable
       if (!ctx.world.isSolid(Math.round(tx), Math.round(ty + 0.8), Math.round(tz)) &&
           !ctx.world.isSolid(Math.round(tx), Math.round(ty + 1.6), Math.round(tz))) {
         chosen = [px, pz];

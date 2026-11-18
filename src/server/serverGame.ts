@@ -657,6 +657,12 @@ export class ServerGame {
       if (distance > radius) continue;
       this.damageJeep(jeep, Math.max(1, Math.round(maxDamage * (1 - distance / radius))));
     }
+    for (const emplacement of [...this.emplacements.values()]) {
+      if (emplacement.team === shell.team) continue;
+      const distance = Math.hypot(emplacement.position.x - position.x, emplacement.position.y + 0.6 - position.y, emplacement.position.z - position.z);
+      if (distance > radius) continue;
+      this.damageEmplacement(emplacement.id, Math.max(1, Math.round(maxDamage * (1 - distance / radius))));
+    }
     // Terrain damage is the point of a shell: carve the voxels it lands on.
     const ground = Math.round(position.y);
     for (const [dx, dy, dz] of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 0, 1], [-1, 0, -1], [1, 0, -1], [-1, 0, 1], [0, -1, 0]]) {
@@ -863,6 +869,59 @@ export class ServerGame {
       jeep.wreck = true; jeep.speed = 0; jeep.wreckUntil = this.world.serverTime + 4;
     }
     this.broadcastJeeps();
+  }
+
+  /** Spent rounds hurt structures too; at zero hp the squad loses the build. */
+  private damageEmplacement(emplacementId: string, damage: number): void {
+    const emplacement = this.emplacements.get(emplacementId);
+    if (!emplacement || damage <= 0) return;
+    emplacement.hp = Math.max(0, emplacement.hp - damage);
+    if (emplacement.hp > 0) {
+      this.broadcastEmplacements();
+      return;
+    }
+    // A gunner inside a wrecked nest is put back on the ground, not trapped.
+    if (emplacement.gunnerId) this.dismountEmplacement(emplacement.gunnerId, true);
+    this.emplacements.delete(emplacementId);
+    this.emplacementFireAt.delete(emplacementId);
+    this.broadcastEmplacements();
+  }
+
+  /** Ray versus a placed structure; terrain still occludes hits. */
+  private hitEmplacement(origin: Position, direction: Position, maxDist: number, team: 'red' | 'blue'): { emplacement: EmplacementSnapshot; distance: number } | null {
+    let best: { emplacement: EmplacementSnapshot; distance: number } | null = null;
+    for (const emplacement of this.emplacements.values()) {
+      if (emplacement.team === team) continue;
+      const spec = emplacementSpec(emplacement.kind);
+      if (!spec) continue;
+      let near = 0;
+      let far = maxDist;
+      const cos = Math.cos(emplacement.yaw);
+      const sin = Math.sin(emplacement.yaw);
+      const dx = origin.x - emplacement.position.x;
+      const dz = origin.z - emplacement.position.z;
+      const localX = cos * dx - sin * dz;
+      const localZ = sin * dx + cos * dz;
+      const localDirX = cos * direction.x - sin * direction.z;
+      const localDirZ = sin * direction.x + cos * direction.z;
+      const slabs: Array<[number, number, number, number]> = [
+        [localX, localDirX, -spec.halfWidth, spec.halfWidth],
+        [origin.y, direction.y, emplacement.position.y, emplacement.position.y + spec.height],
+        [localZ, localDirZ, -spec.halfLength, spec.halfLength],
+      ];
+      for (const [o, d, low, high] of slabs) {
+        if (Math.abs(d) < 1e-8) {
+          if (o < low || o > high) { far = -1; break; }
+          continue;
+        }
+        const a = (low - o) / d;
+        const b = (high - o) / d;
+        near = Math.max(near, Math.min(a, b));
+        far = Math.min(far, Math.max(a, b));
+      }
+      if (near <= far && near <= maxDist && (!best || near < best.distance)) best = { emplacement, distance: near };
+    }
+    return best;
   }
 
   /** Ray versus a rotated jeep bounding box; terrain still occludes hits. */
@@ -1108,6 +1167,23 @@ export class ServerGame {
       digBlock: (bot, pos) => {
         this.botDig(bot.id, pos);
       },
+      // Bots walk around built structures instead of grinding into them; a
+      // manned nest especially must not be steppable, or a bot would stand
+      // inside a gun that is shooting at its friends.
+      blockedBy: (x, z) => {
+        for (const emplacement of this.emplacements.values()) {
+          const spec = emplacementSpec(emplacement.kind);
+          if (!spec) continue;
+          const cos = Math.cos(emplacement.yaw);
+          const sin = Math.sin(emplacement.yaw);
+          const dx = x - emplacement.position.x;
+          const dz = z - emplacement.position.z;
+          const localX = cos * dx - sin * dz;
+          const localZ = sin * dx + cos * dz;
+          if (Math.abs(localX) <= spec.halfWidth + 0.5 && Math.abs(localZ) <= spec.halfLength + 0.5) return true;
+        }
+        return false;
+      },
     };
     return ctx;
   }
@@ -1162,6 +1238,13 @@ export class ServerGame {
     // Headshot chance scales with accuracy distance
     const isHeadshot = dist < 25 && Math.random() < 0.18;
     const damage = weaponDamage(weapon, isHeadshot, dist);
+
+    // An enemy structure lined up in front of the target takes the round.
+    const structureHit = this.hitEmplacement(origin, direction, dist, bot.team);
+    if (structureHit) {
+      this.damageEmplacement(structureHit.emplacement.id, weaponDamage(weapon, false, structureHit.distance));
+      return;
+    }
 
     this.clearSpawnProtection(botId);
     const occupiedJeep = this.driverJeep(targetId);
@@ -2301,6 +2384,7 @@ export class ServerGame {
     const hit = this.world.raycast(origin, direction, 350);
     const maxDist = hit ? hit.distance : 350;
     const vehicleHit = this.hitJeep(origin, direction, maxDist, player.team);
+    const structureHit = this.hitEmplacement(origin, direction, maxDist, player.team);
 
     // Suppression awareness: enemies within ~2m of the bullet's path were
     // nearly hit — bot victims react by seeking/digging cover ("pinned down").
@@ -2394,6 +2478,11 @@ export class ServerGame {
 
     if (vehicleHit && (!confirmedTarget || vehicleHit.distance < confirmedTarget.distance)) {
       this.damageJeep(vehicleHit.jeep, weaponDamage(weapon, false, vehicleHit.distance));
+      return;
+    }
+
+    if (structureHit && (!confirmedTarget || structureHit.distance < confirmedTarget.distance)) {
+      this.damageEmplacement(structureHit.emplacement.id, weaponDamage(weapon, false, structureHit.distance));
       return;
     }
 
