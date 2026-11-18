@@ -642,12 +642,7 @@ export class Game {
     this.createFlags();
     this.createCaptureZones();
 
-    if (this.gameMode === 'multiplayer') {
-      console.log('Spawning bots...');
-      this.spawnTeamBots('blue', 6);
-      this.spawnTeamBots('red', 7);
-      console.log('Bots spawned');
-    }
+    if (this.gameMode === 'multiplayer') this.startLocalMatch();
 
     if (this.gameMode === 'online') {
       // Server spawns authoritative AI bots in online mode; spawning client-side
@@ -1945,17 +1940,14 @@ export class Game {
   }
 
   private initializeNetwork(): void {
-    this.networkClient = new NetworkClient(this.serverUrl);
+    // The transport owns the join: it asserts this identity once per session,
+    // from the only place that knows the token a (re)connect just issued. It
+    // never carries the stale menu-time position — the server picks the spawn.
+    this.networkClient = new NetworkClient(this.serverUrl, this.playerTeam, this.playerName);
 
     this.networkClient.onConnect(() => {
       this.showMessage(`Connected to game server as ${this.playerTeam.toUpperCase()}!`);
-      // Do NOT send the stale menu-time local position with join — the server
-      // would honor it and the player could materialize inside enemy lines /
-      // terrain / voids and get eliminated on the first tick. Request a
-      // server-authoritative safe spawn immediately instead, before any
-      // playerInput frame can push the old position back to the server.
       this.onlineJoinConfirmed = false;
-      this.networkClient!.sendJoin(this.playerTeam, undefined, this.playerName);
     });
 
     this.networkClient.onDisconnect(() => {
@@ -2510,10 +2502,39 @@ export class Game {
       }
     });
 
-    this.networkClient.connect().catch((err) => {
-      console.error('Failed to connect to server:', err);
-      this.showMessage('Failed to connect to server');
+    // `connect()` resolves even when no transport ever came up, so verify that a
+    // real server connection exists rather than trusting the promise. The grace
+    // period keeps a merely slow handshake from being mistaken for a dead server.
+    this.networkClient.connect().then(() => {
+      setTimeout(() => {
+        if (this.networkClient && !this.networkClient.isConnected()) this.fallBackToLocalMatch();
+      }, 4000);
     });
+  }
+
+  /**
+   * Online and Beta play are server-authoritative. With no reachable server the
+   * client used to stay in its online mode, receive no state (so the match
+   * looked empty — no bots) and silently drop every build/mine/shoot message,
+   * which reads as "nothing works". Start a local bot match instead so the game
+   * is playable, and say why.
+   */
+  private fallBackToLocalMatch(): void {
+    if (this.gameMode !== 'online') return; // already local — nothing to undo
+    console.warn('No game server reachable — falling back to a local bot match');
+    this.networkClient?.disconnect();
+    this.networkClient = null;
+    this.startLocalMatch();
+    this.showMessage('⚠️ No game server reachable — started a local bot match. Run "npm run dev" for online play.');
+  }
+
+  /** Client-side bots and local voxel edits: a normal bot match, and what an
+   *  online/Beta session falls back to when no server turns up. */
+  private startLocalMatch(): void {
+    this.gameMode = 'multiplayer';
+    this.player.serverAuthoritativeRespawn = false;
+    this.spawnTeamBots('blue', 6);
+    this.spawnTeamBots('red', 7);
   }
 
   private addRemotePlayer(id: string, state: PlayerState): void {

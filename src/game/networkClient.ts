@@ -20,15 +20,18 @@ export class NetworkClient {
   /** Messages sent before `init` (token) arrives, flushed once it does. */
   private queuedMessages: ClientMessage[] = [];
   public transport: 'websocket' | 'sse' | 'broadcast' | 'connecting' = 'connecting';
-  private lastKnownTeam: 'red' | 'blue' = 'blue';
-  private lastKnownName: string = 'Soldier';
+  /** Identity asserted on every session — see adoptSession(). */
+  private team: 'red' | 'blue';
+  private name: string;
   private lastKnownPos: Position = { x: 0, y: 10, z: 0 };
   private connectedPeers: Set<string> = new Set();
   private wsConnected = false;
   private sseConnected = false;
 
-  constructor(serverUrl?: string) {
+  constructor(serverUrl?: string, team: 'red' | 'blue' = 'blue', name = 'Soldier') {
     this.localPeerId = `peer_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    this.team = team;
+    this.name = name;
 
     if (serverUrl && serverUrl.trim()) {
       let url = serverUrl.trim();
@@ -96,8 +99,8 @@ export class NetworkClient {
         this.channel?.postMessage({
           type: 'peer_announce',
           senderId: this.localPeerId,
-          name: this.lastKnownName,
-          team: this.lastKnownTeam,
+          name: this.name,
+          team: this.team,
           position: this.lastKnownPos,
         });
         break;
@@ -257,15 +260,7 @@ export class NetworkClient {
 
         this.ws.onmessage = (event) => {
           try {
-            const message: ServerMessage = JSON.parse(event.data);
-            if (message.type === 'init') {
-              this.assignedPlayerId = (message as any).playerId;
-              this.sessionToken = typeof (message as any).sessionToken === 'string'
-                ? (message as any).sessionToken
-                : null;
-              this.flushQueuedMessages();
-            }
-            this.handleMessage(message);
+            this.handleMessage(JSON.parse(event.data) as ServerMessage);
           } catch (error) {
             console.error('Error parsing WS message:', error);
           }
@@ -321,13 +316,7 @@ export class NetworkClient {
       this.sse.onmessage = (event) => {
         try {
           if (!event.data || event.data.startsWith(':')) return;
-          const message: ServerMessage = JSON.parse(event.data);
-          if (message.type === 'init') {
-            this.assignedPlayerId = message.playerId;
-            this.sessionToken = typeof message.sessionToken === 'string' ? message.sessionToken : null;
-            this.flushQueuedMessages();
-          }
-          this.handleMessage(message);
+          this.handleMessage(JSON.parse(event.data) as ServerMessage);
         } catch (err) {
           console.error('Error parsing SSE event data:', err);
         }
@@ -342,10 +331,22 @@ export class NetworkClient {
   }
 
   private handleMessage(message: ServerMessage): void {
+    // Both transports funnel through here, so a session is adopted — and joined —
+    // in exactly one place, whether it arrived on the socket or a reopened stream.
+    if (message.type === 'init') this.adoptSession(message);
     const handler = this.messageHandlers.get(message.type);
     if (handler) {
       handler(message);
     }
+  }
+
+  /** Take ownership of a freshly opened server session and join it. */
+  private adoptSession(message: ServerMessage): void {
+    const init = message as { playerId?: string; sessionToken?: unknown };
+    if (typeof init.playerId === 'string') this.assignedPlayerId = init.playerId;
+    this.sessionToken = typeof init.sessionToken === 'string' ? init.sessionToken : null;
+    this.flushQueuedMessages();
+    this.send({ type: 'join', team: this.team, name: this.name });
   }
 
   send(message: ClientMessage): void {
@@ -385,9 +386,6 @@ export class NetworkClient {
   private mirrorToLocalPeers(message: ClientMessage): void {
     switch (message.type) {
       case 'join':
-        this.lastKnownTeam = message.team;
-        if (message.name) this.lastKnownName = message.name;
-        if (message.position) this.lastKnownPos = message.position;
         this.channel?.postMessage({
           type: 'peer_join',
           senderId: this.localPeerId,
@@ -402,8 +400,8 @@ export class NetworkClient {
           type: 'peer_input',
           senderId: this.localPeerId,
           input: message.input,
-          team: this.lastKnownTeam,
-          name: this.lastKnownName,
+          team: this.team,
+          name: this.name,
         });
         break;
 
@@ -420,7 +418,7 @@ export class NetworkClient {
         this.channel?.postMessage({
           type: 'peer_flag_picked',
           senderId: this.localPeerId,
-          flagTeam: this.lastKnownTeam === 'blue' ? 'red' : 'blue',
+          flagTeam: this.team === 'blue' ? 'red' : 'blue',
         });
         break;
 
@@ -471,14 +469,14 @@ export class NetworkClient {
   }
 
   isConnected(): boolean {
-    return this.wsConnected || this.sseConnected || (this.channel !== null);
+    // Only a real server connection counts. The BroadcastChannel merely mirrors
+    // messages between this browser's own tabs, so including it made online/Beta
+    // play report "connected" with no server: no state arrived (no bots) and
+    // every action was dropped silently.
+    return this.wsConnected || this.sseConnected;
   }
 
   // Helper methods for common messages
-  sendJoin(team: 'red' | 'blue', position?: Position, name?: string): void {
-    this.send({ type: 'join', team, position, name });
-  }
-
   sendPlayerInput(input: PlayerInput): void {
     this.send({ type: 'playerInput', input });
   }

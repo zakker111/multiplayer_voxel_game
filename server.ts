@@ -148,8 +148,51 @@ async function startServer() {
     res.json({ ok: true, removed });
   });
 
+  // ---------------- SSE fallback sessions ----------------
+  // Every SSE GET registers a server-side player, and EventSource reconnects on
+  // its own — so a client that keeps losing the stream minted a new "unnamed"
+  // ghost player per attempt, each one receiving state and occupying a slot.
+  // Bound the sessions and make teardown run exactly once per session.
+  const SSE_MAX_SESSIONS = Number(process.env.SSE_MAX_SESSIONS) || 24;
+  const SSE_MAX_PER_IP = Number(process.env.SSE_MAX_PER_IP) || 3;
+  const sseSessions = new Map<string, { ip: string; res: express.Response }>();
+  let lastSseRejectLog = 0;
+
+  /** Tear down one fallback session: close its stream and drop its player. */
+  const closeSseSession = (playerId: string, reason: string): void => {
+    const session = sseSessions.get(playerId);
+    if (!session) return; // already torn down (close and error can both fire)
+    sseSessions.delete(playerId);
+    try {
+      if (!session.res.writableEnded) session.res.end();
+    } catch {
+      /* the client is already gone */
+    }
+    game.removePlayer(playerId);
+    log.info(`SSE client closed id=${playerId} (${reason}) sessions=${sseSessions.size}`);
+  };
+
   // SSE Game stream fallback (guarantees connectivity behind HTTP proxies, iframes, and restrictive firewalls)
   app.get('/api/game/events', (req, res) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    const ip = normalizeIp(
+      typeof forwarded === 'string' ? String(forwarded).split(',')[0].trim() : req.socket.remoteAddress,
+    );
+
+    let ipSessions = 0;
+    for (const session of sseSessions.values()) if (session.ip === ip) ipSessions++;
+    if (sseSessions.size >= SSE_MAX_SESSIONS || ipSessions >= SSE_MAX_PER_IP) {
+      // Reject rather than register another player. EventSource retries on its
+      // own, so throttle this line instead of logging one per retry.
+      const now = Date.now();
+      if (now - lastSseRejectLog > 10000) {
+        lastSseRejectLog = now;
+        log.warn(`SSE rejected ip=${ip} (sessions ${sseSessions.size}/${SSE_MAX_SESSIONS}, this ip ${ipSessions}/${SSE_MAX_PER_IP})`);
+      }
+      res.status(503).json({ error: 'Too many fallback streams — connect with the WebSocket server' });
+      return;
+    }
+
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -169,13 +212,15 @@ async function startServer() {
       close: () => { if (!res.writableEnded) res.end(); },
     };
 
-    const playerId = game.addPlayer(sseConn, typeof req.headers['x-forwarded-for'] === 'string' ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : req.socket.remoteAddress);
-    log.info(`SSE client connected id=${playerId} ip=${normalizeIp(typeof req.headers['x-forwarded-for'] === 'string' ? String(req.headers['x-forwarded-for']).split(',')[0] : req.socket.remoteAddress)}`);
+    const playerId = game.addPlayer(sseConn, ip);
+    sseSessions.set(playerId, { ip, res });
+    log.info(`SSE client connected id=${playerId} ip=${ip} sessions=${sseSessions.size}`);
 
-    req.on('close', () => {
-      log.info(`SSE client closed id=${playerId}`);
-      game.removePlayer(playerId);
-    });
+    // Request close, response close and write errors can all fire for one dead
+    // stream; closeSseSession is idempotent so the player is removed once.
+    req.on('close', () => closeSseSession(playerId, 'request closed'));
+    res.on('close', () => closeSseSession(playerId, 'response closed'));
+    res.on('error', () => closeSseSession(playerId, 'response error'));
   });
 
   app.post('/api/game/message', (req, res) => {
