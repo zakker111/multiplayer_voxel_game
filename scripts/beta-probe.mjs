@@ -5,6 +5,12 @@
 //              throttled, ordinary movement accepted (validation ON)
 // PHASE=limits: websocket socket cap + per-socket message flood throttle. Run
 //              that server with WS_MAX_PER_IP=2 WS_MSG_RATE=20 WS_MSG_BURST=30.
+// PHASE=guard : banned IPs are refused before the handshake (403) and the SSE
+//              per-IP cap rejects the extra stream. Needs a server with
+//              TRUST_PROXY=1 ADMIN_TOKEN=<token>, and the same ADMIN_TOKEN here.
+//              The SSE check reads SSE_MAX_PER_IP from this environment, so pass
+//              it whenever the server overrides it (it must be at least 2: the
+//              probe's own clients share one address).
 // PHASE=all  : also workshop deposit, jeep build/enter/drive/exit and a flag
 //              capture (deterministic when the server runs without bots). It
 //              teleports the probe on purpose, so that server needs
@@ -188,6 +194,88 @@ try {
   }
 
   // ---------- movement validation: teleport / speed hack / normal ----------
+  if (PHASE === 'guard') {
+    // Needs a server started with TRUST_PROXY=1 and ADMIN_TOKEN=<token>; the
+    // probe reads the same token from its own environment. Spoofed client
+    // addresses stand in for "some other player".
+    const wsUrl = BASE.replace(/^http/, 'ws');
+    const admin = process.env.ADMIN_TOKEN;
+    const bannedIp = '203.0.113.77';
+    const sseIp = '203.0.113.78';
+    if (!admin) {
+      console.log('[PHASE=guard] needs ADMIN_TOKEN on the server and in this environment — skipped');
+    } else {
+      const adminCall = (path, body) =>
+        fetch(`${BASE}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${admin}` },
+          body: JSON.stringify(body),
+        });
+      const attempt = (ip) => new Promise((resolve) => {
+        const ws = new WebSocket(wsUrl, { headers: { 'x-forwarded-for': ip } });
+        let settled = false;
+        const done = (result) => {
+          if (settled) return;
+          settled = true;
+          try { ws.terminate(); } catch { /* already gone */ }
+          resolve(result);
+        };
+        ws.on('open', () => done({ handshake: true }));
+        ws.on('unexpected-response', (_req, res) => done({ handshake: false, status: res.statusCode }));
+        ws.on('error', (err) => done({ handshake: false, status: `error: ${err.message}` }));
+        setTimeout(() => done({ handshake: false, status: 'timeout' }), 4000);
+      });
+
+      await adminCall('/api/admin/ban', { kind: 'ip', value: bannedIp });
+      const banned = await attempt(bannedIp);
+      check('a banned IP is refused before the handshake', banned.handshake === false && banned.status === 403, String(banned.status));
+
+      const other = await attempt('203.0.113.79');
+      check('unrelated clients still complete the handshake', other.handshake === true, String(other.status ?? 'open'));
+
+      await adminCall('/api/admin/unban', { kind: 'ip', value: bannedIp });
+      const unbanned = await attempt(bannedIp);
+      check('unbanning lets the same address back in', unbanned.handshake === true, String(unbanned.status ?? 'open'));
+
+      // The SSE fallback must not be a way around a ban either.
+      await adminCall('/api/admin/ban', { kind: 'ip', value: bannedIp });
+      const bannedSse = await fetch(`${BASE}/api/game/events`, {
+        headers: { Accept: 'text/event-stream', 'x-forwarded-for': bannedIp },
+      });
+      check('a banned IP is refused by the SSE fallback', bannedSse.status === 403, String(bannedSse.status));
+      await adminCall('/api/admin/unban', { kind: 'ip', value: bannedIp });
+
+      // SSE fallback cap: open exactly SSE_MAX_PER_IP streams from one address,
+      // then expect the next one to be refused. The probe reads the cap from its
+      // own environment (default 16, the server default).
+      const sseCap = Number(process.env.SSE_MAX_PER_IP || 16);
+      const openSse = async (ip) => {
+        const abort = new AbortController();
+        const res = await fetch(`${BASE}/api/game/events`, {
+          headers: { Accept: 'text/event-stream', 'x-forwarded-for': ip },
+          signal: abort.signal,
+        });
+        return { status: res.status, close: () => abort.abort() };
+      };
+      const streams = [];
+      for (let i = 0; i < sseCap; i++) streams.push(await openSse(sseIp));
+      const over = await openSse(sseIp);
+      const opened = streams.filter((s) => s.status === 200).length;
+      check('the SSE per-IP cap refuses the extra stream', opened === sseCap && over.status === 503, `${opened}/${sseCap} open, extra ${over.status}`);
+
+      over.close();
+      streams[0]?.close();
+      let freed = { status: 0 };
+      for (let i = 0; i < 20 && freed.status !== 200; i++) {
+        await sleep(100);
+        freed = await openSse(sseIp);
+      }
+      check('closing an SSE stream frees its slot', freed.status === 200, String(freed.status));
+      freed.close();
+      for (const s of streams.slice(1)) s.close();
+    }
+  }
+
   if (PHASE === 'move') {
     // The server never echoes our own position, so read it from the observer.
     const seenPosition = () => observer.messages

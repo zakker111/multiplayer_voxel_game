@@ -166,8 +166,8 @@ async function startServer() {
   // its own — so a client that keeps losing the stream minted a new "unnamed"
   // ghost player per attempt, each one receiving state and occupying a slot.
   // Bound the sessions and make teardown run exactly once per session.
-  const SSE_MAX_SESSIONS = Number(process.env.SSE_MAX_SESSIONS) || 24;
-  const SSE_MAX_PER_IP = Number(process.env.SSE_MAX_PER_IP) || 3;
+  const SSE_MAX_SESSIONS = Number(process.env.SSE_MAX_SESSIONS) || 32;
+  const SSE_MAX_PER_IP = Number(process.env.SSE_MAX_PER_IP) || 16;
   const sseSessions = new Map<string, { ip: string; res: express.Response }>();
   let lastSseRejectLog = 0;
 
@@ -188,6 +188,13 @@ async function startServer() {
   // SSE Game stream fallback (guarantees connectivity behind HTTP proxies, iframes, and restrictive firewalls)
   app.get('/api/game/events', (req, res) => {
     const ip = clientIpOf(req);
+
+    // Banned clients are refused here too, or the fallback would be a way back in.
+    if (game.isIpBanned(ip)) {
+      log.warn(`SSE rejected ip=${ip} (banned)`);
+      res.status(403).json({ error: 'Banned' });
+      return;
+    }
 
     let ipSessions = 0;
     for (const session of sseSessions.values()) if (session.ip === ip) ipSessions++;
@@ -307,12 +314,6 @@ async function startServer() {
     });
 
     log.info(`ws client connected ip=${clientIp} total=${wsLimiter.total}/${WS_MAX_CLIENTS}`);
-    // Reject banned IPs immediately (the close handler above still frees the slot)
-    if (game.isIpBanned(clientIp)) {
-      log.warn(`rejected banned ip=${clientIp}`);
-      ws.close(4003, 'banned');
-      return;
-    }
     const id = game.addPlayer(ws, clientIp);
     playerId = id;
 
@@ -370,16 +371,27 @@ async function startServer() {
     ) {
       return;
     }
-    // Refuse over-cap sockets before the handshake completes, so a client
-    // cannot open thousands of connections just to be closed afterwards.
+    // Refuse banned clients and over-cap sockets before the handshake completes:
+    // a banned client never gets a socket or a player slot, and a flood cannot
+    // open thousands of connections just to have them closed afterwards.
     const upgradeIp = clientIpOf(request);
-    if (!wsLimiter.canAccept(upgradeIp)) {
-      const now = Date.now();
+    const now = Date.now();
+    const rejectUpgrade = (status: string, detail: string) => {
       if (now - lastWsRejectLog > 10000) {
         lastWsRejectLog = now;
-        log.warn(`ws upgrade rejected ip=${upgradeIp} (sockets ${wsLimiter.total}/${WS_MAX_CLIENTS}, this ip ${wsLimiter.countFor(upgradeIp)}/${WS_MAX_PER_IP})`);
+        log.warn(`ws upgrade rejected ip=${upgradeIp} (${detail})`);
       }
-      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    };
+    if (game.isIpBanned(upgradeIp)) {
+      rejectUpgrade('403 Forbidden', 'banned');
+      return;
+    }
+    if (!wsLimiter.canAccept(upgradeIp)) {
+      rejectUpgrade(
+        '503 Service Unavailable',
+        `sockets ${wsLimiter.total}/${WS_MAX_CLIENTS}, this ip ${wsLimiter.countFor(upgradeIp)}/${WS_MAX_PER_IP}`,
+      );
       return;
     }
     wss.handleUpgrade(request, socket, head, (ws) => {
