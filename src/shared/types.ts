@@ -120,6 +120,10 @@ export interface RoundSnapshot {
   /** Seconds left of the intermission (0 while the round is live). */
   intermission: number;
   captures: { red: number; blue: number };
+  /** Enemy-flag pickups per team this round. Breaks a capture tie. */
+  touches: { red: number; blue: number };
+  /** Own dropped flag returned by a teammate this round. Breaks a touch tie. */
+  returns: { red: number; blue: number };
   /** Rounds won per team this session. */
   wins: { red: number; blue: number };
   /** Configured round length in seconds, so the HUD can draw a clock/bar. */
@@ -152,7 +156,7 @@ export interface JeepSnapshot {
 export type ServerMessage =
   | { type: 'init'; playerId: string; sessionToken?: string; state: PlayerState; players: Array<{ id: string; state: PlayerState }>; scores: { red: number; blue: number }; captures: { red: number; blue: number }; stats?: Record<string, PlayerStats>; inventory?: number; depositable?: number; workshops?: Workshops;   jeeps?: JeepSnapshot[]; emplacements?: EmplacementSnapshot[]; voxelChanges?: VoxelChange[]; flags?: { blue: FlagSnapshot; red: FlagSnapshot }; round?: RoundSnapshot; blueprints?: BlueprintSlots }
   | { type: 'roundUpdate'; round: RoundSnapshot }
-  | { type: 'roundEnded'; round: number; winner: RoundWinner; captures: { red: number; blue: number }; wins: { red: number; blue: number } }
+  | { type: 'roundEnded'; round: number; winner: RoundWinner; captures: { red: number; blue: number }; touches?: { red: number; blue: number }; returns?: { red: number; blue: number }; wins: { red: number; blue: number } }
   | { type: 'gameState'; state: GameState }
   | { type: 'joined'; state: PlayerState }
   | { type: 'playerJoined'; playerId: string; state: PlayerState }

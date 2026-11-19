@@ -159,12 +159,25 @@ export class ServerGame {
   private connections: Map<string, WebSocket | GameConnection> = new Map();
   private scores = { red: 0, blue: 0 };
   private captures = { red: 0, blue: 0 };
+  /** Enemy-flag pickups per team, per round: a steal that never finished. First
+   *  tiebreak step after captures, so a round where one side crossed the map
+   *  and touched the flag is not scored as a 0:0 draw. */
+  private flagTouches = { red: 0, blue: 0 };
+  /** Own dropped flag walked back home by a teammate, per round. Second
+   *  tiebreak step: defence that actually recovered the flag counts. Automatic
+   *  returns (the drop timer) are not a team action and are not counted. */
+  private flagReturns = { red: 0, blue: 0 };
+  /** Kills this round. `scores` is the running match total, so it cannot be the
+   *  last tiebreak step: using it would let an earlier round decide this one. */
+  private roundKills = { red: 0, blue: 0 };
 
   // ---------------- Rounds ----------------
-  // A round is a fixed-length window of CTF. When the clock runs out the team
-  // with more captures takes it, everything resets during a short intermission
-  // and the next round starts. Rounds are long on purpose: the arena is 448m
-  // wide and a flag run crosses ~320m, so shorter rounds would mostly be travel.
+  // A round is a fixed-length window of CTF. When the clock runs out the round
+  // is decided by captures, then by flag touches, then by flag returns, then by
+  // kills; only a round level on all four is a draw. Everything resets during a
+  // short intermission and the next round starts. Rounds are long on purpose:
+  // the arena is 448m wide and a flag run crosses ~320m, so shorter rounds
+  // would mostly be travel.
   private roundSeconds: number = Math.max(
     60,
     (Number(process.env.ROUND_MINUTES) || DEFAULT_ROUND_MINUTES) * 60,
@@ -1570,6 +1583,8 @@ export class ServerGame {
       timeLeft: this.roundTimeLeft,
       intermission: this.intermissionTimeLeft,
       captures: { ...this.captures },
+      touches: { ...this.flagTouches },
+      returns: { ...this.flagReturns },
       wins: { ...this.roundWins },
       duration: this.roundSeconds,
     };
@@ -1602,10 +1617,28 @@ export class ServerGame {
     }
   }
 
-  /** Time is up: more captures takes the round, equal captures is a draw. */
+  /** Who takes the round when the whistle blows.
+   *
+   *  Captures decide it first, as they always have. A 0:0 round is no longer an
+   *  automatic draw: the tiebreak chain is captures, then enemy-flag touches
+   *  (steals that did not finish), then returns of your own dropped flag, then
+   *  kills. Only a round level on all four ends as a draw. */
+  private roundWinner(): RoundWinner {
+    const leader = (tally: { red: number; blue: number }): RoundWinner | null => {
+      if (tally.red === tally.blue) return null;
+      return tally.red > tally.blue ? 'red' : 'blue';
+    };
+    for (const tally of [this.captures, this.flagTouches, this.flagReturns, this.roundKills]) {
+      const winner = leader(tally);
+      if (winner) return winner;
+    }
+    return 'draw';
+  }
+
+  /** Time is up: decide with the tiebreak chain and start the intermission. */
   private endRound(): void {
     const { red, blue } = this.captures;
-    const winner: RoundWinner = red === blue ? 'draw' : red > blue ? 'red' : 'blue';
+    const winner = this.roundWinner();
     if (winner !== 'draw') this.roundWins[winner]++;
 
     this.roundPhase = 'intermission';
@@ -1619,11 +1652,15 @@ export class ServerGame {
       round: this.roundNumber,
       winner,
       captures: { ...this.captures },
+      touches: { ...this.flagTouches },
+      returns: { ...this.flagReturns },
       wins: { ...this.roundWins },
     });
     this.broadcastRound();
     log.info(
-      `ROUND ${this.roundNumber} ENDED — winner=${winner} (blue:${blue} red:${red}) ` +
+      `ROUND ${this.roundNumber} ENDED — winner=${winner} ` +
+      `(caps blue:${blue} red:${red}, touches blue:${this.flagTouches.blue} red:${this.flagTouches.red}, ` +
+      `returns blue:${this.flagReturns.blue} red:${this.flagReturns.red}) ` +
       `rounds blue:${this.roundWins.blue} red:${this.roundWins.red}`,
     );
   }
@@ -1631,6 +1668,9 @@ export class ServerGame {
   private startNextRound(): void {
     this.roundNumber++;
     this.captures = { red: 0, blue: 0 };
+    this.flagTouches = { red: 0, blue: 0 };
+    this.flagReturns = { red: 0, blue: 0 };
+    this.roundKills = { red: 0, blue: 0 };
     this.roundPhase = 'live';
     this.roundTimeLeft = this.roundSeconds;
     this.intermissionTimeLeft = 0;
@@ -1705,6 +1745,7 @@ export class ServerGame {
    */
   private addTeamScore(team: 'red' | 'blue'): void {
     this.scores[team]++;
+    this.roundKills[team]++;
     this.broadcast({ type: 'scoreUpdate', scores: { ...this.scores } });
   }
 
@@ -2966,6 +3007,7 @@ export class ServerGame {
         this.redFlagAtBase = false;
         this.redFlagCarrier = playerId;
         player.carryingFlag = true;
+        this.flagTouches.blue++;
         log.info(`RED flag picked up by ${playerId}`);
         
         this.broadcast({
@@ -2977,6 +3019,7 @@ export class ServerGame {
         this.blueFlagAtBase = false;
         this.blueFlagCarrier = playerId;
         player.carryingFlag = true;
+        this.flagTouches.red++;
         log.info(`BLUE flag picked up by ${playerId}`);
         
         this.broadcast({
@@ -3002,8 +3045,10 @@ export class ServerGame {
 
       if (distance < this.CAPTURE_DISTANCE) {
         if (droppedFlag.team === enemyFlagTeam) {
-          // Pick up dropped enemy flag
+          // Pick up dropped enemy flag. A recovered enemy flag is still a steal:
+          // it counts toward the touch tiebreak even though it was not at base.
           this.droppedFlags.splice(i, 1);
+          this.flagTouches[player.team]++;
           
           if (enemyFlagTeam === 'red') {
             this.redFlagCarrier = playerId;
@@ -3018,8 +3063,10 @@ export class ServerGame {
             flagTeam: enemyFlagTeam,
           });
         } else if (droppedFlag.team === player.team) {
-          // Return friendly dropped flag to base
+          // Return friendly dropped flag to base: a defensive recovery that
+          // breaks a touch tie when neither side converted a steal.
           this.droppedFlags.splice(i, 1);
+          this.flagReturns[player.team]++;
           if (player.team === 'blue') {
             this.blueFlagAtBase = true;
           } else {

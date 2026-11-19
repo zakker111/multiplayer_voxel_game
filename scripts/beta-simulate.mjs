@@ -75,8 +75,17 @@ for (let tick = 0; tick < TOTAL_TICKS; tick++) {
     const roundNum = game['roundNumber'] - 1;
     const capsBlue = game['captures'].blue - roundStartCaptures.blue;
     const capsRed = game['captures'].red - roundStartCaptures.red;
-    const winner = capsBlue > capsRed ? 'blue' : capsRed > capsBlue ? 'red' : 'draw';
-    stats.rounds.push({ round: roundNum, winner, captures: { blue: capsBlue, red: capsRed } });
+    // Ask the engine who won: the round is decided by the server's tiebreak
+    // chain (captures -> touches -> returns -> kills), and the report must not
+    // keep its own copy of that rule.
+    const winner = game['roundWinner']();
+    stats.rounds.push({
+      round: roundNum,
+      winner,
+      captures: { blue: capsBlue, red: capsRed },
+      touches: { blue: game['flagTouches'].blue, red: game['flagTouches'].red },
+      returns: { blue: game['flagReturns'].blue, red: game['flagReturns'].red },
+    });
     stats.totalWins[winner]++;
     stats.totalCaptures.blue += capsBlue;
     stats.totalCaptures.red += capsRed;
@@ -118,7 +127,10 @@ console.log('');
 console.log('─── ROUND-BY-ROUND ───');
 for (const r of stats.rounds) {
   const w = r.winner.toUpperCase() + (r.winner === 'draw' ? '' : ' WINS');
-  console.log(`  Round ${r.round}: ${w.padEnd(12)} | Blue ${r.captures.blue} - Red ${r.captures.red}`);
+  console.log(
+    `  Round ${r.round}: ${w.padEnd(12)} | Caps ${r.captures.blue}-${r.captures.red} ` +
+    `Touches ${r.touches.blue}-${r.touches.red} Returns ${r.returns.blue}-${r.returns.red}`,
+  );
 }
 console.log('');
 
@@ -128,8 +140,12 @@ console.log(`  Red round wins:   ${stats.totalWins.red}`);
 console.log(`  Draws:           ${stats.totalWins.draw}`);
 console.log(`  Total captures:  Blue ${stats.totalCaptures.blue} - Red ${stats.totalCaptures.red}`);
 console.log('');
-const mw = stats.totalCaptures.blue > stats.totalCaptures.red ? 'BLUE' : stats.totalCaptures.red > stats.totalCaptures.blue ? 'RED' : 'DRAW';
-console.log(`  MATCH WINNER: ${mw} (${stats.totalCaptures.blue}:${stats.totalCaptures.red} captures)`);
+// Rounds are the match currency: a tiebreak round is still a real round win.
+const mw = stats.totalWins.blue > stats.totalWins.red ? 'BLUE' : stats.totalWins.red > stats.totalWins.blue ? 'RED' : 'DRAW';
+console.log(
+  `  MATCH WINNER: ${mw} (rounds ${stats.totalWins.blue}:${stats.totalWins.red}, ` +
+  `captures ${stats.totalCaptures.blue}:${stats.totalCaptures.red})`,
+);
 console.log('');
 
 const be = [...game.emplacements.values()].filter(e => e.team === 'blue');
