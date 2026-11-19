@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
-const { WORKSHOP_START_STOCK, WORKSHOP_CAPACITY, GROUND_LEVEL, VOXEL_BUILT } = require('../dist/tests/sharedTypes.cjs');
+const { WORKSHOP_START_STOCK, WORKSHOP_CAPACITY, GROUND_LEVEL, VOXEL_BUILT, RED_SPAWN_Z_MIN } = require('../dist/tests/sharedTypes.cjs');
 
 process.env.SERVER_BOT_COUNT = '0';
 const connection = frames => ({ send: data => frames.push(JSON.parse(data)), isOpen: () => true });
@@ -34,7 +34,10 @@ test('team workshops enforce resource provenance, proximity, protection and life
   assert.equal(blueFrames.find(frame => frame.type === 'joined').state.team, 'blue');
   const redJoined = redFrames.find(frame => frame.type === 'joined');
   assert.equal(redJoined.state.team, 'red');
-  assert.ok(redJoined.state.position.z >= 200, 'red joins at its own spawn');
+  assert.ok(
+    redJoined.state.position.z >= RED_SPAWN_Z_MIN,
+    `red joins at its own spawn, z was ${redJoined.state.position.z}`,
+  );
   game.handleMessage(red, { type: 'join', team: 'blue', position: initial.workshops.blue.position });
   assert.equal(r.team, 'red', 'repeated joins cannot switch teams');
   const site = initial.workshops.blue.position;

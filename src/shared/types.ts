@@ -204,8 +204,8 @@ export const WORLD_SIZE = 448; // 28 chunks of CHUNK_SIZE(16); keeps half=224 al
 export const CHUNK_SIZE = 16;
 
 /** Half-extent of the playable map. Derived from WORLD_SIZE so that resizing
- *  the map can never again leave the spawn zones outside the "fell out of the
- *  world" bounds (a hardcoded 124 here made every spawn self-eliminate). */
+ *  the map can never again leave the spawn zones outside the \"fell out of the
+ *  world\" bounds (a hardcoded 124 here made every spawn self-eliminate). */
 export const WORLD_HALF = WORLD_SIZE / 2;
 
 /** Below this Y a player has fallen out of the world. */
@@ -219,6 +219,7 @@ export function isOutOfWorld(pos: { x: number; y: number; z: number }): boolean 
     Math.abs(pos.z) > WORLD_HALF
   );
 }
+
 export const GROUND_LEVEL = 8;
 export const MAX_BUILD_UP = 20;
 export const MAX_DIG_DOWN = 20;
@@ -236,9 +237,11 @@ export const WORKSHOP_CENTERS = {
   blue: { x: 45, z: -185 },
   red: { x: 45, z: 185 },
 } as const;
+
 export const WORKSHOP_START_STOCK = 50;
 export const WORKSHOP_CAPACITY = 200;
 export const WORKSHOP_REACH = 8;
+
 /** The blueprint bench sits inside the workshop's protected cells (clear of the
  *  jeep pad at x+11), so a bench can never be dug out or built over. */
 export const BENCH_OFFSET = { x: -3, z: 5 } as const;
@@ -247,6 +250,7 @@ export const BENCH_REACH = 6;
 export function benchPosition(workshop: Position): Position {
   return { x: workshop.x + BENCH_OFFSET.x, y: workshop.y, z: workshop.z + BENCH_OFFSET.z };
 }
+
 /** Vehicles are data, not code: one record per kind carries the workshop cost,
  *  durability, per-team limit and physical footprint, so the build/enter/drive/
  *  damage path is shared instead of copied for every new vehicle. */
@@ -384,7 +388,6 @@ export const JEEP_TEAM_LIMIT = VEHICLES.jeep.teamLimit;
 export const JEEP_MAX_HP = VEHICLES.jeep.maxHp;
 export const JEEP_ENTER_REACH = VEHICLES.jeep.enterReach;
 
-
 export function isWorkshopProtectedCell(x: number, z: number): boolean {
   return Object.values(WORKSHOP_CENTERS).some(
     center => x >= center.x - 5 && x <= center.x + 17 && Math.abs(z - center.z) <= 7,
@@ -467,9 +470,7 @@ export type WeaponId = 'rifle' | 'smg';
  *  an unknown string used to sit in `equipment`, break HUD lookups and leave
  *  the player unable to shoot. */
 export type EquipmentId = WeaponId | 'pickaxe' | 'spade';
-
 export const EQUIPMENT_IDS: readonly EquipmentId[] = ['rifle', 'smg', 'pickaxe', 'spade'];
-
 export function isEquipment(value: unknown): value is EquipmentId {
   return typeof value === 'string' && (EQUIPMENT_IDS as readonly string[]).includes(value);
 }
@@ -554,10 +555,12 @@ export const TOOLS = {
 export const BLUE_FLAG_POS = { x: 0, z: -160 };
 export const RED_FLAG_POS = { x: 0, z: 160 };
 
-// Spawns are placed far behind the base flag (40m - 60m behind flag), so each
-// team must cross ~200m of contested ground to reach the enemy flag.
-export const BLUE_SPAWN_Z_MIN = -220;
-export const BLUE_SPAWN_Z_MAX = -200;
-export const RED_SPAWN_Z_MIN = 200;
-export const RED_SPAWN_Z_MAX = 220;
-export const SPAWN_X_RANGE = 32;
+// Spawns are placed behind the base flag and spread in x so teams do not all
+// start in one lane. The band is far enough back that a team still has to cross
+// most of the map to reach the enemy flag. If the map is enlarged later, keep
+// spawns well inside the playable half and recheck spawnBounds.test.mjs.
+export const BLUE_SPAWN_Z_MIN = -222;
+export const BLUE_SPAWN_Z_MAX = -192;
+export const RED_SPAWN_Z_MIN = 192;
+export const RED_SPAWN_Z_MAX = 222;
+export const SPAWN_X_RANGE = 120;

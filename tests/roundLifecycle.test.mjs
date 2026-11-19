@@ -9,7 +9,7 @@ import assert from 'node:assert';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
-const { INTERMISSION_SECONDS, RED_FLAG_POS, DEFAULT_ROUND_MINUTES } = require('../dist/tests/sharedTypes.cjs');
+const { INTERMISSION_SECONDS, RED_FLAG_POS, DEFAULT_ROUND_MINUTES, BLUE_SPAWN_Z_MIN, BLUE_SPAWN_Z_MAX } = require('../dist/tests/sharedTypes.cjs');
 
 function connectedGame() {
   const game = new ServerGame();
@@ -124,9 +124,15 @@ test('the next round resets captures, flags and returns everyone to spawn', () =
   assert.deepStrictEqual(snap.wins, { red: 0, blue: 1 });
 
   assert.strictEqual(player.isDead, false, 'players are revived at the round start');
+  const blueBackMostBlueZ = BLUE_SPAWN_Z_MIN;  // most negative z blue spawns can use
+  const blueFrontMostBlueZ = BLUE_SPAWN_Z_MAX; // least negative z blue spawns can use
   assert.ok(
-    player.position.z <= -190 && player.position.z >= -230,
-    `blue must respawn behind its own flag, z was ${player.position.z}`,
+    player.position.z <= blueFrontMostBlueZ,
+    `blue respawn z was ${player.position.z}, must be <= ${blueFrontMostBlueZ}`,
+  );
+  assert.ok(
+    player.position.z >= blueBackMostBlueZ,
+    `blue respawn z was ${player.position.z}, must be >= ${blueBackMostBlueZ}`,
   );
 
   const returned = messages.filter((m) => m.type === 'flagReturned').map((m) => m.flagTeam);
