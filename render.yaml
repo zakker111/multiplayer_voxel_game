@@ -1,0 +1,30 @@
+# Render Blueprint — one-click always-on Voxel FPS server (DEPLOYMENT.md Option 1)
+#
+# In the Render dashboard: New → Blueprint → pick this repo → Apply.
+# Render reads this file, builds the client + server, and serves HTTP + WebSocket
+# from one process on its injected $PORT. No manual field-filling needed.
+services:
+  - type: web
+    name: voxel-fps-ctf
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: true
+    # --include=dev is required: Vite/esbuild are devDependencies, and NODE_ENV
+    # is production here, so a plain `npm ci` would skip the build toolchain.
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/status
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Keep the match 10v10 with server-owned bots, as in DEPLOYMENT.md.
+      - key: SERVER_BOT_COUNT
+        value: "10"
+      - key: ROUND_MINUTES
+        value: "30"
+      # The server sits behind Render's proxy, so client identity must come from
+      # X-Forwarded-For for per-IP caps and IP bans to work.
+      - key: TRUST_PROXY
+        value: "1"
