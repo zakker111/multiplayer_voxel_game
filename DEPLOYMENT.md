@@ -43,13 +43,13 @@ This repo ships [`render.yaml`](render.yaml), so Render configures the whole ser
 5. Name the Blueprint (e.g. `voxel-fps`) and confirm **Branch: main** → **Deploy Blueprint**.
    - Render parses `render.yaml` and shows one **Web Service** named `voxel-fps-ctf` (Node, Free plan, Oregon).
    - It prompts for **`ADMIN_TOKEN`** — the only value you supply. See [ADMIN_TOKEN](#admin_token-during-setup) below.
-6. Watch the first deploy in the log stream:
-   - `Cloning from https://github.com/zakker111/multiplayer_voxel_game …`
-   - `npm ci --include=dev && npm run build`
-   - `Build successful 🎉`, then `Voxel FPS server listening on 0.0.0.0:<port>` and `game loop started tickRate=20Hz`
-   - `ADMIN_TOKEN not set — admin API open to localhost only` (expected when you left the prompt blank)
-   The service flips to **Live** once the health check on `/api/status` passes.
-7. Read your URL off the service page: `https://<service-name>.onrender.com`. It serves the client and the `wss://` game socket from the same process, and the client picks `wss://` automatically from `window.location.protocol`.
+6. Watch the first deploy. Render prints its own lines (`Cloning from https://github.com/…`, the build, then `Build successful 🎉`). The app then logs three lines, in this order, each prefixed `<ISO timestamp> [LEVEL] [server]`:
+   - `ADMIN_TOKEN not set — admin API open to localhost only. Set ADMIN_TOKEN to allow remote access.` (warn — only when you left the prompt blank)
+   - `game loop started tickRate=20Hz`
+   - `Voxel FPS server listening on 0.0.0.0:<port> (admin: localhost-only)` — the suffix reads `token-protected` when you supplied a token
+
+   Render marks the deploy **Live** once the service answers its health check on `/api/status`. That only proves the HTTP side is up, so open the page as well.
+7. Read your URL off the service page: `https://<service-name>.onrender.com`. Nothing else to configure: with no `?server=` override the client builds its socket URL from `window.location.host`, using `wss://` whenever the page is served over HTTPS.
 
 ### What `render.yaml` sets
 
@@ -60,11 +60,9 @@ This repo ships [`render.yaml`](render.yaml), so Render configures the whole ser
 | `buildCommand` | `npm ci --include=dev && npm run build` — `--include=dev` is required because Vite and esbuild are devDependencies and `NODE_ENV=production` |
 | `startCommand` | `npm start` (`node dist/server.cjs`; binds Render's injected `$PORT`) |
 | `healthCheckPath` | `/api/status` |
-| `NODE_ENV` | `production` |
-| `SERVER_BOT_COUNT` | `10` (10v10 with bots) |
-| `ROUND_MINUTES` | `30` |
-| `TRUST_PROXY` | `1` (trust `X-Forwarded-For` for per-IP caps and IP bans) |
-| `ADMIN_TOKEN` | `sync: false` — prompted once, never stored in the repo |
+| `envVars` | `NODE_ENV=production`, `SERVER_BOT_COUNT=10`, `ROUND_MINUTES=30`, `TRUST_PROXY=1` (each is described in the environment table above), plus `ADMIN_TOKEN` — see below |
+
+`TRUST_PROXY=1` is what lets the per-IP socket caps and IP bans see the real client address behind Render's proxy; leave it unset if the server is ever exposed directly, since the header is client-controlled.
 
 Change any of these by editing `render.yaml` and pushing to `main`; the Blueprint re-syncs itself. Use the dashboard **Environment** tab only for secret values.
 
@@ -79,7 +77,7 @@ Render only prompts on the *first* creation. To set or rotate it later: service 
 
 **Updates:** every push to `main` triggers a rebuild+redeploy (~2–4 min). If a build fails, Render keeps serving the previous version — check the deploy logs.
 
-**Free tier behaviour:** instances sleep after ~15 minutes with no inbound traffic (HTTP requests or open WebSockets); the first visitor after a quiet spell waits roughly a minute for the boot, while anyone with the tab open keeps it awake. Free services share a 750 instance-hour/month pool. The disk is ephemeral, so `bans.json` and other runtime files are lost on redeploy or restart.
+**Free tier behaviour** ([Render's free limits](https://render.com/docs/free)): an instance spins down after 15 minutes with no inbound traffic — meaning no HTTP request *and* no WebSocket message from an existing connection. An active match keeps it awake (the client sends input at 20Hz); an idle server sleeps, and the next visitor sees Render's loading page for about a minute while it boots. Each workspace gets 750 instance hours per calendar month, and exhausting them suspends every free service until the next month. The filesystem is ephemeral, so `bans.json` is lost on redeploy, restart **and** on every spin-down.
 
 **Playtesters must hard-refresh** (Ctrl/Cmd+Shift+R) after each deploy to load the new client bundle.
 
@@ -181,7 +179,7 @@ npm run admin -- players --url https://your-app.onrender.com --token $ADMIN_TOKE
 npm run admin -- ban 203.0.113.42 "cheating" --url https://your-app.onrender.com --token $ADMIN_TOKEN
 ```
 
-Bans survive restarts (`bans.json`, gitignored) and are checked at the WebSocket upgrade stage, so banned players cannot reconnect. Kicking a player also triggers the same-team bot backfill, keeping the match 10v10.
+Bans persist to `bans.json` (gitignored; path overridable with `BAN_FILE`) and are checked at the WebSocket upgrade stage, so banned players cannot reconnect. They survive restarts on a host with a persistent disk (local, Docker volume, VPS); on Render's free tier the filesystem is ephemeral, so a redeploy, restart or spin-down clears them. Kicking a player also triggers the same-team bot backfill, keeping the match 10v10.
 
 ---
 
@@ -194,22 +192,29 @@ curl https://<your-url>.onrender.com/api/status
 ```json
 {
   "status": "online",
+  "serverTime": 1795174981254,
+  "connectedPlayers": 0,
   "tickRate": 20,
-  "connectedPlayers": 20,
+  "version": "1.0.0",
   "round": {
-    "round": 1, "phase": "live", "timeLeft": 1763, "intermission": 0,
+    "round": 1,
+    "phase": "live",
+    "timeLeft": 1796.05,
+    "intermission": 0,
     "captures": { "red": 0, "blue": 0 },
-    "touches":  { "red": 0, "blue": 0 },
-    "returns":  { "red": 0, "blue": 0 },
-    "wins":     { "red": 0, "blue": 0 },
+    "touches": { "red": 0, "blue": 0 },
+    "returns": { "red": 0, "blue": 0 },
+    "wins": { "red": 0, "blue": 0 },
     "duration": 1800
   }
 }
 ```
 
-The `round` block is the authoritative round state: `captures` is the score, and `touches` / `returns` / `wins` are the tiebreak counters (enemy-flag pickups, own-flag returns, rounds won) used when captures are level at 0:0. With `ROUND_MINUTES=30`, `duration` must read `1800`.
+The `round` block is the authoritative round state: `captures` is the score, and `touches` / `returns` / `wins` are the tiebreak counters (enemy-flag pickups, own-flag returns, rounds won) used when captures are level at 0:0. `duration` is the configured round length, so with `ROUND_MINUTES=30` it must read `1800`; `timeLeft` is fractional seconds counting down from there, and `serverTime`/`timeLeft` above are one sample a few seconds into a round.
 
-Before opening the game, confirm `/api/status` returns `"status":"online"`, all four counter pairs under `round`, and `connectedPlayers` of ~20 (the bots).
+`connectedPlayers` counts open WebSocket sockets, **not** the roster: a freshly deployed server reports `0` even though ~20 bots are already playing, and `1` per connected browser. The bots are only visible in-game (or through the token-protected admin API).
+
+Before opening the game, confirm `/api/status` answers 200 with `"status":"online"`, `"tickRate":20`, and all four counter pairs under `round`.
 
 Checklist:
 1. Open the URL → main menu loads, terrain renders.
