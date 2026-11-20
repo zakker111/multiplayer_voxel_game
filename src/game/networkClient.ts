@@ -206,6 +206,16 @@ export class NetworkClient {
     return this.serverUrl;
   }
 
+  /** HTTP origin of the configured game server, for the SSE/HTTP fallback.
+   *
+   *  It must follow `&server=`, not the page origin: on a static host (GitHub
+   *  Pages) a relative path asks the static host for game routes it does not
+   *  serve, so the fallback 404s and the game looks dead even when a server is
+   *  configured. */
+  private httpBaseUrl(): string {
+    return this.serverUrl.replace(/^ws/i, 'http').replace(/\/+$/, '');
+  }
+
   getTransport(): string {
     if (this.wsConnected) return 'WebSocket';
     if (this.sseConnected) return 'HTTP SSE';
@@ -301,8 +311,8 @@ export class NetworkClient {
     if (this.sse || this.sseConnected || typeof window === 'undefined') return;
 
     try {
-      console.log('Connecting to HTTP Server-Sent Events (SSE) stream at /api/game/events...');
-      const sseUrl = '/api/game/events';
+      const sseUrl = `${this.httpBaseUrl()}/api/game/events`;
+      console.log(`Connecting to HTTP Server-Sent Events (SSE) stream at ${sseUrl}...`);
       this.sse = new EventSource(sseUrl);
 
       this.sse.onopen = () => {
@@ -369,7 +379,7 @@ export class NetworkClient {
 
   private postSse(message: ClientMessage): void {
     if (!this.sessionToken) return;
-    fetch('/api/game/message', {
+    fetch(`${this.httpBaseUrl()}/api/game/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: this.sessionToken, message }),

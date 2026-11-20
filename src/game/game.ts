@@ -549,6 +549,8 @@ export class Game {
    *  authoritative server simulation as online mode (workshops, jeeps,
    *  logistics bots) but keeps a distinct label for the HUD. */
   betaLabel: boolean = false;
+  /** Retry loop while Beta waits for its server; null when idle. */
+  private betaRetryTimer: number | null = null;
 
   networkClient: NetworkClient | null = null;
   private onlineJoinConfirmed = false;
@@ -2697,6 +2699,14 @@ export class Game {
    */
   private fallBackToLocalMatch(): void {
     if (this.gameMode !== 'online') return; // already local — nothing to undo
+    // Beta has no client-side simulation of its own, so a local match would be
+    // labelled Beta but have no workshops, garages, jeeps or logistics bots at
+    // all. That is what "beta has no vehicles" looked like. Keep trying the
+    // real server instead of faking the mode.
+    if (this.betaLabel) {
+      this.awaitBetaServer();
+      return;
+    }
     console.warn('No game server reachable — falling back to a local bot match');
     this.networkClient?.disconnect();
     this.networkClient = null;
@@ -2704,8 +2714,25 @@ export class Game {
     this.showMessage('⚠️ No game server reachable — started a local bot match. Run "npm run dev" for online play.');
   }
 
+  /** Beta with no reachable server: say why and retry, never downgrade to a
+   *  local match that cannot contain the beta systems. */
+  private awaitBetaServer(): void {
+    const url = this.networkClient?.getServerUrl() ?? 'the game server';
+    console.warn(`Beta needs its game server (${url}) — not starting a local match`);
+    this.showMessage(`⚠️ Beta needs its game server for workshops, vehicles and bots — ${url} is unreachable. Retrying every 5s…`);
+    if (this.betaRetryTimer !== null) return;
+    this.betaRetryTimer = window.setInterval(() => {
+      if (!this.networkClient || this.networkClient.isConnected()) {
+        if (this.betaRetryTimer !== null) window.clearInterval(this.betaRetryTimer);
+        this.betaRetryTimer = null;
+        return;
+      }
+      this.networkClient.connect();
+    }, 5000);
+  }
+
   /** Client-side bots and local voxel edits: a normal bot match, and what an
-   *  online/Beta session falls back to when no server turns up. */
+   *  online session falls back to when no server turns up (Beta never does). */
   private startLocalMatch(): void {
     this.gameMode = 'multiplayer';
     this.player.serverAuthoritativeRespawn = false;
