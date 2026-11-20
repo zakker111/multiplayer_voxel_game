@@ -253,6 +253,11 @@ export class NetworkClient {
       // 1. Try WebSocket primary connection
       try {
         console.log('Connecting to WebSocket server:', this.serverUrl);
+        // A retry must not leave the previous socket dangling.
+        if (this.ws) {
+          try { this.ws.close(); } catch { /* already closed */ }
+          this.ws = null;
+        }
         this.ws = new WebSocket(this.serverUrl);
 
         const wsTimeout = setTimeout(() => {
@@ -262,13 +267,31 @@ export class NetworkClient {
           }
         }, 2200);
 
+        // An accepted upgrade is not a working session: a proxy or a half-open
+        // socket can complete the handshake and never deliver the `init` frame.
+        // Treating that as connected made Beta look alive while no state ever
+        // arrived — bots frozen and every mine/build/shoot silently dropped.
+        let initTimeout: ReturnType<typeof setTimeout> | null = null;
+        const failSilentSocket = (why: string) => {
+          if (initTimeout) { clearTimeout(initTimeout); initTimeout = null; }
+          if (this.wsConnected || this.sseConnected) return;
+          console.warn(`WebSocket ${why} — dropping it and retrying`);
+          try { this.ws?.close(); } catch { /* ignore */ }
+          this.ws = null;
+          this.connectSSE(finishConnect);
+        };
+
         this.ws.onopen = () => {
           clearTimeout(wsTimeout);
-          console.log('✅ Connected via WebSocket');
-          finishConnect('websocket');
+          console.log('WebSocket socket open — waiting for the init frame');
+          initTimeout = setTimeout(() => failSilentSocket('delivered no init within 8s'), 8000);
         };
 
         this.ws.onmessage = (event) => {
+          if (!this.wsConnected) {
+            if (initTimeout) { clearTimeout(initTimeout); initTimeout = null; }
+            finishConnect('websocket');
+          }
           try {
             this.handleMessage(JSON.parse(event.data) as ServerMessage);
           } catch (error) {
