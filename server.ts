@@ -13,6 +13,8 @@ const log = createLogger('server');
 
 interface AliveWebSocket extends WebSocket {
   isAlive: boolean;
+  /** Consecutive keepalive windows that arrived without any traffic. */
+  missedPings?: number;
   clientIp?: string;
 }
 
@@ -33,6 +35,22 @@ async function startServer() {
   const startedAt = Date.now();
 
   app.use(express.json());
+
+  // The client is commonly served from a static host (GitHub Pages) while the
+  // game server runs somewhere else, so every /api route must answer CORS — not
+  // just the SSE stream. Without this a browser refuses the join/input/build
+  // POSTs, so the page looked connected while every action was dropped.
+  app.use('/api', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+    res.setHeader('Access-Control-Max-Age', '600');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
 
   const server = http.createServer(app);
 
@@ -267,8 +285,16 @@ async function startServer() {
     wss.clients.forEach((ws) => {
       const extWs = ws as AliveWebSocket;
       if (extWs.isAlive === false) {
-        log.warn(`terminating inactive ws ip=${extWs.clientIp || 'client'}`);
-        return ws.terminate();
+        // A hidden or throttled browser tab pauses its frame loop, so it can
+        // miss one window while perfectly healthy. Hanging up on the first miss
+        // put idle players into a reconnect loop; require a second.
+        extWs.missedPings = (extWs.missedPings ?? 0) + 1;
+        if (extWs.missedPings >= 2) {
+          log.warn(`terminating inactive ws ip=${extWs.clientIp || 'client'}`);
+          return ws.terminate();
+        }
+      } else {
+        extWs.missedPings = 0;
       }
       extWs.isAlive = false;
       ws.ping();
