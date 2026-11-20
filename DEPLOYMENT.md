@@ -219,6 +219,14 @@ The `round` block is the authoritative round state: `captures` is the score, and
 
 Before opening the game, confirm `/api/status` answers 200 with `"status":"online"`, `"tickRate":20`, a `roster` whose `total` matches your configured `SERVER_BOT_COUNT × 2`, and all four counter pairs under `round`.
 
+Or let the script do it: it checks the page and bundle, every `/api/status` field above, then opens a real WebSocket, joins, and re-checks that the roster counted the human and retired a bot:
+
+```bash
+npm run verify:live -- https://your-app.onrender.com
+```
+
+Expect `ALL CHECKS PASSED` and exit code 0 (it exits 1 on any failure, so it works as a post-deploy gate). Cold free instances can take ~1 minute to wake; set `WARMUP_MS=180000` for a slower one.
+
 Checklist:
 1. Open the URL → main menu loads, terrain renders.
 2. Join Multiplayer → HUD shows ~19 other entities (10v10 minus your retired bot); server log shows `human joined <team> — retiring bot`.
