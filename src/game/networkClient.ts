@@ -8,6 +8,8 @@ export class NetworkClient {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 2000;
+  /** Pending retry after a fallback stream is dropped by a proxy. */
+  private reconnectTimer: number | null = null;
   private serverUrl: string;
   private onConnectCallback: (() => void) | null = null;
   private onDisconnectCallback: (() => void) | null = null;
@@ -260,12 +262,21 @@ export class NetworkClient {
         }
         this.ws = new WebSocket(this.serverUrl);
 
+        // A slow upgrade is not a failure. Over a tunnel or a slow mobile link
+        // the handshake plus the ~100 KB `init` frame takes a couple of seconds,
+        // and the old 2.2s cut-off moved those players onto the SSE stream. Any
+        // proxy that caps long-lived responses (Serveo closes a stream at ~10s)
+        // then closed that stream, EventSource silently re-opened it as a
+        // brand-new player, and the game looped connect -> join -> leave forever
+        // while looking "connected". Only fall back once the socket is really
+        // unusable, and give the init frame time to arrive.
         const wsTimeout = setTimeout(() => {
-          if (!this.wsConnected && !this.sseConnected) {
-            console.log('WebSocket connection taking long, initiating HTTP SSE fallback...');
-            this.connectSSE(finishConnect);
-          }
-        }, 2200);
+          if (this.wsConnected || this.sseConnected) return;
+          // Still open: the 8s init timeout below is what decides a silent socket.
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+          console.log('WebSocket connection taking long, initiating HTTP SSE fallback...');
+          this.connectSSE(finishConnect);
+        }, 10000);
 
         // An accepted upgrade is not a working session: a proxy or a half-open
         // socket can complete the handshake and never deliver the `init` frame.
@@ -355,8 +366,24 @@ export class NetworkClient {
         }
       };
 
+      // EventSource reopens by itself, but a reopened stream is a *new* server
+      // session: the old player leaves and a fresh one joins. Behind a proxy that
+      // cuts long-lived streams that is an endless join/leave loop, so drop the
+      // dead stream and go back to the WebSocket transport instead.
       this.sse.onerror = () => {
         console.warn('SSE stream status update');
+        if (!this.sse || this.sse.readyState !== EventSource.CLOSED) return;
+        try { this.sse.close(); } catch { /* already closed */ }
+        this.sse = null;
+        this.sseConnected = false;
+        if (this.transport === 'sse') this.transport = 'connecting';
+        if (this.reconnectTimer === null) {
+          this.reconnectTimer = window.setTimeout(() => {
+            this.reconnectTimer = null;
+            if (this.wsConnected || this.sseConnected) return;
+            this.connect();
+          }, this.reconnectDelay);
+        }
       };
     } catch (err) {
       console.warn('SSE fallback error:', err);
@@ -481,6 +508,10 @@ export class NetworkClient {
   }
 
   disconnect(): void {
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.channel) {
       this.channel.postMessage({
         type: 'peer_leave',
