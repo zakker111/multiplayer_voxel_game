@@ -325,6 +325,11 @@ async function startServer() {
     });
 
     ws.on('message', (data: Buffer | string) => {
+      // Any inbound frame proves the peer is still there. Several proxies and
+      // tunnels (Serveo, localhost.run) do not relay WebSocket control frames,
+      // so a pong-only liveness check hung up perfectly healthy players every
+      // 25s and the client reconnected in a loop.
+      extWs.isAlive = true;
       if (!messageBudget.tryConsume()) {
         // Over budget: drop the frame. A client that keeps flooding is hung up
         // on rather than left burning parse time every frame (queued frames
