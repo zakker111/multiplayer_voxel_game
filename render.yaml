@@ -10,7 +10,8 @@ services:
     plan: free
     region: oregon
     branch: main
-    autoDeploy: true
+    # `autoDeploy` is deprecated; this is its documented replacement.
+    autoDeployTrigger: commit
     # --include=dev is required: Vite/esbuild are devDependencies, and NODE_ENV
     # is production here, so a plain `npm ci` would skip the build toolchain.
     buildCommand: npm ci --include=dev && npm run build
