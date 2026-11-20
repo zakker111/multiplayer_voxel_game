@@ -30,20 +30,56 @@ How to get the game live for developers and playtesters. **Render is the primary
 
 ---
 
-## ⭐ Option 1: Render (Primary — Auto-deploy from GitHub)
+## ⭐ Option 1: Render Blueprint (Primary — auto-deploy from GitHub)
 
 **Time:** first setup ~5 min, updates ~2–4 min · **Cost:** free tier · **Difficulty:** ⭐ Very Easy
 
-1. Push this repository to GitHub.
-2. On [render.com](https://render.com): **New → Web Service** → connect the repo.
-3. Configure:
-   - **Environment:** Node
-   - **Build Command:** `npm install && npm run build`
-   - **Start Command:** `npm start`
-4. Do **not** hardcode a port — `server.ts` reads `process.env.PORT` (Render sets it). Optionally add `NODE_ENV=production`, `ADMIN_TOKEN=<secret>` in the Environment tab.
-5. **Create Web Service** → Render gives `https://<app>.onrender.com` with full `wss://` support. The client auto-detects `window.location.protocol` and connects securely.
+This repo ships [`render.yaml`](render.yaml), so Render configures the whole service from that file — no build/start commands, region or env vars to type in. You only walk the Blueprint wizard and answer one prompt.
 
-**Updates:** every `git push` to the watched branch triggers an automatic rebuild+redeploy (~2–4 min). If a build fails, Render keeps serving the previous version — check deploy logs. Free instances sleep when idle; first connection after inactivity takes ~30s to wake.
+1. Make sure the branch Render will watch (`main`) contains `render.yaml`.
+2. Sign in at [dashboard.render.com](https://dashboard.render.com) with GitHub.
+3. **New +** (top right) → **Blueprint**.
+4. **Connect a repository** → `zakker111/multiplayer_voxel_game`. If it is not listed, click **Configure account** and grant Render access to that repo, then come back and refresh the list.
+5. Name the Blueprint (e.g. `voxel-fps`) and confirm **Branch: main** → **Deploy Blueprint**.
+   - Render parses `render.yaml` and shows one **Web Service** named `voxel-fps-ctf` (Node, Free plan, Oregon).
+   - It prompts for **`ADMIN_TOKEN`** — the only value you supply. See [ADMIN_TOKEN](#admin_token-during-setup) below.
+6. Watch the first deploy in the log stream:
+   - `Cloning from https://github.com/zakker111/multiplayer_voxel_game …`
+   - `npm ci --include=dev && npm run build`
+   - `Build successful 🎉`, then `Voxel FPS server listening on 0.0.0.0:<port>` and `game loop started tickRate=20Hz`
+   - `ADMIN_TOKEN not set — admin API open to localhost only` (expected when you left the prompt blank)
+   The service flips to **Live** once the health check on `/api/status` passes.
+7. Read your URL off the service page: `https://<service-name>.onrender.com`. It serves the client and the `wss://` game socket from the same process, and the client picks `wss://` automatically from `window.location.protocol`.
+
+### What `render.yaml` sets
+
+| Field | Value |
+| :--- | :--- |
+| `runtime` / `plan` / `region` | `node` / `free` / `oregon` |
+| `branch` / `autoDeployTrigger` | `main` / `commit` (redeploy on every push) |
+| `buildCommand` | `npm ci --include=dev && npm run build` — `--include=dev` is required because Vite and esbuild are devDependencies and `NODE_ENV=production` |
+| `startCommand` | `npm start` (`node dist/server.cjs`; binds Render's injected `$PORT`) |
+| `healthCheckPath` | `/api/status` |
+| `NODE_ENV` | `production` |
+| `SERVER_BOT_COUNT` | `10` (10v10 with bots) |
+| `ROUND_MINUTES` | `30` |
+| `TRUST_PROXY` | `1` (trust `X-Forwarded-For` for per-IP caps and IP bans) |
+| `ADMIN_TOKEN` | `sync: false` — prompted once, never stored in the repo |
+
+Change any of these by editing `render.yaml` and pushing to `main`; the Blueprint re-syncs itself. Use the dashboard **Environment** tab only for secret values.
+
+### ADMIN_TOKEN during setup
+
+`ADMIN_TOKEN` is declared with `sync: false`, which means Render asks for it during Blueprint creation and never reads the value back from git.
+
+- **Leave it blank** (recommended to start): the admin API stays reachable from the server host only, so remote `npm run admin` calls return 401. Nothing else is affected — the match, CTF, bots and building all work normally.
+- **Paste a long random secret**: remote moderation works, e.g. `npm run admin -- players --url https://<url>.onrender.com --token <secret>`.
+
+Render only prompts on the *first* creation. To set or rotate it later: service → **Environment** → `ADMIN_TOKEN` → **Save changes** → the service restarts. A Blueprint update from git leaves `sync: false` variables untouched.
+
+**Updates:** every push to `main` triggers a rebuild+redeploy (~2–4 min). If a build fails, Render keeps serving the previous version — check the deploy logs.
+
+**Free tier behaviour:** instances sleep after ~15 minutes with no inbound traffic (HTTP requests or open WebSockets); the first visitor after a quiet spell waits roughly a minute for the boot, while anyone with the tab open keeps it awake. Free services share a 750 instance-hour/month pool. The disk is ephemeral, so `bans.json` and other runtime files are lost on redeploy or restart.
 
 **Playtesters must hard-refresh** (Ctrl/Cmd+Shift+R) after each deploy to load the new client bundle.
 
@@ -152,8 +188,28 @@ Bans survive restarts (`bans.json`, gitignored) and are checked at the WebSocket
 ## 🧪 Verifying a Deployment
 
 ```bash
-curl https://<your-url>/api/status     # -> {"status":"online","tickRate":20,...}
+curl https://<your-url>.onrender.com/api/status
 ```
+
+```json
+{
+  "status": "online",
+  "tickRate": 20,
+  "connectedPlayers": 20,
+  "round": {
+    "round": 1, "phase": "live", "timeLeft": 1763, "intermission": 0,
+    "captures": { "red": 0, "blue": 0 },
+    "touches":  { "red": 0, "blue": 0 },
+    "returns":  { "red": 0, "blue": 0 },
+    "wins":     { "red": 0, "blue": 0 },
+    "duration": 1800
+  }
+}
+```
+
+The `round` block is the authoritative round state: `captures` is the score, and `touches` / `returns` / `wins` are the tiebreak counters (enemy-flag pickups, own-flag returns, rounds won) used when captures are level at 0:0. With `ROUND_MINUTES=30`, `duration` must read `1800`.
+
+Before opening the game, confirm `/api/status` returns `"status":"online"`, all four counter pairs under `round`, and `connectedPlayers` of ~20 (the bots).
 
 Checklist:
 1. Open the URL → main menu loads, terrain renders.
@@ -170,13 +226,16 @@ Checklist:
 
 | Symptom | Fix |
 | :--- | :--- |
-| "Failed to connect to server" | Check `/api/status`; Render free tier may be sleeping — wait ~30s and retry |
+| "Failed to connect to server" | Check `/api/status`; Render free tier may be sleeping — wait ~1 min and retry |
+| Blueprint wizard shows no repository | **Configure account** on the connect step and grant Render access to the repo |
+| Blueprint asks for `ADMIN_TOKEN` and you are unsure | Leave it blank; the game runs normally and the admin API stays localhost-only. Add a secret later in the **Environment** tab |
+| Blueprint rejected `render.yaml` | Validate the field names against [the Blueprint spec](https://render.com/docs/blueprint-spec); errors name the offending key |
 | No audio | Browsers only start audio after your first interaction — click the canvas once, then press `M` or use the HUD speaker/slider to check mute and volume |
 | Old behavior after redeploy | Hard-refresh (Ctrl/Cmd+Shift+R); old bundles cache in tabs left open |
 | Build failed on Render | Read deploy logs; run `npm run lint && npm run build` locally — CI enforces the same pipeline |
 | WebSocket closes immediately | Reverse proxy missing `Upgrade`/`Connection` headers (see Nginx config above) |
 | Teams not balancing | Confirm `SERVER_BOT_COUNT` is set consistently; check `[game]` logs for retire/backfill lines |
-| Admin CLI 401/403 | Set `ADMIN_TOKEN` on the server and pass `--token`, or run the CLI on the server host itself |
+| Admin CLI 401/403 | Set `ADMIN_TOKEN` on the server (**Environment** tab) and pass `--token`, or run the CLI on the server host itself. On Render, leaving the Blueprint prompt blank means remote admin stays disabled by design |
 
 ---
 

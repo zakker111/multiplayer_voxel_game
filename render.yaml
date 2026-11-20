@@ -1,6 +1,6 @@
 # Render Blueprint — one-click always-on Voxel FPS server (DEPLOYMENT.md Option 1)
 #
-# In the Render dashboard: New → Blueprint → pick this repo → Apply.
+# In the Render dashboard: New + → Blueprint → pick this repo → Deploy Blueprint.
 # Render reads this file, builds the client + server, and serves HTTP + WebSocket
 # from one process on its injected $PORT. No manual field-filling needed.
 services:
@@ -29,3 +29,7 @@ services:
       # X-Forwarded-For for per-IP caps and IP bans to work.
       - key: TRUST_PROXY
         value: "1"
+      # Secret: never stored here. Render prompts for it once during Blueprint
+      # creation; leave it blank to keep the admin API localhost-only.
+      - key: ADMIN_TOKEN
+        sync: false
