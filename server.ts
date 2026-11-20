@@ -52,6 +52,9 @@ async function startServer() {
       connectedPlayers: wss.clients.size,
       tickRate: 20,
       version: '1.0.0',
+      // Live head-count (bots included): `connectedPlayers` is sockets only, so
+      // an active bot match would otherwise look empty to monitoring.
+      roster: game.getRosterCounts(),
       // Round clock: lets ops see which round is live without opening the game.
       round: game.getRoundSnapshot(),
     });

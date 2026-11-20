@@ -2270,6 +2270,25 @@ export class ServerGame {
     return this.bans.isIpBanned(normalizeIp(ip)) !== null;
   }
 
+  /** Head-count of the live roster for ops: bots included, per team and total.
+   *
+   *  `connectedPlayers` in /api/status is `wss.clients.size`, so a healthy
+   *  bot-filled match reports 0 there. This is the number a human sees on the
+   *  scoreboard: both sides of the map, humans and bots together. */
+  getRosterCounts(): { red: number; blue: number; total: number; humans: number; bots: number } {
+    let red = 0;
+    let blue = 0;
+    let humans = 0;
+    let bots = 0;
+    for (const p of this.players.values()) {
+      if (p.team === 'red') red++;
+      else blue++;
+      if (p instanceof ServerBot) bots++;
+      else humans++;
+    }
+    return { red, blue, total: red + blue, humans, bots };
+  }
+
   /** Snapshot of connected (non-bot) players for logs / status endpoint / CLI. */
   listPlayers(): Array<{ id: string; name: string; team: string; ip: string; hp: number; isDead: boolean; isSpectating: boolean }> {
     const out: Array<{ id: string; name: string; team: string; ip: string; hp: number; isDead: boolean; isSpectating: boolean }> = [];

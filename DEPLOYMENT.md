@@ -196,6 +196,7 @@ curl https://<your-url>.onrender.com/api/status
   "connectedPlayers": 0,
   "tickRate": 20,
   "version": "1.0.0",
+  "roster": { "red": 10, "blue": 10, "total": 20, "humans": 0, "bots": 20 },
   "round": {
     "round": 1,
     "phase": "live",
@@ -212,9 +213,11 @@ curl https://<your-url>.onrender.com/api/status
 
 The `round` block is the authoritative round state: `captures` is the score, and `touches` / `returns` / `wins` are the tiebreak counters (enemy-flag pickups, own-flag returns, rounds won) used when captures are level at 0:0. `duration` is the configured round length, so with `ROUND_MINUTES=30` it must read `1800`; `timeLeft` is fractional seconds counting down from there, and `serverTime`/`timeLeft` above are one sample a few seconds into a round.
 
-`connectedPlayers` counts open WebSocket sockets, **not** the roster: a freshly deployed server reports `0` even though ~20 bots are already playing, and `1` per connected browser. The bots are only visible in-game (or through the token-protected admin API).
+`roster` is the live head-count from the server's player map, bots included — the number the in-game scoreboard shows. `red`/`blue` are per-team counts, `total` is both teams, and `humans`/`bots` split that total by who is driving. With the `SERVER_BOT_COUNT=10` from `render.yaml` a healthy idle server reads `{ "red": 10, "blue": 10, "total": 20, "humans": 0, "bots": 20 }`; a human joining retires one same-team bot, so the per-team counts and `total` stay at 10/10/20 while `humans`/`bots` shift to `1`/`19`. If `total` sits below `SERVER_BOT_COUNT × 2`, the bot backfill is failing — check the `[game]` retire/backfill lines.
 
-Before opening the game, confirm `/api/status` answers 200 with `"status":"online"`, `"tickRate":20`, and all four counter pairs under `round`.
+`connectedPlayers` is a different number: it counts open WebSocket sockets, so a freshly deployed server reports `0` even though the 20 bots are already playing, and it counts `1` per connected browser (a sleeping-tab reconnect or a spectator adds another). Use `roster` for "is the match alive?" and `connectedPlayers` for "did my client actually connect?".
+
+Before opening the game, confirm `/api/status` answers 200 with `"status":"online"`, `"tickRate":20`, a `roster` whose `total` matches your configured `SERVER_BOT_COUNT × 2`, and all four counter pairs under `round`.
 
 Checklist:
 1. Open the URL → main menu loads, terrain renders.
