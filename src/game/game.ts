@@ -3,7 +3,7 @@ import { VoxelWorld, VOXEL_BUILT, VOXEL_SIZE, WORLD_SIZE, CHUNK_SIZE } from './w
 import { Player } from './player';
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
-import { PlayerState, PlayerInput, Position, PlayerStats, Workshops, JeepSnapshot } from '../shared/types';
+import { PlayerState, PlayerInput, Position, PlayerStats, Workshops, JeepSnapshot, WorkshopSnapshot } from '../shared/types';
 // Local copies previously drifted from the server (shared/types) values;
 // now sourced from the shared module so client and server agree on spawns/flags.
 import {
@@ -20,6 +20,8 @@ import {
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
+  WORKSHOP_CENTERS, WORKSHOP_START_STOCK, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec,
+  VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
   emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
   EMPLACEMENT_USE_REACH,
@@ -373,6 +375,12 @@ export class Game {
   private workshopMeshes: THREE.Group[] = [];
   private jeeps = new Map<string, { state: JeepSnapshot; mesh: THREE.Group }>();
   private drivingJeepId: string | null = null;
+  /** Client-owned vehicles for a local match. A connected server owns jeeps
+   *  instead; offline Beta keeps the vehicle roadmap playable on the client with
+   *  the same build/board/drive rules the server applies. */
+  private localJeeps: JeepSnapshot[] = [];
+  private localJeepSeq = 0;
+  private localJeepSync = 0;
 
   // ---- Blueprint placement (Phase 4 prototype) ----
   /** What the bench can build into each slot (slot 1..3 = index 0..2). */
@@ -870,6 +878,178 @@ export class Game {
       if (d < distance) { distance = d; closest = state; }
     }
     return closest;
+  }
+
+  /**
+   * Local matches have no server to send a workshop, so Beta builds both sites
+   * and the garage pads itself. The terrain under them is levelled exactly like
+   * ServerWorld.levelWorkshopSites(), otherwise the pad jeeps spawn on would be
+   * a slope and every build would be refused as "blocked".
+   */
+  private startLocalWorkshops(): void {
+    for (const center of Object.values(WORKSHOP_CENTERS)) {
+      for (let x = center.x - 5; x <= center.x + 17; x++) {
+        for (let z = center.z - 7; z <= center.z + 7; z++) {
+          for (let y = GROUND_LEVEL - 1; y <= GROUND_LEVEL + 2; y++) {
+            const desired = y < GROUND_LEVEL ? VOXEL_DIRT : y === GROUND_LEVEL ? VOXEL_GRASS : VOXEL_AIR;
+            if ((this.world.getVoxel(x, y, z)?.type ?? VOXEL_AIR) === desired) continue;
+            this.world.setVoxel(x, y, z, desired, desired === VOXEL_AIR ? 0 : 3);
+          }
+        }
+      }
+    }
+    const snapshot = (team: Team): WorkshopSnapshot => {
+      const center = WORKSHOP_CENTERS[team];
+      return {
+        position: { x: center.x, y: GROUND_LEVEL + 0.5, z: center.z },
+        stock: WORKSHOP_START_STOCK,
+        capacity: WORKSHOP_CAPACITY,
+      };
+    };
+    this.workshops = { blue: snapshot('blue'), red: snapshot('red') };
+    this.renderWorkshops(this.workshops);
+  }
+
+  /** G at the workshop: spend team stock on a jeep on the garage pad. */
+  private buildLocalJeep(): void {
+    if (!this.workshops || this.player.isDead || this.drivingJeepId) return;
+    const workshop = this.workshops[this.playerTeam];
+    const spec = vehicleSpec('jeep');
+    if (workshop.stock < spec.cost) { this.showMessage('🚙 Not enough workshop blocks'); return; }
+    const live = this.localJeeps.filter(jeep => jeep.team === this.playerTeam && !jeep.wreck);
+    if (live.length >= spec.teamLimit) { this.showMessage(`🚙 Team jeep limit reached (${spec.teamLimit})`); return; }
+    const x = workshop.position.x + 11;
+    const z = workshop.position.z;
+    const y = this.world.getGroundHeight(x, z);
+    const yaw = this.playerTeam === 'blue' ? Math.PI : 0;
+    if (!this.localJeepClear(x, y, z, yaw, null)) { this.showMessage('🚙 Garage pad is blocked'); return; }
+    workshop.stock -= spec.cost;
+    this.localJeeps.push({
+      id: `local_jeep_${++this.localJeepSeq}`,
+      kind: 'jeep', team: this.playerTeam,
+      position: { x, y, z }, yaw, speed: 0, hp: spec.maxHp, driverId: null, wreck: false,
+    });
+    this.applyJeeps(this.localJeeps);
+    this.showMessage(`🚙 Jeep built · -${spec.cost} blocks · press F to board`);
+  }
+
+  /** The server's oriented-rectangle test, simplified for the client: the body
+   *  must sit on ground within a step of the pad and no voxel may be inside it. */
+  private localJeepClear(x: number, y: number, z: number, yaw: number, ignoreId: string | null): boolean {
+    const spec = vehicleSpec('jeep');
+    const forwardX = -Math.sin(yaw), forwardZ = -Math.cos(yaw);
+    const rightX = -forwardZ, rightZ = forwardX;
+    const samples: Array<[number, number]> = [[0, 0], [spec.halfLength, 0], [-spec.halfLength, 0], [0, spec.halfWidth], [0, -spec.halfWidth]];
+    for (const [forward, side] of samples) {
+      const px = x + forwardX * forward + rightX * side;
+      const pz = z + forwardZ * forward + rightZ * side;
+      if (Math.abs(px) > WORLD_HALF - 1 || Math.abs(pz) > WORLD_HALF - 1) return false;
+      if (Math.abs(this.world.getGroundHeight(px, pz) - y) > 1) return false;
+      if (this.world.isSolid(Math.round(px), Math.round(y + 0.8), Math.round(pz))) return false;
+      if (this.world.isSolid(Math.round(px), Math.round(y + 1.8), Math.round(pz))) return false;
+    }
+    return !this.localJeeps.some(other => other.id !== ignoreId && !other.wreck &&
+      Math.abs(other.position.y - y) < 2 && Math.hypot(other.position.x - x, other.position.z - z) < 4);
+  }
+
+  private enterLocalJeep(jeep: JeepSnapshot): void {
+    const spec = vehicleSpec(jeep.kind);
+    if (jeep.wreck || jeep.driverId || jeep.team !== this.playerTeam) return;
+    if (this.player.carryingFlag) { this.showMessage('Drop the flag before boarding a jeep'); return; }
+    if (Math.hypot(
+      this.player.position.x - jeep.position.x,
+      this.player.position.y - jeep.position.y,
+      this.player.position.z - jeep.position.z,
+    ) > spec.enterReach) return;
+    jeep.driverId = this.localPlayerId ?? 'local-player';
+    jeep.speed = 0;
+    this.player.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+    this.player.velocity.set(0, 0, 0);
+    this.applyJeeps(this.localJeeps);
+  }
+
+  /** Step out onto the first ring spot the body actually fits in, like the
+   *  server's safeJeepExit, so you never leave a jeep inside a wall. */
+  private exitLocalJeep(): void {
+    const driverId = this.localPlayerId ?? 'local-player';
+    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
+    if (!jeep) return;
+    let spot: Position | null = null;
+    for (const radius of [3.5, 4.5, 6]) {
+      for (let i = 0; i < 8 && !spot; i++) {
+        const angle = jeep.yaw + i * Math.PI / 4;
+        const x = jeep.position.x + Math.cos(angle) * radius;
+        const z = jeep.position.z + Math.sin(angle) * radius;
+        const y = this.world.getGroundHeight(x, z);
+        if (Math.abs(y - jeep.position.y) > 2) continue;
+        if (this.world.isSolid(Math.round(x), Math.round(y + 0.9), Math.round(z))) continue;
+        if (this.world.isSolid(Math.round(x), Math.round(y + 1.8), Math.round(z))) continue;
+        spot = { x, y, z };
+      }
+      if (spot) break;
+    }
+    jeep.driverId = null;
+    jeep.speed = 0;
+    this.drivingJeepId = null;
+    this.player.clearKeys();
+    this.weaponContainer.visible = !this.isSpectating;
+    if (spot) this.player.position.set(spot.x, spot.y, spot.z);
+    this.player.velocity.set(0, 0, 0);
+    this.applyJeeps(this.localJeeps);
+  }
+
+  /** Drive the local jeep with the server's handling numbers, so Beta corners and
+   *  accelerates the same offline as it does online. */
+  private updateLocalJeeps(dt: number): void {
+    if (this.localJeeps.length === 0) return;
+    const driverId = this.localPlayerId ?? 'local-player';
+    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
+    if (!jeep) return;
+    if (this.player.isDead || this.isSpectating) {
+      // Dying or spectating at the wheel leaves the jeep parked instead of
+      // pinning the respawned player back into it, like the server's force exit.
+      jeep.driverId = null;
+      jeep.speed = 0;
+      this.player.clearKeys();
+      this.applyJeeps(this.localJeeps);
+      return;
+    }
+    const step = Math.min(dt, 0.05);
+    const spec = vehicleSpec(jeep.kind);
+    const throttle = (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0);
+    const steering = (this.player.hasKey('KeyA') ? 1 : 0) - (this.player.hasKey('KeyD') ? 1 : 0);
+    const targetSpeed = this.jeepBrake ? 0 : throttle * (throttle < 0 ? spec.reverseSpeed : spec.topSpeed);
+    jeep.speed += Math.max(-spec.acceleration * step, Math.min(spec.acceleration * step, targetSpeed - jeep.speed));
+    const turn = steering * Math.min(Math.abs(jeep.speed) / spec.fullTurnSpeed, 1) * (jeep.speed < 0 ? -1 : 1) * spec.turnRate * step;
+    const yaw = jeep.yaw + turn;
+    const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
+    const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
+    const y = this.world.getGroundHeight(x, z);
+    jeep.yaw = yaw;
+    if (this.localJeepClear(x, y, z, yaw, jeep.id)) {
+      jeep.position = { x, y, z };
+    } else {
+      // A wall or a drop stops the jeep instead of letting it slide through.
+      jeep.speed = 0;
+    }
+    this.player.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+    this.player.velocity.set(0, 0, 0);
+    this.localJeepSync += dt;
+    if (this.localJeepSync >= 0.1) {
+      this.localJeepSync = 0;
+      this.applyJeeps(this.localJeeps);
+    }
+  }
+
+  /** E at the workshop offline: carry mined blocks into team stock, as online. */
+  private depositToLocalWorkshop(): void {
+    if (!this.workshops) return;
+    const workshop = this.workshops[this.playerTeam];
+    const moved = Math.min(this.inventory, Math.max(0, workshop.capacity - workshop.stock));
+    if (moved <= 0) { this.showMessage('🏭 Workshop is full'); return; }
+    this.inventory -= moved;
+    workshop.stock += moved;
+    this.showMessage(`🏭 Deposited ${moved} blocks · team stock ${workshop.stock}/${workshop.capacity}`);
   }
 
   private getSafeSpawnPos(team: Team): THREE.Vector3 {
@@ -2699,14 +2879,13 @@ export class Game {
   private fallBackToLocalMatch(): void {
     if (this.gameMode !== 'online') return; // already local — nothing to undo
     // Beta with a server that never answered plays its bot match instead of
-    // retrying forever. Vehicles and workshops are server-only, so say that
-    // rather than silently dropping them.
+    // retrying forever, with the local workshop and jeeps so nothing is missing.
     if (this.betaLabel) {
       console.warn('Beta server unreachable — starting a local bot match');
       this.networkClient?.disconnect();
       this.networkClient = null;
       this.startLocalMatch();
-      this.showMessage('⚠️ Beta server unreachable — playing a local bot match against bots. Workshops and vehicles need a game server.');
+      this.showMessage('⚠️ Beta server unreachable — local bot match with your workshop and jeeps (G build, F board).');
       return;
     }
     console.warn('No game server reachable — falling back to a local bot match');
@@ -2721,10 +2900,14 @@ export class Game {
   private startLocalMatch(): void {
     this.gameMode = 'multiplayer';
     this.player.serverAuthoritativeRespawn = false;
+    // Beta is the workshop/vehicle test bed, so an offline match owns both: the
+    // client builds the sites the server would describe and drives its own jeeps.
+    this.localPlayerId = this.localPlayerId ?? 'local-player';
+    if (this.betaLabel) this.startLocalWorkshops();
     this.spawnTeamBots('blue', 6);
     this.spawnTeamBots('red', 7);
     if (this.betaLabel) {
-      this.showMessage('🧪 Beta offline — bot match. Workshops and vehicles need a game server (?server=wss://…).');
+      this.showMessage('🧪 Beta offline — bot match. Build a jeep at your workshop with G, board with F.');
     }
   }
 
@@ -3358,16 +3541,23 @@ export class Game {
       return; // Do NOT pass input to player
     }
 
-    if (this.gameMode === 'online' && !this.player.isDead && !e.repeat && e.code === 'KeyF') {
-      if (this.drivingJeepId) this.networkClient?.send({ type: 'exitJeep' });
-      else if (this.mountedEmplacementId) this.networkClient?.send({ type: 'dismountEmplacement' });
-      else {
-        const nest = this.nearbyMannableEmplacement();
-        if (nest) this.networkClient?.send({ type: 'mountEmplacement', emplacementId: nest.id });
+    if (!this.player.isDead && !e.repeat && e.code === 'KeyF') {
+      if (this.gameMode === 'online') {
+        if (this.drivingJeepId) this.networkClient?.send({ type: 'exitJeep' });
+        else if (this.mountedEmplacementId) this.networkClient?.send({ type: 'dismountEmplacement' });
         else {
-          const jeep = this.nearestJeep();
-          if (jeep) this.networkClient?.send({ type: 'enterJeep', vehicleId: jeep.id });
+          const nest = this.nearbyMannableEmplacement();
+          if (nest) this.networkClient?.send({ type: 'mountEmplacement', emplacementId: nest.id });
+          else {
+            const jeep = this.nearestJeep();
+            if (jeep) this.networkClient?.send({ type: 'enterJeep', vehicleId: jeep.id });
+          }
         }
+      } else if (this.drivingJeepId) {
+        this.exitLocalJeep();
+      } else {
+        const jeep = this.nearestJeep();
+        if (jeep) this.enterLocalJeep(jeep);
       }
       return;
     }
@@ -3375,22 +3565,31 @@ export class Game {
       if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code)) { e.preventDefault(); if (e.code !== 'Space') this.player.handleKeyDown(e.code); else this.jeepBrake = true; }
       return;
     }
-    if (e.code === 'KeyG' && !e.repeat && this.gameMode === 'online' && !this.player.isDead && this.workshops) {
+    if (e.code === 'KeyG' && !e.repeat && !this.player.isDead && this.workshops) {
       const pos = this.workshops[this.playerTeam].position;
-      if (this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH) this.networkClient?.send({ type: 'buildJeep' });
-      else {
-        const crate = this.nearbySupplyCrate();
-        if (crate) this.networkClient?.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'draw' });
+      const atWorkshop = this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH;
+      if (this.gameMode === 'online') {
+        if (atWorkshop) this.networkClient?.send({ type: 'buildJeep' });
+        else {
+          const crate = this.nearbySupplyCrate();
+          if (crate) this.networkClient?.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'draw' });
+        }
+      } else if (atWorkshop) {
+        this.buildLocalJeep();
       }
       return;
     }
-    if (e.code === 'KeyE' && !e.repeat && this.gameMode === 'online' && !this.player.isDead && this.workshops) {
+    if (e.code === 'KeyE' && !e.repeat && !this.player.isDead && this.workshops) {
       const pos = this.workshops[this.playerTeam].position;
-      if (this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH) {
-        this.networkClient?.send({ type: 'depositWorkshop', team: this.playerTeam });
-      } else {
-        const crate = this.nearbySupplyCrate();
-        if (crate) this.networkClient?.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'deposit' });
+      const atWorkshop = this.player.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z)) <= WORKSHOP_REACH;
+      if (this.gameMode === 'online') {
+        if (atWorkshop) this.networkClient?.send({ type: 'depositWorkshop', team: this.playerTeam });
+        else {
+          const crate = this.nearbySupplyCrate();
+          if (crate) this.networkClient?.send({ type: 'useSupplyCrate', emplacementId: crate.id, action: 'deposit' });
+        }
+      } else if (atWorkshop) {
+        this.depositToLocalWorkshop();
       }
       return;
     }
@@ -4350,6 +4549,8 @@ export class Game {
       if (nest) this.player.position.set(nest.position.x, nest.position.y, nest.position.z);
       this.player.velocity.set(0, 0, 0);
     } else this.player.update(dt);
+    // Offline matches drive their own jeeps; a connected server stays the owner.
+    if (this.gameMode !== 'online') this.updateLocalJeeps(dt);
     for (const { state, mesh } of this.jeeps.values()) {
       mesh.position.lerp(new THREE.Vector3(state.position.x, state.position.y, state.position.z), Math.min(dt * 14, 1));
       const delta = Math.atan2(Math.sin(state.yaw - mesh.rotation.y), Math.cos(state.yaw - mesh.rotation.y));
