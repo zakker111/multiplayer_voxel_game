@@ -95,21 +95,21 @@ These are starting choices for playtesting, not final balance numbers.
 
 **Emplacements**
 
-- [ ] **MG nest / sentry** — sandbagged heavy MG. 70 blocks, 300 HP, 2 per team, 180° arc, 200 rounds, manned with `F`. Uses the existing hitscan; the server picks targets. AI control only after manned behaviour is proven fun.
-- [ ] **Cannon** — direct-fire anti-vehicle gun. 90 blocks, 350 HP, 1 per team, narrow arc, 10 shells, slow reload, small splash. Needs the projectile work below.
-- [ ] **Mortar** — indirect fire. 80 blocks, 250 HP, 1 per team, 25–120 m range, 6 shells, arcing shell with a visible impact warning and a reload the enemy can hear.
-- [ ] **Supply crate** — 20 blocks, 150 HP, 3 per team, forward stockpile teammates can deposit into and draw from, so a squad does not shuttle to base every trip.
+- [x] **MG nest / sentry** — sandbagged heavy MG. 70 blocks, 300 HP, 2 per team, 180° arc, 200 rounds, manned with `F`. Uses the existing hitscan; the server picks targets. Bots build, man and fire it in Beta rounds too.
+- [x] **Cannon** — direct-fire anti-vehicle gun. 90 blocks, 350 HP, 1 per team, narrow arc, 10 shells, slow reload, small splash. Needs the projectile work below.
+- [x] **Mortar** — indirect fire. 80 blocks, 250 HP, 1 per team, 25–120 m range, 6 shells, arcing shell with a visible impact warning and a reload the enemy can hear.
+- [x] **Supply crate** — 20 blocks, 150 HP, 3 per team, forward stockpile teammates can deposit into and draw from, so a squad does not shuttle to base every trip.
 - [ ] **Spotting post** — 40 blocks, 200 HP, 1 per team, a tower whose radius marks enemies on the owning team's HUD. Counts as a structure, not a seat.
 
 **Shared work**
 
 - [x] Put every emplacement kind in one data table (cost, HP, team limit, footprint, arc, ammo, range) the way `VEHICLES` now works for vehicles.
-- [x] Server-side placement: ground/clearance/bounds checks, enemy-base ring, per-team limits and cost charged only on success (`placeEmplacement`), with tests. UI and the validity reply are still to come.
-- [ ] Projectiles for cannon and mortar: server-stepped shells with travel time, collision against terrain, players and vehicles, and blast damage reusing `damageVoxel`.
-- [ ] Manning: `F` on an emplacement with the same occupancy and safe-exit rules as a jeep seat.
+- [x] Server-side placement: ground/clearance/bounds checks, enemy-base ring, per-team limits and cost charged only on success (`placeEmplacement`), with tests. The ghost preview and the server validity reply ship with it.
+- [x] Projectiles for cannon and mortar: server-stepped shells with travel time, collision against terrain, players and vehicles, and blast damage reusing `damageVoxel`.
+- [x] Manning: `F` on an emplacement with the same occupancy and safe-exit rules as a jeep seat.
 - [ ] Bot awareness: emplacements are obstacles for pathing and valid targets for `ENGAGE`; a manned nest must not be walked into.
-- [ ] Blueprint HUD and ghost meshes per kind, with the validity tint driven by the server reply.
-- [ ] Round reset clears emplacements and refunds nothing, matching vehicles.
+- [x] Blueprint HUD and ghost meshes per kind, with the validity tint driven by the server reply.
+- [x] Round reset clears emplacements and refunds nothing, matching vehicles.
 - [ ] Automated coverage: placement validation (charged exactly once, rejected placements free), per-team limits, arc/ammo/range, round cleanup, and a `PHASE=emplacements` probe pass over the real protocol.
 
 **Done when:** A player picks one of three blueprint slots, places each emplacement kind with the ghost, is charged exactly once, sees it survive, fire or supply as designed, watches it be destroyed, and finds it gone after a round reset — while a bot match still plays the objective and a nest or crate cannot camp a spawn.
