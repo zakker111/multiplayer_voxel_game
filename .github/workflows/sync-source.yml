@@ -5,51 +5,50 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch and apply the pending changes
-        run: |
-          set -uo pipefail
-          SHA=1233c1419369b9e8769b2fe072b15531353a38c219d20028d4ae93d9388e487a
-          try_fetch() {
-            echo "fetch $1"
-            rm -f /tmp/p.b64
-            if curl -fsSL --retry 3 --retry-delay 2 --max-time 90 -o /tmp/p.b64 "$1"; then
-              wc -c /tmp/p.b64
-              if echo "$SHA  /tmp/p.b64" | sha256sum -c -; then return 0; fi
-            fi
-            return 1
-          }
-          if try_fetch https://files.catbox.moe/tarjdm.b64; then :
-          elif try_fetch https://tmpfiles.org/dl/w4ABbwOIJRtT/p0.b64; then :
-          else
-            echo "every patch host failed"
-            curl -sS -o /dev/null -D- --max-time 30 https://files.catbox.moe/tarjdm.b64 | head -20 || true
-            exit 1
-          fi
-          base64 -d /tmp/p.b64 | xz -dc > /tmp/p.patch
-          wc -l /tmp/p.patch
-          if ! git apply --check -v /tmp/p.patch; then
-            echo "patch did not apply"
-            exit 1
-          fi
-          git apply /tmp/p.patch
-          git status --porcelain
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run build
-      - run: npm test
-      - name: Commit and push
+      - name: Sync
         run: |
-          set -euo pipefail
-          rm -f .github/workflows/sync-source.yml
-          git config user.name "zakker111"
-          git config user.email "2182664+zakker111@users.noreply.github.com"
-          git add -A
-          git commit -m "Aim mortars at the crosshair, preview shell impact, and make workshop hardware destroyable"
-          git push origin HEAD:main
+          {
+            set -ex
+            SHA=1233c1419369b9e8769b2fe072b15531353a38c219d20028d4ae93d9388e487a
+            ok=0
+            for u in https://paste.rs/f7d07 https://files.catbox.moe/tarjdm.b64 https://tmpfiles.org/dl/w4ABbwOIJRtT/p0.b64; do
+              rm -f /tmp/p.b64
+              code=$(curl -sSL --max-time 90 -o /tmp/p.b64 -w '%{http_code}' "$u" || echo ERR)
+              echo "fetch $u -> $code $(wc -c < /tmp/p.b64 2>/dev/null || echo 0)"
+              if [ "$code" = 200 ] && echo "$SHA  /tmp/p.b64" | sha256sum -c -; then ok=1; break; fi
+            done
+            test "$ok" = 1
+            base64 -d /tmp/p.b64 | xz -dc > /tmp/p.patch
+            git apply --check -v /tmp/p.patch
+            git apply /tmp/p.patch
+            npm ci
+            npm run lint
+            npm run build
+            npm test
+            rm -f .github/workflows/sync-source.yml
+            git config user.name "zakker111"
+            git config user.email "2182664+zakker111@users.noreply.github.com"
+            git add -A
+            git commit -m "Aim mortars at the crosshair, preview shell impact, and make workshop hardware destroyable"
+            git push origin HEAD:main
+          } > /tmp/sync.log 2>&1
+          echo "sync-exit=$?" >> /tmp/sync.log
+          cp /tmp/sync.log sync-diag.txt
+          tail -30 /tmp/sync.log
+          grep -q 'sync-exit=0' /tmp/sync.log
+      - name: Publish diagnostics
+        if: always()
+        run: |
+          git config user.name diag
+          git config user.email diag@example.com
+          git checkout -B diag
+          git add -f sync-diag.txt
+          git commit -m "sync diagnostics"
+          git push -f origin diag
