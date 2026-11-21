@@ -12,6 +12,15 @@ const EMPLACEMENT_LABELS: Record<EmplacementKind, string> = {
   spottingPost: 'Spotting post',
 };
 
+/** What each bench build is for, so the menu explains itself. */
+const BLUEPRINT_HINTS: Record<EmplacementKind, string> = {
+  mgNest: 'Belt-fed MG — hoses an area, wrecks light vehicles',
+  cannon: 'Direct fire — heavy splash, big crater',
+  mortar: 'Indirect fire — click where it should land',
+  supplyCrate: 'Forward block store for the squad',
+  spottingPost: 'Marks enemies for your whole team',
+};
+
 /** Round clock as m:ss (rounds are half an hour long, so no hour component). */
 function formatRoundClock(seconds: number): string {
   const total = Math.max(0, Math.floor(seconds));
@@ -1022,7 +1031,12 @@ function App() {
 
               {(gameMode === 'online' || gameMode === 'beta') && gameState.manningEmplacement && (
                 <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-sky-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
-                  {(gameState.manningKind ? EMPLACEMENT_LABELS[gameState.manningKind] : 'GUN').toUpperCase()} · {gameState.manningAmmo ?? 0} rounds · hold click to fire · move mouse to aim · F to step out
+                  {(gameState.manningKind ? EMPLACEMENT_LABELS[gameState.manningKind] : 'GUN').toUpperCase()} · {gameState.manningAmmo ?? 0} rounds ·{' '}
+                  {gameState.manningKind === 'mortar'
+                    ? 'aim the landing ring, click to fire · F to step out'
+                    : gameState.manningKind === 'cannon'
+                      ? 'look at the target, click to fire (heavy splash) · F to step out'
+                      : 'hold click to fire · move mouse to aim · F to step out'}
                 </div>
               )}
 
@@ -1077,8 +1091,17 @@ function App() {
                               ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
                               : 'border-gray-700 bg-gray-800/60 text-gray-500'
                           }`}
+                          title={crafted ? `Slot ready — press ${slot + 5} to place it` : `Empty slot ${slot + 1}`}
                         >
-                          Slot {slot + 1}: {crafted ? EMPLACEMENT_LABELS[crafted] : 'empty'}
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono text-[10px] text-sky-300">{slot + 5}</span>
+                            <span className="truncate">
+                              {crafted ? EMPLACEMENT_LABELS[crafted] : 'empty'}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 text-[10px] text-gray-400">
+                            {crafted ? 'ready to place' : 'craft below'}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1088,13 +1111,21 @@ function App() {
                         const spec = emplacementSpec(kind);
                         if (!spec) return null;
                         const affordable = gameState.workshopStock >= spec.cost;
+                        const slotHolding = gameState.blueprints.findIndex((entry) => entry === kind);
                         return (
-                          <div key={kind} className="flex items-center gap-3 rounded-lg bg-gray-800/70 px-3 py-2">
+                          <div key={kind} className="flex items-center gap-2 rounded-lg bg-gray-800/70 px-3 py-2">
                             <div className="min-w-0 flex-1">
-                              <div className="text-sm text-white">{EMPLACEMENT_LABELS[kind]}</div>
-                              <div className="text-xs text-gray-400">
-                                {spec.cost} blocks · {spec.maxHp} HP · max {spec.teamLimit} per team
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm text-white">{EMPLACEMENT_LABELS[kind]}</span>
+                                <span className={`text-xs font-mono ${affordable ? 'text-amber-300' : 'text-red-400'}`}>
+                                  {spec.cost}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-gray-400">{BLUEPRINT_HINTS[kind]}</div>
+                              <div className="text-[10px] text-gray-500">
+                                {spec.maxHp} HP · max {spec.teamLimit}/team
                                 {spec.ammo > 0 ? ` · ${spec.ammo} rounds` : ' · unarmed'}
+                                {spec.arc > 0 ? ` · ${Math.round((spec.arc * 180) / Math.PI)}° arc` : ''}
                               </div>
                             </div>
                             {[0, 1, 2].map((slot) => {
@@ -1109,24 +1140,44 @@ function App() {
                                   key={slot}
                                   type="button"
                                   aria-disabled={block !== null}
+                                  aria-label={`Craft ${EMPLACEMENT_LABELS[kind]} into slot ${slot + 1}`}
                                   title={
                                     block === 'taken'
                                       ? 'That slot already holds a blueprint'
                                       : block === 'stock'
                                         ? `Not enough team stock (needs ${spec.cost})`
-                                        : `Craft into slot ${slot + 1}`
+                                        : `Craft into slot ${slot + 1} (press ${slot + 5} to place)`
                                   }
                                   onClick={() => gameRef.current?.craftFromBench(kind, slot)}
-                                  className={`rounded-md border px-2 py-1 text-xs ${
+                                  className={`h-8 w-8 rounded-md border font-mono text-xs ${
                                     block
                                       ? 'cursor-pointer border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300'
                                       : 'border-sky-500/60 text-sky-200 hover:bg-sky-500/20'
                                   }`}
                                 >
-                                  {block === 'taken' ? '—' : `Slot ${slot + 1}`}
+                                  {block === 'taken' ? '—' : slot + 5}
                                 </button>
                               );
                             })}
+                            <button
+                              type="button"
+                              aria-disabled={!affordable || slotHolding !== -1}
+                              title={
+                                slotHolding !== -1
+                                  ? `Already crafted in slot ${slotHolding + 1}`
+                                  : affordable
+                                    ? 'Craft into the first free slot'
+                                    : `Not enough team stock (needs ${spec.cost})`
+                              }
+                              onClick={() => gameRef.current?.craftFromBenchNext(kind)}
+                              className={`rounded-md border px-2 py-1 text-xs ${
+                                affordable && slotHolding === -1
+                                  ? 'border-emerald-500/60 text-emerald-200 hover:bg-emerald-500/20'
+                                  : 'border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300'
+                              }`}
+                            >
+                              {slotHolding !== -1 ? `slot ${slotHolding + 1}` : 'Craft'}
+                            </button>
                           </div>
                         );
                       })}
@@ -1142,7 +1193,7 @@ function App() {
 
                     <div className="mt-4 flex items-center justify-between gap-3">
                       <div className="text-xs text-gray-500">
-                        B or Esc closes · craft costs come out of the team stockpile
+                        B or Esc closes · Craft fills the first free slot · press 5/6/7 in the field to place it
                       </div>
                       <button
                         type="button"

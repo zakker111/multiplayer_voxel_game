@@ -93,8 +93,10 @@ export interface BotGunContext {
   leave: (bot: ServerBot) => void;
   /** Point the gun at a world position (the server clamps it to the arc). */
   aim: (bot: ServerBot, point: Position) => void;
-  /** Fire one round if the belt has ammo and the reload is done. */
-  fire: (bot: ServerBot) => void;
+  /** Fire one round if the belt has ammo and the reload is done. `point` is the
+   *  ground the round should land on (the mortar needs it; the other guns aim
+   *  themselves from the seat). */
+  fire: (bot: ServerBot, point?: Position) => void;
 }
 
 export interface BotContext {
@@ -1092,7 +1094,7 @@ export class ServerBot extends ServerPlayer {
       this.aimTargetAt = t + TARGET_ACQUISITION_MIN + Math.random() * TARGET_ACQUISITION_VARIANCE;
     }
     if (t < this.aimTargetAt) return;
-    guns.fire(this);
+    guns.fire(this, aim);
   }
 
   private doBuild(ctx: BotContext, enemyFlag: { x: number; z: number }, t: number): void {

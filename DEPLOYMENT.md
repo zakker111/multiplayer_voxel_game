@@ -222,10 +222,23 @@ Before opening the game, confirm `/api/status` answers 200 with `"status":"onlin
 Or let the script do it: it checks the page and bundle, every `/api/status` field above, then opens a real WebSocket, joins, and re-checks that the roster counted the human and retired a bot:
 
 ```bash
-npm run verify:live -- https://your-app.onrender.com
+npm run build                       # freshness baseline
+npm run verify:live                 # the whole deployment: Pages + Render + the Beta link
+npm run verify:live -- https://your-app.onrender.com              # one origin, full server
+npm run verify:live -- https://<user>.github.io/<repo> --static   # one origin, no game server
 ```
 
-Expect `ALL CHECKS PASSED` and exit code 0 (it exits 1 on any failure, so it works as a post-deploy gate). Cold free instances can take ~1 minute to wake; set `WARMUP_MS=180000` for a slower one.
+With no URL it checks the shipped deployment in one pass, so a stale host fails the gate rather than needing three separate runs:
+
+1. **GitHub Pages** — page, mount point, bundle freshness.
+2. **Render** — page, bundle freshness, every `/api/status` field, then a real WebSocket join that proves the roster counted the human and retired a bot.
+3. **The authoritative Beta link** (`?mode=beta&server=wss://…&team=blue`) — that it names an explicit `wss://` server (`?mode=beta` alone silently runs Beta against the local client), that its page serves the current bundle, and that the named origin completes a handshake, `init`, join and ping.
+
+Override the hosts with `PAGES_URL` / `RENDER_URL` / `BETA_URL`. Expect `ALL CHECKS PASSED` and exit code 0 (it exits 1 on any failure, so it works as a post-deploy gate); a multi-host run also prints a bundle summary that marks a diverging host `STALE` next to the bundle it should be serving.
+
+The bundle check is a staleness gate: the host's HTML must name the same `assets/index-<hash>.js` your build just produced, and the served bytes must hash to the same sha256. Build first so `dist/index.html` supplies the expectation, or pass it explicitly with `EXPECTED_BUNDLE=assets/index-<hash>.js` (e.g. when checking from a machine without a build) — a mismatch fails with both bundle names, which is how an old Render or Pages deploy shows up instead of a silent pass. `--static` skips `/api/status` and the WebSocket for Pages, which has no backend.
+
+Cold free instances can take ~1 minute to wake; set `WARMUP_MS=180000` for a slower one.
 
 Checklist:
 1. Open the URL → main menu loads, terrain renders.

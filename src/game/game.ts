@@ -36,6 +36,7 @@ import {
   type RoundSnapshot,
   type RoundWinner,
 } from '../shared/types';
+import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc } from '../shared/ballistics';
 
 /** How long a killfeed row stays on screen. */
 const KILLFEED_SECONDS = 8;
@@ -528,6 +529,10 @@ export class Game {
   private emplacementFlashes = new Map<string, { until: number; color: THREE.Color }>();
   private mountedEmplacementId: string | null = null;
   private lastEmplacementFire = 0;
+  /** Predicted shell path and landing ring for the manned cannon/mortar. */
+  private shellPreviewLine: THREE.Line | null = null;
+  private shellPreviewMarker: THREE.Mesh | null = null;
+  private shellPreviewRadius = 0;
   /** Shells in flight, drawn from the same spawn/velocity/gravity the server
    *  uses so the round you see is the round that lands. */
   private shells = new Map<string, { mesh: THREE.Mesh; spawn: THREE.Vector3; velocity: THREE.Vector3; spawnedAt: number }>();
@@ -1690,16 +1695,20 @@ export class Game {
     if (emplacement.ammo <= 0) { this.showMessage('The nest is out of rounds'); return; }
     const last = this.localEmplacementFireAt.get(emplacement.id);
     if (last !== undefined && this.localTime - last < spec.fireInterval) return;
-    this.localEmplacementFireAt.set(emplacement.id, this.localTime);
-    emplacement.ammo -= 1;
 
     const pitch = Math.max(-EMPLACEMENT_MAX_PITCH, Math.min(EMPLACEMENT_MAX_PITCH, this.player.pitch));
     if (emplacement.kind === 'cannon' || emplacement.kind === 'mortar') {
-      this.fireLocalShell(emplacement, pitch);
+      const aim = emplacement.kind === 'mortar' ? this.shellAimPoint(spec, emplacement.position, emplacement.yaw) : null;
+      if (emplacement.kind === 'mortar' && !aim) { this.showMessage('Aim the mortar at the ground ahead'); return; }
+      this.localEmplacementFireAt.set(emplacement.id, this.localTime);
+      emplacement.ammo -= 1;
+      this.fireLocalShell(emplacement, pitch, aim);
       this.applyEmplacements(this.localEmplacements);
       return;
     }
 
+    this.localEmplacementFireAt.set(emplacement.id, this.localTime);
+    emplacement.ammo -= 1;
     this.fireNestRound(emplacement, pitch);
     this.applyEmplacements(this.localEmplacements);
   }
@@ -1766,6 +1775,29 @@ export class Game {
       ? candidates.reduce((nearest, candidate) => candidate.distance < nearest.distance ? candidate : nearest)
       : null;
 
+    // Vehicle bodywork stops a burst, exactly as it does on the server: a nest
+    // can wreck a jeep, and the jeep shields whoever is behind it.
+    let jeepHit: { jeep: JeepSnapshot; distance: number } | null = null;
+    for (const jeep of this.localJeeps) {
+      if (jeep.wreck || jeep.team === emplacement.team) continue;
+      const to = { x: jeep.position.x - origin.x, y: jeep.position.y + 1 - origin.y, z: jeep.position.z - origin.z };
+      const along = to.x * direction.x + to.y * direction.y + to.z * direction.z;
+      if (along <= 0 || along > maxDist) continue;
+      const perp = Math.hypot(
+        to.x - direction.x * along,
+        to.y - direction.y * along,
+        to.z - direction.z * along,
+      );
+      if (perp > 1.6) continue;
+      if (!jeepHit || along < jeepHit.distance) jeepHit = { jeep, distance: along };
+    }
+    if (jeepHit && (!best || jeepHit.distance <= best.distance)) {
+      this.createMuzzleFlash(muzzle, rayDir);
+      this.createBulletTracer(muzzle, rayDir, jeepHit.distance, 300);
+      this.damageLocalJeep(jeepHit.jeep, EMPLACEMENT_ROUND_DAMAGE);
+      return;
+    }
+
     const tracerDist = best ? best.distance : maxDist;
     this.createMuzzleFlash(muzzle, rayDir);
     this.createBulletTracer(muzzle, rayDir, tracerDist, 300);
@@ -1780,12 +1812,16 @@ export class Game {
     }
   }
 
-  /** Cannon rounds fly flat and fast; mortar rounds leave at 45 degrees so they
-   *  clear cover and drop on the far side, like the server's shells. */
-  private fireLocalShell(emplacement: EmplacementSnapshot, pitch: number): void {
-    const forward = { x: -Math.sin(emplacement.yaw), z: -Math.cos(emplacement.yaw) };
+  /** Cannon rounds fly flat and fast; mortar rounds are solved onto `aim` so
+   *  they drop exactly where the landing marker was drawn. */
+  private fireLocalShell(emplacement: EmplacementSnapshot, pitch: number, aim: Position | null = null): void {
     const isMortar = emplacement.kind === 'mortar';
-    const speed = isMortar ? 42 : 85;
+    if (isMortar && aim) {
+      // Face the shot: a mortar always points at what it is firing at.
+      emplacement.yaw = Math.atan2(-(aim.x - emplacement.position.x), -(aim.z - emplacement.position.z));
+    }
+    const forward = { x: -Math.sin(emplacement.yaw), z: -Math.cos(emplacement.yaw) };
+    const speed = isMortar ? MORTAR_SHELL_SPEED : CANNON_SHELL_SPEED;
     const launchPitch = isMortar ? Math.max(pitch, Math.PI / 4) : pitch;
     const cosPitch = Math.cos(launchPitch);
     // Leave from the barrel the player can see. The marker sits on the aiming
@@ -1805,11 +1841,16 @@ export class Game {
         emplacement.position.z + forward.z * fallback,
       );
     }
-    const velocity = new THREE.Vector3(
-      forward.x * speed * cosPitch,
-      Math.sin(launchPitch) * speed,
-      forward.z * speed * cosPitch,
-    );
+    const solved = isMortar && aim
+      ? ballisticVelocity(position, aim, MORTAR_SHELL_SPEED, EMPLACEMENT_SHELL_GRAVITY, 'high')
+      : null;
+    const velocity = solved
+      ? new THREE.Vector3(solved.x, solved.y, solved.z)
+      : new THREE.Vector3(
+        forward.x * speed * cosPitch,
+        Math.sin(launchPitch) * speed,
+        forward.z * speed * cosPitch,
+      );
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(isMortar ? 0.28 : 0.2, 8, 6),
       new THREE.MeshBasicMaterial({ color: isMortar ? 0x2b2b2b : 0x3a3a3a }),
@@ -1852,8 +1893,13 @@ export class Game {
       }
       const hitBuild = this.localEmplacements.find(e => e.team !== shell.team &&
         Math.hypot(e.position.x - shell.position.x, e.position.y + 0.8 - shell.position.y, e.position.z - shell.position.z) < 1.3);
+      // A shell stops on an enemy jeep's body, like the server's projectile: a
+      // direct hit is the difference between "scratched" and "wrecked".
+      const hitJeep = this.localJeeps.find(jeep => !jeep.wreck && jeep.team !== shell.team &&
+        Math.abs(shell.position.y - jeep.position.y) < 2.2 &&
+        Math.hypot(jeep.position.x - shell.position.x, jeep.position.z - shell.position.z) < Math.hypot(1.3, 2));
       const stale = this.localTime - shell.firedAt > 8;
-      if (shell.position.y > ground && !hitBot && !hitBuild && !stale) continue;
+      if (shell.position.y > ground && !hitBot && !hitBuild && !hitJeep && !stale) continue;
 
       const impact = shell.position.clone();
       impact.y = Math.max(ground, impact.y);
@@ -1882,6 +1928,38 @@ export class Game {
       if (distance > radius) continue;
       this.damageLocalBot(bot, Math.max(power * 0.25, power * (1 - distance / radius)), false);
     }
+    // Workshop hardware burns too: a shell that lands next to a jeep wrecks it,
+    // exactly like the authoritative server's blast.
+    for (const jeep of this.localJeeps) {
+      if (jeep.wreck || jeep.team === team) continue;
+      const distance = Math.hypot(jeep.position.x - impact.x, jeep.position.y + 1 - impact.y, jeep.position.z - impact.z);
+      if (distance > radius) continue;
+      this.damageLocalJeep(jeep, Math.max(power * 0.25, power * (1 - distance / radius)));
+    }
+  }
+
+  /** Damage a client-owned jeep. At zero HP it wrecks and puts its crew out. */
+  private damageLocalJeep(jeep: JeepSnapshot, damage: number): void {
+    if (jeep.wreck || damage <= 0) return;
+    jeep.hp = Math.max(0, jeep.hp - damage);
+    if (jeep.hp > 0) { this.applyJeeps(this.localJeeps); return; }
+
+    jeep.wreck = true;
+    jeep.speed = 0;
+    if (this.drivingJeepId === jeep.id) {
+      this.drivingJeepId = null;
+      this.player.clearKeys();
+      this.weaponContainer.visible = !this.isSpectating;
+    }
+    if (this.ridingJeepId === jeep.id) {
+      this.ridingJeepId = null;
+      this.weaponContainer.visible = !this.isSpectating;
+    }
+    jeep.driverId = null;
+    jeep.passengerId = null;
+    this.showMessage(`💥 ${jeep.team === 'blue' ? 'Blue' : 'Red'} jeep destroyed!`);
+    this.sounds.collapse();
+    this.applyJeeps(this.localJeeps);
   }
 
   /** Damage a build offline; a wrecked one takes its gunner down with it. */
@@ -3973,7 +4051,8 @@ export class Game {
         this.player.velocity.set(0, 0, 0);
         this.player.updateCamera();
       }
-      this.showMessage('🔫 Manning the MG nest · hold click to fire · F to step out');
+      const label = typeof msg.kind === 'string' ? (msg.kind === 'mgNest' ? 'MG nest' : msg.kind) : 'gun';
+      this.showMessage(`🔫 Manning the ${label} · hold click to fire · F to step out`);
     });
     this.networkClient.onMessage('emplacementExited', (msg: any) => {
       this.mountedEmplacementId = null;
@@ -4461,14 +4540,20 @@ export class Game {
     const spec = emplacementSpec(kind);
     if (!spec) return;
     this.blueprintIndex = index;
-    this.ghostYaw = 0;
+    // Armed builds start facing the enemy so a mortar never has to be spun
+    // around before it is useful; Q still nudges the facing.
+    const enemyFlag = this.playerTeam === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    this.ghostYaw = spec.arc > 0
+      ? Math.atan2(-(enemyFlag.x - this.player.position.x), -(enemyFlag.z - this.player.position.z))
+      : 0;
     this.ghostValid = false;
     this.ghostRequestedAt = 0;
     this.ghostMaterial = new THREE.MeshStandardMaterial({ color: 0xe04949, transparent: true, opacity: 0.45, depthWrite: false });
     this.ghost = this.createEmplacementMesh(kind, this.ghostMaterial);
     this.ghost.visible = false;
+    this.ghost.rotation.y = this.ghostYaw;
     this.scene.add(this.ghost);
-    this.showMessage(`🔧 ${spec.kind} blueprint in slot ${index + 1} · Q rotate · click place · right-click cancel`);
+    this.showMessage(`🔧 ${spec.kind} blueprint in slot ${index + 1} · aimed at the enemy · Q adjust · click place · right-click cancel`);
   }
 
   /** B at the bench opens the build menu. Opening it frees the cursor so the
@@ -4510,6 +4595,13 @@ export class Game {
     if (!this.benchOpen) { this.showBenchMessage('Stand at your blueprint bench to craft'); return; }
     if (this.gameMode !== 'online') { this.craftLocalBlueprint(kind, slot); return; }
     this.networkClient?.send({ type: 'craftBlueprint', kind, slot });
+  }
+
+  /** One-click bench path: craft into the first free slot. */
+  craftFromBenchNext(kind: EmplacementKind): void {
+    const slot = this.craftedSlots.findIndex((entry) => entry === null);
+    if (slot === -1) { this.showBenchMessage('All three slots are full — place one first'); return; }
+    this.craftFromBench(kind, slot);
   }
 
   /** The bench is Beta's (or an online server's) to show; offline Beta runs it
@@ -4707,7 +4799,169 @@ export class Game {
     if (now - this.lastEmplacementFire < 100) return;
     this.lastEmplacementFire = now;
     if (this.gameMode !== 'online') { this.fireLocalEmplacement(); return; }
+    // The mortar is indirect fire: name the ground point under the crosshair so
+    // the server lands the round where the trajectory marker says it will.
+    const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : null;
+    const spec = mounted ? emplacementSpec(mounted.kind) : undefined;
+    if (mounted?.kind === 'mortar' && spec) {
+      const target = this.shellAimPoint(spec, mounted.position, mounted.yaw);
+      if (!target) { this.showMessage('Aim the mortar at the ground ahead'); return; }
+      this.networkClient?.send({ type: 'fireEmplacement', target });
+      return;
+    }
     this.networkClient?.send({ type: 'fireEmplacement' });
+  }
+
+  /**
+   * Ground point under the crosshair, clamped into a weapon's range band.
+   *
+   * This is the point a mortar is solved to hit: the client sends it with the
+   * shot and draws the landing marker there, so no turret spinning is needed
+   * and the round lands where the player is looking.
+   */
+  private shellAimPoint(spec: EmplacementSpec, from: Position, fallbackYaw: number): Position | null {
+    const origin = this.player.camera.position.clone();
+    const direction = this.player.getAimDirection();
+    const hit = this.world.raycast(origin, direction, spec.maxRange);
+    let dx: number;
+    let dz: number;
+    if (hit) {
+      dx = hit.voxelPos.x + 0.5 - from.x;
+      dz = hit.voxelPos.z + 0.5 - from.z;
+    } else {
+      // No terrain under the crosshair (looking at the sky, or down the map):
+      // keep the shot on the battlefield at maximum range, using the horizontal
+      // look direction and falling back to the gun's own facing when the player
+      // is looking straight up or down.
+      let dirX = direction.x;
+      let dirZ = direction.z;
+      const horizontal = Math.hypot(dirX, dirZ);
+      if (horizontal < 0.2) {
+        dirX = -Math.sin(fallbackYaw);
+        dirZ = -Math.cos(fallbackYaw);
+      } else {
+        dirX /= horizontal;
+        dirZ /= horizontal;
+      }
+      dx = dirX * spec.maxRange;
+      dz = dirZ * spec.maxRange;
+    }
+    const flat = Math.hypot(dx, dz);
+    if (!Number.isFinite(flat) || flat < 1e-3) return null;
+
+    const capped = Math.min(Math.max(flat, spec.minRange), spec.maxRange);
+    const x = from.x + (dx / flat) * capped;
+    const z = from.z + (dz / flat) * capped;
+    if (Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) return null;
+    return { x, y: this.world.getGroundHeight(x, z), z };
+  }
+
+  /** Bodies and hardware a shell stops on, mirrored from the authoritative
+   *  projectile so the preview ring is where the round actually bursts. */
+  private shellPreviewBlocked(point: Position, team: Team): boolean {
+    const near = (x: number, y: number, z: number, radius: number) =>
+      Math.hypot(point.x - x, point.y - y, point.z - z) < radius;
+
+    for (const { state } of this.jeeps.values()) {
+      if (state.wreck || state.team === team) continue;
+      if (near(state.position.x, state.position.y + 1, state.position.z, 2.2)) return true;
+    }
+    for (const jeep of this.localJeeps) {
+      if (jeep.wreck || jeep.team === team) continue;
+      if (near(jeep.position.x, jeep.position.y + 1, jeep.position.z, 2.2)) return true;
+    }
+    for (const bot of this.bots) {
+      if (bot.isDead || bot.team === team) continue;
+      if (near(bot.position.x, bot.position.y + 1, bot.position.z, 1.0)) return true;
+    }
+    for (const remote of this.remotePlayers.values()) {
+      if (remote.state.isDead || remote.state.team === team) continue;
+      if (near(remote.mesh.position.x, remote.mesh.position.y + 1, remote.mesh.position.z, 0.9)) return true;
+    }
+    for (const emplacement of this.emplacedSnapshots.values()) {
+      if (emplacement.team === team) continue;
+      if (near(emplacement.position.x, emplacement.position.y + 0.8, emplacement.position.z, 1.4)) return true;
+    }
+    return false;
+  }
+
+  /** Draw (or refresh) the manned cannon/mortar arc and landing ring. */
+  private updateShellPreview(): void {
+    const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : null;
+    const kind = mounted?.kind;
+    const spec = mounted && (kind === 'cannon' || kind === 'mortar') ? emplacementSpec(kind) : undefined;
+    if (!mounted || !spec || !kind) { this.hideShellPreview(); return; }
+
+    const isMortar = kind === 'mortar';
+    const aim = isMortar ? this.shellAimPoint(spec, mounted.position, mounted.yaw) : null;
+    if (isMortar && !aim) { this.hideShellPreview(); return; }
+
+    const forward = { x: -Math.sin(mounted.yaw), z: -Math.cos(mounted.yaw) };
+    const muzzleOffset = isMortar ? 1.0 : 1.6;
+    const origin = {
+      x: mounted.position.x + forward.x * muzzleOffset,
+      y: mounted.position.y + 1.2,
+      z: mounted.position.z + forward.z * muzzleOffset,
+    };
+    const pitch = Math.max(-EMPLACEMENT_MAX_PITCH, Math.min(EMPLACEMENT_MAX_PITCH, this.player.pitch));
+    const cos = Math.cos(pitch);
+    const velocity = isMortar && aim
+      ? ballisticVelocity(origin, aim, MORTAR_SHELL_SPEED, EMPLACEMENT_SHELL_GRAVITY, 'high')
+      : {
+        x: forward.x * CANNON_SHELL_SPEED * cos,
+        y: Math.sin(pitch) * CANNON_SHELL_SPEED,
+        z: forward.z * CANNON_SHELL_SPEED * cos,
+      };
+    if (!velocity) { this.hideShellPreview(); return; }
+
+    // Same integration and gravity the server steps shells with, so this line
+    // ends exactly where the round will land.
+    const arc = shellArc(origin, velocity, {
+      gravity: EMPLACEMENT_SHELL_GRAVITY,
+      // Small steps so a shell cannot tunnel through a 2m-wide body between
+      // samples: a cannon round covers 2.1m per 0.025s step at 85 m/s.
+      step: 0.025,
+      maxTime: 10,
+      groundAt: (x, z) => this.world.getGroundHeight(x, z),
+      solidAt: (point) => this.world.isSolid(Math.round(point.x), Math.round(point.y), Math.round(point.z)),
+      stopAt: (point) => this.shellPreviewBlocked(point, mounted.team),
+    });
+
+    if (!this.shellPreviewLine) {
+      const geometry = new THREE.BufferGeometry();
+      this.shellPreviewLine = new THREE.Line(
+        geometry,
+        new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.65, depthWrite: false }),
+      );
+      this.shellPreviewLine.frustumCulled = false;
+      this.scene.add(this.shellPreviewLine);
+    }
+    const positions: number[] = [];
+    for (const point of arc.points) positions.push(point.x, point.y, point.z);
+    const lineGeometry = this.shellPreviewLine.geometry as THREE.BufferGeometry;
+    lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    lineGeometry.computeBoundingSphere();
+
+    const radius = isMortar ? MORTAR_BLAST_RADIUS : CANNON_BLAST_RADIUS;
+    if (!this.shellPreviewMarker || this.shellPreviewRadius !== radius) {
+      if (this.shellPreviewMarker) {
+        this.scene.remove(this.shellPreviewMarker);
+        this.shellPreviewMarker.geometry.dispose();
+        (this.shellPreviewMarker.material as THREE.Material).dispose();
+      }
+      const material = new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false });
+      this.shellPreviewMarker = new THREE.Mesh(new THREE.RingGeometry(radius * 0.25, radius, 32), material);
+      this.shellPreviewMarker.rotation.x = -Math.PI / 2;
+      this.scene.add(this.shellPreviewMarker);
+      this.shellPreviewRadius = radius;
+    }
+    this.shellPreviewMarker.position.set(arc.impact.x, arc.impact.y + 0.07, arc.impact.z);
+    this.shellPreviewMarker.visible = true;
+  }
+
+  private hideShellPreview(): void {
+    if (this.shellPreviewLine) this.shellPreviewLine.visible = false;
+    if (this.shellPreviewMarker) this.shellPreviewMarker.visible = false;
   }
 
   /** A small bar hovering just above the build: full = hidden, empty = fully red. */
@@ -5389,6 +5643,36 @@ export class Game {
           }
         }
       }
+    }
+
+    // An enemy workshop jeep takes the round too, crewed or not: every build
+    // that comes out of the workshop is destructible in the offline Beta.
+    let hitLocalJeep: JeepSnapshot | null = null;
+    for (const jeep of this.localJeeps) {
+      if (jeep.wreck || jeep.team === this.playerTeam) continue;
+      const spec = vehicleSpec(jeep.kind);
+      const horizDirSq = dir.x * dir.x + dir.z * dir.z;
+      if (horizDirSq <= 0.0001) continue;
+      const dx = jeep.position.x - cameraPos.x;
+      const dz = jeep.position.z - cameraPos.z;
+      const t = (dx * dir.x + dz * dir.z) / horizDirSq;
+      if (t <= 0.3 || t >= closestTargetDist) continue;
+      const rayX = cameraPos.x + dir.x * t;
+      const rayY = cameraPos.y + dir.y * t;
+      const rayZ = cameraPos.z + dir.z * t;
+      if (Math.hypot(rayX - jeep.position.x, rayZ - jeep.position.z) > Math.hypot(spec.halfWidth, spec.halfLength)) continue;
+      const vertical = rayY - jeep.position.y;
+      if (vertical < -0.1 || vertical > spec.height + 0.2) continue;
+      hitLocalJeep = jeep;
+      closestTargetDist = t;
+      actualImpactPoint = new THREE.Vector3(rayX, rayY, rayZ);
+      hitBot = null; // the bodywork stopped the round before any body behind it
+    }
+    if (hitLocalJeep) {
+      this.damageLocalJeep(hitLocalJeep, weaponDamage(weapon, false, closestTargetDist));
+      this.hitMarkerTimer = 0.25;
+      this.sounds.hitMarker();
+      this.createImpactSparks(actualImpactPoint);
     }
 
     if (hitBot) {
@@ -6084,6 +6368,9 @@ export class Game {
       if (this.isSpectating || this.player.isDead || this.drivingJeepId) this.cancelBlueprint();
       else this.updateGhost();
     }
+    // A manned cannon/mortar draws its arc and landing ring every frame, so the
+    // marker follows the crosshair while the gunner aims.
+    this.updateShellPreview();
     this.world.update();
 
     // Continuous fire for SMG and tools while holding the LEFT mouse button.

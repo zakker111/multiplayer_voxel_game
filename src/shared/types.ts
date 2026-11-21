@@ -63,7 +63,9 @@ export type ClientMessage =
   | { type: 'craftBlueprint'; kind: EmplacementKind; slot: number }
   | { type: 'mountEmplacement'; emplacementId: string }
   | { type: 'dismountEmplacement' }
-  | { type: 'fireEmplacement' }
+  // `target` is the ground point a mortar should land on (the crosshair hit).
+  // The server validates the range and solves the arc itself.
+  | { type: 'fireEmplacement'; target?: Position }
   | { type: 'useSupplyCrate'; emplacementId: string; action: 'deposit' | 'draw' }
   | { type: 'join'; team: 'red' | 'blue'; position?: Position; name?: string }
   | { type: 'playerInput'; input: PlayerInput }
@@ -183,7 +185,7 @@ export type ServerMessage =
   | { type: 'emplacementDamaged'; emplacementId: string; damage: number; hp: number; maxHp: number }
   | { type: 'emplacementPreview'; ok: boolean; reason?: string; position?: Position; yaw?: number }
   | { type: 'emplacementMessage'; message: string }
-  | { type: 'emplacementMounted'; emplacementId: string; position: Position; yaw: number }
+  | { type: 'emplacementMounted'; emplacementId: string; kind?: EmplacementKind; position: Position; yaw: number }
   | { type: 'shellFired'; id: string; kind: EmplacementKind; position: Position; velocity: Position }
   | { type: 'shellImpact'; id: string; kind: EmplacementKind; position: Position; radius: number }
   | { type: 'emplacementExited'; position: Position }
@@ -387,11 +389,13 @@ export const EMPLACEMENT_FIRE_INTERVAL = 0.09;
 /** Gravity pulling cannon and mortar shells, shared so the client can draw the
  *  same arc the server simulates. */
 export const EMPLACEMENT_SHELL_GRAVITY = 18;
-/** Splash radius and the damage at the centre of a cannon round. */
-export const CANNON_BLAST_RADIUS = 4;
-export const CANNON_BLAST_DAMAGE = 70;
-/** Slower, heavier, wider: the mortar's trade for its arc and range. */
-export const MORTAR_BLAST_RADIUS = 6;
+/** Splash radius and the damage at the centre of a cannon round. A cannon is
+ *  the hard-hitting direct-fire build: anything inside its radius is hurt, and
+ *  a squad standing shoulder to shoulder loses most of its health. */
+export const CANNON_BLAST_RADIUS = 5.5;
+export const CANNON_BLAST_DAMAGE = 105;
+/** Wider splash, gentler centre: the mortar's trade for its arc and range. */
+export const MORTAR_BLAST_RADIUS = 6.5;
 export const MORTAR_BLAST_DAMAGE = 90;
 /** Damage one MG nest round does to a body. */
 export const EMPLACEMENT_ROUND_DAMAGE = 30;

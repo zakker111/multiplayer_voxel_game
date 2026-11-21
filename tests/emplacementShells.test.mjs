@@ -256,6 +256,84 @@ test('the mortar lobs on a high arc, slower than the cannon', () => {
   assert.equal(MORTAR_BLAST_RADIUS > CANNON_BLAST_RADIUS, true, 'the mortar splashes wider');
 });
 
+test('a mortar round lands where the gunner aimed, not in a fixed band', () => {
+  const game = new ServerGame();
+  const { gun, gunner } = manGun(game, 'mortar');
+  const enemy = join(game, 'red');
+  game.spawnProtectedUntil.delete(enemy.id);
+
+  // 70m down-range, on the same shelf as the gun.
+  const target = { x: gun.position.x + 70, y: gun.position.y, z: gun.position.z };
+  target.y = groundTop(game, target.x, target.z) ?? target.y;
+  enemy.player.position = { ...target };
+
+  gunner.frames.length = 0;
+  game.handleMessage(gunner.id, { type: 'fireEmplacement', target });
+  assert.equal(game.shells.size, 1, 'the round is in the air');
+
+  // The mortar turns to face the point it is firing at: no spinning needed.
+  const facing = Math.atan2(-(target.x - gun.position.x), -(target.z - gun.position.z));
+  const yawError = Math.atan2(Math.sin(gun.yaw - facing), Math.cos(gun.yaw - facing));
+  assert.ok(Math.abs(yawError) < 0.02, `the mortar faces its target (off by ${yawError.toFixed(3)} rad)`);
+
+  run(game, 8);
+
+  const impacts = gunner.frames.filter((f) => f.type === 'shellImpact');
+  assert.ok(impacts.length >= 1, 'the round came down');
+  const miss = Math.hypot(impacts[0].position.x - target.x, impacts[0].position.z - target.z);
+  assert.ok(miss < 2.5, `landed ${miss.toFixed(2)}m from the marked point`);
+  assert.ok(enemy.player.hp < 100, 'the enemy standing on the mark was caught by the splash');
+  assert.equal(
+    gunner.frames.some((f) => f.type === 'emplacementMessage' && /too close/i.test(f.message)),
+    false,
+    'a shot inside the range band is never refused',
+  );
+});
+
+test('a mortar refuses a point closer than its minimum range', () => {
+  const game = new ServerGame();
+  const { gun, gunner } = manGun(game, 'mortar');
+  const startAmmo = gun.ammo;
+
+  game.handleMessage(gunner.id, {
+    type: 'fireEmplacement',
+    target: { x: gun.position.x + 2, y: gun.position.y, z: gun.position.z },
+  });
+
+  assert.equal(gun.ammo, startAmmo, 'a refused shot costs no round');
+  assert.equal(game.shells.size, 0, 'and fires nothing');
+  assert.ok(
+    gunner.frames.some((f) => f.type === 'emplacementMessage' && /too close/i.test(f.message)),
+    'the gunner is told why',
+  );
+});
+
+test('a mortar shell wrecks a workshop-built jeep', () => {
+  const game = new ServerGame();
+  const { gun, gunner } = manGun(game, 'mortar', 'blue');
+  const red = join(game, 'red');
+  game.workshopStock.red = 200;
+  const workshop = game.getWorkshops().red.position;
+  red.player.position = { x: workshop.x, y: workshop.y, z: workshop.z };
+  game.handleMessage(red.id, { type: 'buildJeep' });
+  const jeep = [...game.jeeps.values()][0];
+  assert.ok(jeep, 'the jeep was built');
+
+  // Park it in the mortar's range band and shell it until it burns.
+  jeep.position = { x: gun.position.x + 40, y: gun.position.y, z: gun.position.z };
+  for (let shot = 0; shot < 5 && !jeep.wreck; shot++) {
+    if (shot > 0) game.world.updateTime(emplacementSpec('mortar').fireInterval + 0.1);
+    game.handleMessage(gunner.id, { type: 'fireEmplacement', target: { ...jeep.position } });
+    run(game, 8);
+  }
+
+  assert.ok(jeep.wreck, 'sustained mortar fire destroys a workshop vehicle');
+  assert.ok(
+    red.frames.some((f) => f.type === 'jeepsUpdated' && f.jeeps.some((j) => j.id === jeep.id && j.wreck)),
+    'clients are told the jeep is a wreck',
+  );
+});
+
 test('a cannon cannot fire twice inside its reload', () => {
   const game = new ServerGame();
   const { gun, gunner } = manGun(game, 'cannon');

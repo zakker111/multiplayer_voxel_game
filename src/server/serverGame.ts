@@ -65,6 +65,7 @@ import {
   type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
+import { MORTAR_SHELL_SPEED, ballisticVelocity } from '../shared/ballistics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -471,6 +472,7 @@ export class ServerGame {
     this.sendToPlayer(playerId, {
       type: 'emplacementMounted',
       emplacementId: emplacement.id,
+      kind: emplacement.kind,
       position: { ...seat },
       yaw: emplacement.yaw,
     });
@@ -536,7 +538,7 @@ export class ServerGame {
 
   /** Fire one round from the manned nest. Direction comes from the nest's own
    *  yaw and the gunner's pitch, never from the client's ray. */
-  private fireEmplacement(playerId: string): void {
+  private fireEmplacement(playerId: string, target?: unknown): void {
     const emplacement = this.gunnerEmplacement(playerId);
     const player = this.players.get(playerId);
     if (!emplacement || !player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
@@ -549,18 +551,30 @@ export class ServerGame {
     // silently blocked long reloads while the server clock was still near zero.
     const lastFire = this.emplacementFireAt.get(emplacement.id);
     if (lastFire !== undefined && now - lastFire < interval) return;
-    this.emplacementFireAt.set(emplacement.id, now);
-    emplacement.ammo -= 1;
 
-    const yaw = emplacement.yaw;
     const pitch = Math.max(-EMPLACEMENT_MAX_PITCH, Math.min(EMPLACEMENT_MAX_PITCH, player.rotation.pitch ?? 0));
 
     // Cannon and mortar lob a shell the whole server steps; only the nest is
     // hitscan, because a 200-round belt cannot be 200 projectiles.
     if (emplacement.kind === 'cannon' || emplacement.kind === 'mortar') {
-      this.fireShell(emplacement, player, yaw, pitch, spec);
+      // The mortar is indirect fire: the gunner names the ground point (their
+      // crosshair) and the server solves the arc. No turret spinning, and the
+      // landing marker the client drew is exactly where this round goes.
+      let aim: Position | null = null;
+      if (emplacement.kind === 'mortar') {
+        const solution = this.mortarAimPoint(emplacement, target);
+        if ('reason' in solution) return this.emplacementMessage(playerId, solution.reason);
+        aim = solution.point;
+      }
+      this.emplacementFireAt.set(emplacement.id, now);
+      emplacement.ammo -= 1;
+      this.fireShell(emplacement, player, emplacement.yaw, pitch, spec, aim);
       return;
     }
+
+    this.emplacementFireAt.set(emplacement.id, now);
+    emplacement.ammo -= 1;
+    const yaw = emplacement.yaw;
 
     // Every round walks off the aim line inside the nest's spread cone, so a
     // held trigger hoses an area instead of drilling one point.
@@ -620,25 +634,80 @@ export class ServerGame {
     }
   }
 
-  /** Put a shell in the air. Cannon rounds are flat and fast; mortar rounds go
-   *  up at 45 degrees so they clear cover and fall on the far side. */
-  private fireShell(emplacement: EmplacementSnapshot, player: ServerPlayer, yaw: number, pitch: number, spec: EmplacementSpec): void {
+  /**
+   * Where a mortar round should land. `target` is the ground point the gunner
+   * aimed at; without one (an old client, a bot that only aimed the seat) the
+   * shot falls along the gun's facing at maximum range.
+   *
+   * The shot is clamped into the mortar's range band and snapped to the ground,
+   * and the gun is turned to face it — a mortar is always pointed at the fight,
+   * so nobody has to spin the emplacement before firing.
+   */
+  private mortarAimPoint(
+    emplacement: EmplacementSnapshot, target: unknown,
+  ): { point: Position } | { reason: string } {
+    const spec = emplacementSpec('mortar');
+    if (!spec) return { reason: 'Unknown blueprint' };
+    const forward = { x: -Math.sin(emplacement.yaw), z: -Math.cos(emplacement.yaw) };
+    let point: Position;
+    if (isVec3(target)) {
+      point = { x: target.x, y: target.y, z: target.z };
+    } else {
+      point = {
+        x: emplacement.position.x + forward.x * spec.maxRange,
+        y: emplacement.position.y,
+        z: emplacement.position.z + forward.z * spec.maxRange,
+      };
+    }
+
+    const dx = point.x - emplacement.position.x;
+    const dz = point.z - emplacement.position.z;
+    const flat = Math.hypot(dx, dz);
+    if (!Number.isFinite(flat) || flat < 1e-3) return { reason: 'Aim somewhere ahead of the mortar' };
+    if (flat < spec.minRange) return { reason: `Too close for the mortar — ${Math.round(spec.minRange)}m minimum` };
+
+    const dirX = dx / flat;
+    const dirZ = dz / flat;
+    const capped = Math.min(flat, spec.maxRange);
+    const x = emplacement.position.x + dirX * capped;
+    const z = emplacement.position.z + dirZ * capped;
+    if (Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) return { reason: 'That is outside the map' };
+    const ground = surfaceGround(this.world, x, z, emplacement.position.y + 40) ?? emplacement.position.y;
+
+    // Face the shot: the model and every following round point at the fight.
+    emplacement.yaw = Math.atan2(-dirX, -dirZ);
+    return { point: { x, y: ground, z } };
+  }
+
+  /** Put a shell in the air. Cannon rounds are flat and fast; mortar rounds are
+   *  solved to land on `aim` (or lobbed at 45° when no aim point was given). */
+  private fireShell(
+    emplacement: EmplacementSnapshot,
+    player: ServerPlayer,
+    yaw: number,
+    pitch: number,
+    spec: EmplacementSpec,
+    aim: Position | null = null,
+  ): void {
     const forward = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
     const isMortar = emplacement.kind === 'mortar';
-    const speed = isMortar ? 42 : 85;
+    const speed = isMortar ? MORTAR_SHELL_SPEED : 85;
     const launchPitch = isMortar ? Math.max(pitch, Math.PI / 4) : pitch;
     const cosPitch = Math.cos(launchPitch);
-    const velocity = {
-      x: forward.x * speed * cosPitch,
-      y: Math.sin(launchPitch) * speed,
-      z: forward.z * speed * cosPitch,
-    };
     // Start clear of the barrel so the shell cannot explode on its own nest.
     const muzzle = isMortar ? 1.0 : 1.6;
     const position = {
       x: emplacement.position.x + forward.x * muzzle,
       y: emplacement.position.y + 1.2,
       z: emplacement.position.z + forward.z * muzzle,
+    };
+    const solved = isMortar && aim
+      ? ballisticVelocity(position, aim, MORTAR_SHELL_SPEED, EMPLACEMENT_SHELL_GRAVITY, 'high')
+      : null;
+    const velocity = solved ?? {
+      x: forward.x * speed * cosPitch,
+      y: Math.sin(launchPitch) * speed,
+      z: forward.z * speed * cosPitch,
     };
     const id = `shell_${++this.shellSequence}`;
     this.shells.set(id, {
@@ -1290,8 +1359,8 @@ export class ServerGame {
         bot.rotation.pitch = pitch;
         this.aimEmplacement(bot.id, yaw, pitch);
       },
-      fire: (bot) => {
-        this.fireEmplacement(bot.id);
+      fire: (bot, point) => {
+        this.fireEmplacement(bot.id, point);
       },
     };
   }
@@ -2456,7 +2525,7 @@ export class ServerGame {
         this.dismountEmplacement(playerId);
         break;
       case 'fireEmplacement':
-        this.fireEmplacement(playerId);
+        this.fireEmplacement(playerId, message.target);
         break;
       case 'enterJeep':
         this.enterJeep(playerId, message.vehicleId);
