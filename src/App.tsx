@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
 import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, emplacementSpec, type EmplacementKind } from './shared/types';
-import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX } from 'lucide-react';
+import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower } from 'lucide-react';
 
 /** HUD names for the bench blueprints; the shared table only carries numbers. */
 const EMPLACEMENT_LABELS: Record<EmplacementKind, string> = {
@@ -51,6 +51,7 @@ function App() {
     killfeed: [],
     damageIndicators: [],
     spotContacts: [],
+    spotPost: null,
     pingMs: 0,
     spawnProtected: false,
     audioMuted: false,
@@ -886,8 +887,27 @@ function App() {
                 </div>
               ))}
 
-              {/* Health */}
-              <div className="absolute bottom-8 left-8 z-10">
+              {/* Health and workshop share one bottom-left stack. They used to
+                  claim bottom-8/left-8 independently, so the workshop panel
+                  covered the health bar on narrow screens. */}
+              <div className="absolute bottom-8 left-8 z-10 flex flex-col items-start gap-2">
+                {(gameMode === 'online' || gameMode === 'beta') && gameState.workshopDistance !== null && (
+                  <div className="bg-gray-900/90 rounded-xl px-4 py-3 border border-amber-500/50 text-sm text-gray-200 max-w-xs">
+                    <div className="font-bold text-amber-300">{selectedTeam.toUpperCase()} WORKSHOP</div>
+                    <div>Team stock: {gameState.workshopStock} / {gameState.workshopCapacity}</div>
+                    <div>Carried mined blocks: {gameState.depositable}</div>
+                    <div className="text-xs text-gray-400 mt-1">
+                      {gameState.workshopDistance <= WORKSHOP_REACH
+                        ? 'Press E to deposit mined blocks'
+                        : `Workshop ${Math.round(gameState.workshopDistance)}m away · east of base`}
+                    </div>
+                    {gameState.workshopDistance <= WORKSHOP_REACH && (
+                      <div className="text-xs text-gray-400 mt-1 border-t border-gray-700 pt-1">
+                        Press G to build a jeep · {JEEP_COST} blocks (max {JEEP_TEAM_LIMIT} per team)
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="bg-gray-900/80 backdrop-blur-sm rounded-xl px-5 py-3 border-2 border-gray-700">
                   <div className="flex items-center gap-3">
                     <div className="w-32 h-3 bg-gray-700 rounded-full overflow-hidden">
@@ -953,8 +973,11 @@ function App() {
                 </div>
               )}
 
+              {/* Two steps above bottom-44: this clears the health/workshop
+                  stack below even with the workshop jeep prompt and spawn
+                  shield showing at once. */}
               {(gameMode === 'online' || gameMode === 'beta') && (
-                <div className="absolute bottom-44 left-8 z-10 w-64 bg-gray-900/90 backdrop-blur-sm rounded-xl px-4 py-3 border border-sky-500/50 text-sm text-gray-200">
+                <div className="absolute bottom-52 left-8 z-10 w-64 bg-gray-900/90 backdrop-blur-sm rounded-xl px-4 py-3 border border-sky-500/50 text-sm text-gray-200">
                   <div className="font-bold text-sky-300">BLUEPRINT BENCH</div>
                   <div className="mt-1 space-y-0.5">
                     {gameState.blueprints.map((crafted, index) => (
@@ -974,22 +997,24 @@ function App() {
                       ? 'Press B to open the bench'
                       : `Bench ${Math.round(gameState.benchDistance ?? 0)}m away`}
                   </div>
-                </div>
-              )}
-
-              {(gameMode === 'online' || gameMode === 'beta') && gameState.workshopDistance !== null && (
-                <div className="absolute bottom-8 left-8 z-10 bg-gray-900/90 rounded-xl px-4 py-3 border border-amber-500/50 text-sm text-gray-200 max-w-xs">
-                  <div className="font-bold text-amber-300">{selectedTeam.toUpperCase()} WORKSHOP</div>
-                  <div>Team stock: {gameState.workshopStock} / {gameState.workshopCapacity}</div>
-                  <div>Carried mined blocks: {gameState.depositable}</div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {gameState.workshopDistance <= WORKSHOP_REACH
-                      ? 'Press E to deposit mined blocks'
-                      : `Workshop ${Math.round(gameState.workshopDistance)}m away · east of base`}
-                  </div>
-                  {gameState.workshopDistance <= WORKSHOP_REACH && (
-                    <div className="text-xs text-gray-400 mt-1 border-t border-gray-700 pt-1">
-                      Press G to build a jeep · {JEEP_COST} blocks (max {JEEP_TEAM_LIMIT} per team)
+                  {gameState.spotPost && (
+                    <div
+                      className="mt-1 flex items-center gap-1.5 border-t border-gray-700 pt-1 text-[10px] font-bold uppercase tracking-wider text-emerald-300"
+                      title="Your team's spotting post is providing the contact markers"
+                    >
+                      <RadioTower className="h-3.5 w-3.5 shrink-0" />
+                      <span>Spotting coverage</span>
+                      <span className="ml-auto font-mono text-[11px] font-semibold normal-case tracking-normal text-gray-200">
+                        {gameState.spotPost.distance}m
+                      </span>
+                      <span
+                        className="inline-block text-[11px] leading-none"
+                        style={{ transform: `rotate(${gameState.spotPost.bearing}deg)` }}
+                        title={`Coverage bearing ${gameState.spotPost.bearing}°`}
+                        aria-hidden="true"
+                      >
+                        ▲
+                      </span>
                     </div>
                   )}
                 </div>

@@ -4,6 +4,7 @@ import { Player } from './player';
 import { vehicleClear, vehicleExitSpot, vehicleGround, type ClearanceBodies } from '../shared/vehiclePhysics';
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
+import { spotPostCoverage, type SpotPostCoverage } from '../shared/spotting';
 import { PlayerState, PlayerInput, Position, PlayerStats, Workshops, JeepSnapshot, WorkshopSnapshot } from '../shared/types';
 // Local copies previously drifted from the server (shared/types) values;
 // now sourced from the shared module so client and server agree on spawns/flags.
@@ -289,6 +290,8 @@ export interface GameState {
   damageIndicators: number[];
   /** Enemies currently inside a friendly spotting post's radius. */
   spotContacts: SpotMarker[];
+  /** This team's live spotting post, or null when it has none. */
+  spotPost: SpotPostCoverage | null;
   /** Round-trip latency in ms; 0 when offline or not measured yet. */
   pingMs: number;
   /** Spawn invulnerability is active right now. */
@@ -7920,6 +7923,15 @@ export class Game {
     return markers;
   }
 
+  private spotPostForHud(): SpotPostCoverage | null {
+    return spotPostCoverage(
+      this.gameMode === 'online' ? this.emplacedSnapshots.values() : this.localEmplacements,
+      this.playerTeam,
+      this.player.position,
+      this.player.getForward(),
+    );
+  }
+
   private emitState(): void {
     if (this.onStateChange) {
       const weapon = this.weapons[this.equipment];
@@ -8054,6 +8066,7 @@ export class Game {
         killfeed: this.killfeed,
         damageIndicators,
         spotContacts: this.spotContactsForHud(),
+        spotPost: this.spotPostForHud(),
         pingMs: this.pingMs,
         spawnProtected: this.spawnProtected,
         audioMuted: this.sounds.isMuted(),
