@@ -119,7 +119,7 @@ These are starting choices for playtesting, not final balance numbers.
 **Goal:** Make the workshop a shared team activity.
 
 - [x] Let engineer or logistics bots gather and deposit resources under the same server rules as humans.
-- [ ] Add a jeep passenger seat for bots and humans.
+- [x] Add a jeep passenger seat for bots and humans.
 - [ ] Make bots collect resources when supplies are low and request a jeep when it helps an attack, without wasting the entire team stockpile.
 - [ ] Show useful feedback such as low supplies, build progress and vehicle or emplacement availability.
 - [ ] Decide how teams recover from repeated vehicle losses without forcing repetitive mining.

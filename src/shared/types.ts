@@ -150,6 +150,8 @@ export interface JeepSnapshot {
   speed: number;
   hp: number;
   driverId: string | null;
+  /** Second seat: rides along, cannot steer, and leaves with the jeep. */
+  passengerId: string | null;
   wreck: boolean;
 }
 

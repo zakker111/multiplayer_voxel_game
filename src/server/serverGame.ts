@@ -209,15 +209,17 @@ export class ServerGame {
   private spotHadPost = { red: false, blue: false };
   private jeepSync = 0;
   private botJeepTasks = new Map<string, BotJeepTask>();
+  /** Bots riding shotgun, so the foot AI leaves their body to the jeep. */
+  private botRideTasks = new Map<string, { jeepId: string; since: number }>();
   private botJeepCooldown = new Map<string, number>();
   private botJeepVehicleCooldown = new Map<string, number>();
   private botLogisticsTasks = new Map<string, { target: Position | null; phase: 'gather' | 'return'; nextMineAt: number }>();
   /** Cumulative diagnostics used by the headless match measurement. */
-  readonly botJeepStats = { built: 0, entered: 0, arrived: 0, damagedExits: 0, recoveries: 0, abandoned: 0, humanYields: 0 };
+  readonly botJeepStats = { built: 0, entered: 0, arrived: 0, damagedExits: 0, recoveries: 0, abandoned: 0, humanYields: 0, passengerRides: 0 };
 
   private jeepSnapshots(): JeepSnapshot[] {
-    return [...this.jeeps.values()].map(({ id, kind, team, position, yaw, speed, hp, driverId, wreck }) =>
-      ({ id, kind, team, position: { ...position }, yaw, speed, hp, driverId, wreck }));
+    return [...this.jeeps.values()].map(({ id, kind, team, position, yaw, speed, hp, driverId, passengerId, wreck }) =>
+      ({ id, kind, team, position: { ...position }, yaw, speed, hp, driverId, passengerId, wreck }));
   }
 
   private broadcastJeeps(): void {
@@ -448,7 +450,7 @@ export class ServerGame {
   private mountEmplacement(playerId: string, emplacementId: unknown): void {
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating || typeof emplacementId !== 'string') return;
-    if (this.driverJeep(playerId) || this.gunnerEmplacement(playerId)) return;
+    if (this.jeepOf(playerId) || this.gunnerEmplacement(playerId)) return;
     if (player.carryingFlag) return this.emplacementMessage(playerId, 'Drop the flag before manning a nest');
     const emplacement = this.emplacements.get(emplacementId);
     if (!emplacement) return;
@@ -755,13 +757,30 @@ export class ServerGame {
   /** Ground, footprint and body collisions all come from the shared vehicle
    *  rules, so the offline client judges a jeep exactly the way this server
    *  does. The wrappers only hand the helpers this game's world and bodies. */
-  private jeepClear(position: Position, yaw: number, spec: Footprint, ignoreId?: string, ignorePlayerId?: string): boolean {
+  private jeepClear(position: Position, yaw: number, spec: Footprint, ignoreId?: string, ignorePlayerId?: string, ignorePlayerIds: string[] = []): boolean {
+    // Both seats sit inside the footprint, so both bodies must be ignored or
+    // the jeep collides with its own passengers and refuses to move.
+    const ignored = new Set<string>(ignorePlayerIds);
+    if (ignorePlayerId) ignored.add(ignorePlayerId);
+    const players = ignored.size > 0
+      ? [...this.players.values()].filter((p) => !ignored.has(p.id))
+      : this.players.values();
     return vehicleClear(this.world, position, yaw, spec, {
       vehicles: this.jeeps.values(),
-      players: this.players.values(),
+      players,
       ignoreVehicleId: ignoreId ?? null,
-      ignorePlayerId: ignorePlayerId ?? null,
+      ignorePlayerId: null,
     });
+  }
+
+  /** Which seat, if any, this player holds in a live jeep. */
+  private jeepOf(playerId: string): { jeep: ServerJeep; seat: 'driver' | 'passenger' } | undefined {
+    for (const jeep of this.jeeps.values()) {
+      if (jeep.wreck) continue;
+      if (jeep.driverId === playerId) return { jeep, seat: 'driver' };
+      if (jeep.passengerId === playerId) return { jeep, seat: 'passenger' };
+    }
+    return undefined;
   }
 
   private jeepGround(position: Position, yaw: number, spec: Footprint): number | null {
@@ -770,7 +789,7 @@ export class ServerGame {
 
   private buildJeep(playerId: string): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId) || this.roundPhase !== 'live') return;
+    if (!player || player.isDead || player.isSpectating || this.jeepOf(playerId) || this.roundPhase !== 'live') return;
     const workshop = this.getWorkshops()[player.team];
     if (Math.hypot(player.position.x - workshop.position.x, player.position.y - workshop.position.y, player.position.z - workshop.position.z) > WORKSHOP_REACH) return;
     const spec = vehicleSpec('jeep');
@@ -779,7 +798,7 @@ export class ServerGame {
     const position = { x: workshop.position.x + 11, y: workshop.position.y, z: workshop.position.z };
     const yaw = player.team === 'blue' ? Math.PI : 0;
     if (this.jeepGround(position, yaw, spec) === null || !this.jeepClear(position, yaw, spec)) return this.jeepMessage(playerId, 'Garage pad is blocked');
-    const jeep: ServerJeep = { id: `jeep_${++this.jeepSequence}`, kind: spec.kind, team: player.team, position, yaw, speed: 0, hp: spec.maxHp, driverId: null, wreck: false, throttle: 0, steering: 0, brake: false, lastInput: this.world.serverTime, wreckUntil: 0 };
+    const jeep: ServerJeep = { id: `jeep_${++this.jeepSequence}`, kind: spec.kind, team: player.team, position, yaw, speed: 0, hp: spec.maxHp, driverId: null, passengerId: null, wreck: false, throttle: 0, steering: 0, brake: false, lastInput: this.world.serverTime, wreckUntil: 0 };
     this.workshopStock[player.team] -= spec.cost;
     this.jeeps.set(jeep.id, jeep);
     this.broadcastWorkshops();
@@ -793,22 +812,30 @@ export class ServerGame {
 
   private enterJeep(playerId: string, vehicleId: unknown): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating || player.carryingFlag || this.blueFlagCarrier === playerId || this.redFlagCarrier === playerId || this.driverJeep(playerId) || typeof vehicleId !== 'string') return;
+    if (!player || player.isDead || player.isSpectating || player.carryingFlag || this.blueFlagCarrier === playerId || this.redFlagCarrier === playerId || this.jeepOf(playerId) || typeof vehicleId !== 'string') return;
     if (!(player instanceof ServerBot) && !this.joinedPlayers.has(playerId)) return;
     const jeep = this.jeeps.get(vehicleId);
     if (!jeep || jeep.wreck || jeep.team !== player.team || Math.hypot(player.position.x - jeep.position.x, player.position.y - jeep.position.y, player.position.z - jeep.position.z) > vehicleSpec(jeep.kind).enterReach) return;
-    if (jeep.driverId && !(player instanceof ServerBot)) {
+    if (jeep.driverId && !jeep.passengerId && !(player instanceof ServerBot)) {
       const occupant = this.players.get(jeep.driverId);
       const workshop = this.getWorkshops()[player.team].position;
       if (occupant instanceof ServerBot && Math.hypot(jeep.position.x - workshop.x, jeep.position.z - workshop.z) <= BOT_JEEP_HUMAN_PRIORITY_RADIUS && Math.abs(jeep.speed) < 1) {
         this.finishBotJeepTask(occupant, 'human');
       }
     }
-    if (jeep.driverId) return;
-    jeep.driverId = playerId;
-    jeep.lastInput = this.world.serverTime;
-    jeep.throttle = 0; jeep.steering = 0; jeep.brake = false; jeep.speed = 0;
+    // Empty jeep: the boarder drives. A driven jeep with the second seat free
+    // takes them as passenger; a full jeep turns them away.
+    const seat: 'driver' | 'passenger' | null = !jeep.driverId ? 'driver' : !jeep.passengerId ? 'passenger' : null;
+    if (!seat) return;
+    if (seat === 'driver') {
+      jeep.driverId = playerId;
+      jeep.lastInput = this.world.serverTime;
+      jeep.throttle = 0; jeep.steering = 0; jeep.brake = false; jeep.speed = 0;
+    } else {
+      jeep.passengerId = playerId;
+    }
     player.position = { ...jeep.position };
+    player.velocity = { x: 0, y: 0, z: 0 };
     this.clearSpawnProtection(playerId);
     this.broadcastJeeps();
   }
@@ -824,16 +851,25 @@ export class ServerGame {
   }
 
   private exitJeep(playerId: string, forced = false): boolean {
-    const jeep = this.driverJeep(playerId);
-    if (!jeep) return false;
+    const found = this.jeepOf(playerId);
+    if (!found) return false;
+    const { jeep, seat } = found;
     const player = this.players.get(playerId);
     const exit = this.safeJeepExit(jeep, playerId);
-    if (!exit && !forced) { this.jeepMessage(playerId, 'No safe exit: move the jeep first'); return false; }
-    jeep.driverId = null;
-    jeep.speed = 0;
-    jeep.throttle = 0;
+    if (!exit && !forced) { this.jeepMessage(playerId, 'No safe exit: stop the jeep in the open first'); return false; }
+    if (seat === 'driver') {
+      jeep.driverId = null;
+      jeep.speed = 0;
+      jeep.throttle = 0;
+      // Nobody rides a driverless jeep: the passenger is put out with the driver.
+      if (jeep.passengerId) this.exitJeep(jeep.passengerId, true);
+    } else {
+      jeep.passengerId = null;
+    }
+    this.botRideTasks.delete(playerId);
     if (player && !player.isDead) {
       player.position = exit ?? this.getSpawnPosition(player.team);
+      player.velocity = { x: 0, y: 0, z: 0 };
       this.sendToPlayer(playerId, { type: 'jeepExited', position: { ...player.position } });
       this.broadcast({ type: 'playerUpdated', playerId, state: player.getState() });
     }
@@ -849,6 +885,8 @@ export class ServerGame {
       if (jeep.wreck) { if (this.world.serverTime >= jeep.wreckUntil) { this.jeeps.delete(jeep.id); this.botJeepVehicleCooldown.delete(jeep.id); removed = true; } continue; }
       const driver = jeep.driverId ? this.players.get(jeep.driverId) : undefined;
       if (!driver || driver.isDead || driver.isSpectating) { if (jeep.driverId) this.exitJeep(jeep.driverId, true); continue; }
+      const passenger = jeep.passengerId ? this.players.get(jeep.passengerId) : undefined;
+      if (jeep.passengerId && (!passenger || passenger.isDead || passenger.isSpectating)) this.exitJeep(jeep.passengerId, true);
       if (this.world.serverTime - jeep.lastInput > 0.5) { jeep.throttle = 0; jeep.steering = 0; jeep.brake = true; }
       const spec = vehicleSpec(jeep.kind);
       const targetSpeed = jeep.brake ? 0 : jeep.throttle * (jeep.throttle < 0 ? spec.reverseSpeed : spec.topSpeed);
@@ -858,10 +896,15 @@ export class ServerGame {
       const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
       const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
       const y = this.jeepGround({ x, y: jeep.position.y, z }, yaw, spec);
-      if (y !== null && this.jeepClear({ x, y, z }, yaw, spec, jeep.id, driver.id)) {
+      if (y !== null && this.jeepClear({ x, y, z }, yaw, spec, jeep.id, driver.id, jeep.passengerId ? [jeep.passengerId] : [])) {
         jeep.position = { x, y, z }; jeep.yaw = yaw;
       } else jeep.speed = 0;
       driver.position = { ...jeep.position };
+      const seatedPassenger = jeep.passengerId ? this.players.get(jeep.passengerId) : undefined;
+      if (seatedPassenger && !seatedPassenger.isDead) {
+        seatedPassenger.position = { ...jeep.position };
+        seatedPassenger.velocity = { x: 0, y: 0, z: 0 };
+      }
     }
     this.jeepSync += dt;
     if (removed || this.jeepSync >= 0.1) { this.jeepSync = 0; this.broadcastJeeps(); }
@@ -872,6 +915,7 @@ export class ServerGame {
     jeep.hp = Math.max(0, jeep.hp - damage);
     if (jeep.hp === 0) {
       if (jeep.driverId) this.exitJeep(jeep.driverId, true);
+      else if (jeep.passengerId) this.exitJeep(jeep.passengerId, true);
       jeep.wreck = true; jeep.speed = 0; jeep.wreckUntil = this.world.serverTime + 4;
     }
     this.broadcastJeeps();
@@ -1404,7 +1448,7 @@ export class ServerGame {
     }
 
     this.clearSpawnProtection(botId);
-    const occupiedJeep = this.driverJeep(targetId);
+    const occupiedJeep = this.jeepOf(targetId)?.jeep;
     if (occupiedJeep) this.damageJeep(occupiedJeep, weaponDamage(weapon, false, dist));
     else this.applyDamage(targetId, damage, botId, isHeadshot);
   }
@@ -1788,7 +1832,7 @@ export class ServerGame {
       const target = available?.position ?? workshop;
       const candidates = [...this.players.values()].filter((p): p is ServerBot =>
         p instanceof ServerBot && p.team === team && p.roleName === 'assault' && !p.isEngineer && !p.isLogistics && !p.isDead && !p.isSpectating &&
-        !p.carryingFlag && !this.botJeepTasks.has(p.id) && this.world.serverTime >= (this.botJeepCooldown.get(p.id) ?? 0) &&
+        !p.carryingFlag && !this.botJeepTasks.has(p.id) && !this.jeepOf(p.id) && this.world.serverTime >= (this.botJeepCooldown.get(p.id) ?? 0) &&
         p.hp > p.maxHp * 0.5 && p.stateName !== 'TRENCH' && p.stateName !== 'BUILD' && p.stateName !== 'ESCORT' &&
         Math.hypot(p.position.x - target.x, p.position.z - target.z) < 90);
       candidates.sort((a, b) => Math.hypot(a.position.x - target.x, a.position.z - target.z) - Math.hypot(b.position.x - target.x, b.position.z - target.z));
@@ -1817,7 +1861,7 @@ export class ServerGame {
           const nx = x - Math.sin(yaw) * speed * 0.05;
           const nz = z - Math.cos(yaw) * speed * 0.05;
           const ground = this.jeepGround({ x: nx, y, z: nz }, yaw, vehicleSpec(jeep.kind));
-          if (ground === null || !this.jeepClear({ x: nx, y: ground, z: nz }, yaw, vehicleSpec(jeep.kind), jeep.id, jeep.driverId ?? undefined)) { blocked = true; break; }
+          if (ground === null || !this.jeepClear({ x: nx, y: ground, z: nz }, yaw, vehicleSpec(jeep.kind), jeep.id, jeep.driverId ?? undefined, jeep.passengerId ? [jeep.passengerId] : [])) { blocked = true; break; }
           travelled += Math.hypot(nx - x, nz - z);
           x = nx; y = ground; z = nz;
         }
@@ -1827,6 +1871,27 @@ export class ServerGame {
       }
     }
     return best;
+  }
+
+  /** A passing team jeep with a free second seat is a free ride to the fight.
+   *  Bots only hop in when someone else is driving, so they never displace a
+   *  driver or take a jeep out from under a human. */
+  private maybeBoardBotPassenger(bot: ServerBot): boolean {
+    if (this.roundPhase !== 'live' || bot.isDead || bot.isSpectating || bot.carryingFlag) return false;
+    if (bot.isEngineer || bot.isLogistics) return false;
+    if (this.botJeepTasks.has(bot.id) || this.botLogisticsTasks.has(bot.id) || this.botRideTasks.has(bot.id)) return false;
+    if (bot.hp <= bot.maxHp * 0.5 || bot.stateName.match(/^(TRENCH|BUILD|RETREAT|RETURN)$/)) return false;
+    const jeep = [...this.jeeps.values()].find(j => j.team === bot.team && !j.wreck && j.driverId && j.driverId !== bot.id &&
+      !j.passengerId && j.hp > vehicleSpec(j.kind).maxHp * 0.3 &&
+      Math.hypot(j.position.x - bot.position.x, j.position.y - bot.position.y, j.position.z - bot.position.z) <= vehicleSpec(j.kind).enterReach - 0.25);
+    if (!jeep) return false;
+    const driver = jeep.driverId ? this.players.get(jeep.driverId) : undefined;
+    if (!driver || driver.isDead || driver.isSpectating) return false;
+    this.enterJeep(bot.id, jeep.id);
+    if (jeep.passengerId !== bot.id) return false;
+    this.botRideTasks.set(bot.id, { jeepId: jeep.id, since: this.world.serverTime });
+    this.botJeepStats.passengerRides++;
+    return true;
   }
 
   private updateBotJeepTask(bot: ServerBot, ctx: BotContext): boolean {
@@ -1921,7 +1986,7 @@ export class ServerGame {
       if (active >= BOT_LOGISTICS_PER_TEAM || this.workshopStock[team] >= BOT_LOGISTICS_MIN_STOCK) continue;
       const candidate = [...this.players.values()].find((p): p is ServerBot =>
         p instanceof ServerBot && p.team === team && p.isLogistics && !p.isDead && !p.isSpectating &&
-        !p.carryingFlag && !this.botJeepTasks.has(p.id) && !this.botLogisticsTasks.has(p.id) &&
+        !p.carryingFlag && !this.botJeepTasks.has(p.id) && !this.botLogisticsTasks.has(p.id) && !this.jeepOf(p.id) &&
         !p.stateName.match(/^(TRENCH|BUILD|RETURN|RETREAT|ESCORT)$/),
       );
       if (candidate) this.botLogisticsTasks.set(candidate.id, { target: null, phase: 'gather', nextMineAt: 0 });
@@ -2024,7 +2089,7 @@ export class ServerGame {
     this.assignBotJeepTasks();
     for (const [id, player] of this.players) {
       if (!(player instanceof ServerBot)) continue;
-      if (player.isDead) { this.botJeepTasks.delete(id); this.botLogisticsTasks.delete(id); continue; }
+      if (player.isDead) { this.botJeepTasks.delete(id); this.botLogisticsTasks.delete(id); this.botRideTasks.delete(id); continue; }
       // A bot in a gun is run by the seat, not by the jeep/logistics tasks.
       if (this.gunnerEmplacement(id)) {
         this.botJeepTasks.delete(id);
@@ -2032,6 +2097,11 @@ export class ServerGame {
       } else {
         if (this.updateBotJeepTask(player, ctx)) continue;
         if (this.updateBotLogisticsTask(player, ctx)) continue;
+        // A passenger's body belongs to the jeep: updateJeeps positions it.
+        if (this.jeepOf(player.id)) continue;
+        if (this.maybeBoardBotPassenger(player)) continue;
+        const ride = this.botRideTasks.get(id);
+        if (ride && this.jeeps.get(ride.jeepId)?.passengerId !== id) this.botRideTasks.delete(id);
       }
       // Per-bot view of dropped flags belonging to its own team
       const own = ctx.friendlyDroppedFlagPos;
@@ -2353,7 +2423,7 @@ export class ServerGame {
         // Reject movement from dead players (prevents ghost position updates
         // while the respawn timer runs) and spectators (no world presence)
         if (message.input && typeof message.input === 'object'
-          && !player.isDead && !player.isSpectating && !this.driverJeep(playerId)) {
+          && !player.isDead && !player.isSpectating && !this.jeepOf(playerId)) {
           const pos = message.input.position;
           if (isVec3(pos) && [...this.jeeps.values()].some(jeep => {
             const spec = vehicleSpec(jeep.kind);
@@ -2480,7 +2550,7 @@ export class ServerGame {
         // the very first tick ("instant elimination on join" bug).
         {
           if (!player.isDead) {
-            if (this.driverJeep(playerId)) break;
+            if (this.jeepOf(playerId)) break;
             // Already alive: the server owns this player's position. Re-assert
             // it so a client that wrongly believes it died (e.g. a local
             // void-fall) recovers, but never teleport a live player back to
@@ -2814,7 +2884,7 @@ export class ServerGame {
 
   private handleUseTool(playerId: string, tool: 'pickaxe' | 'spade', target: Position): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
+    if (!player || player.isDead || player.isSpectating || this.jeepOf(playerId)) return;
 
     if ((tool !== 'pickaxe' && tool !== 'spade') || player.equipment !== tool) return;
     const { x, y, z } = target;
@@ -2914,7 +2984,7 @@ export class ServerGame {
 
   private handleBuild(playerId: string, position: Position): void {
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
+    if (!player || player.isDead || player.isSpectating || this.jeepOf(playerId)) return;
 
     const inventory = this.inventories.get(playerId) ?? 0;
     const depositable = this.depositableBlocks.get(playerId) ?? 0;
@@ -2958,7 +3028,7 @@ export class ServerGame {
   private handleFlagPickup(playerId: string): void {
     if (this.roundPhase !== 'live') return; // no objective play between rounds
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
+    if (!player || player.isDead || player.isSpectating || this.jeepOf(playerId)) return;
 
     // Check if player is already carrying a flag
     if (this.blueFlagCarrier === playerId || this.redFlagCarrier === playerId) {
@@ -3054,7 +3124,7 @@ export class ServerGame {
   private handleFlagCapture(playerId: string): void {
     if (this.roundPhase !== 'live') return; // clock already stopped this round
     const player = this.players.get(playerId);
-    if (!player || player.isDead || player.isSpectating || this.driverJeep(playerId)) return;
+    if (!player || player.isDead || player.isSpectating || this.jeepOf(playerId)) return;
 
     // Validation: only a LIVE player who is actually carrying the enemy flag
     // AND standing at their home base may score. This blocks malicious or
@@ -3227,7 +3297,7 @@ export class ServerGame {
     for (const player of this.players.values()) {
       if (player instanceof ServerBot) continue; // handled below via botUpdate
       player.update(dt, this.world);
-      if (this.driverJeep(player.id)) continue;
+      if (this.jeepOf(player.id)) continue;
       
       // Check and broadcast footstep sounds
       const footstepData = player.getFootstepData(this.world);
@@ -3306,7 +3376,7 @@ export class ServerGame {
   
   private checkFlagCaptures(): void {
     for (const [playerId, player] of this.players) {
-      if (player.isDead || player.isSpectating || this.driverJeep(playerId)) continue;
+      if (player.isDead || player.isSpectating || this.jeepOf(playerId)) continue;
 
       if (!player.carryingFlag) {
         // Auto-check flag pickup

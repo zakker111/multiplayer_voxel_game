@@ -31,7 +31,7 @@ function App() {
     benchMenuOpen: false, benchFeedback: '',
     manningEmplacement: false, manningKind: null, manningAmmo: null, emplacementNearby: false,
     crateNearby: false, crateStock: null,
-    jeepNearby: false, jeepDriving: false, jeepHp: 0, jeepSpeed: 0,
+    jeepNearby: false, jeepDriving: false, jeepRiding: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
     blueKills: 0, redKills: 0, blueCaptures: 0, redCaptures: 0, isAiming: false,
@@ -1013,11 +1013,13 @@ function App() {
                 </div>
               )}
 
-              {(gameMode === 'online' || gameMode === 'beta') && (gameState.jeepDriving || gameState.jeepNearby) && (
+              {(gameMode === 'online' || gameMode === 'beta') && (gameState.jeepDriving || gameState.jeepRiding || gameState.jeepNearby) && (
                 <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-amber-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
                   {gameState.jeepDriving
                     ? `JEEP ${Math.ceil(gameState.jeepHp)}/${JEEP_MAX_HP} HP · ${Math.round(Math.abs(gameState.jeepSpeed))} m/s · WASD drive · Space brake · F exit`
-                    : 'Press F to enter your team’s jeep (no flag carriers)'}
+                    : gameState.jeepRiding
+                    ? 'RIDING SHOTGUN · F exit'
+                    : 'Press F to board your team’s jeep (no flag carriers)'}
                 </div>
               )}
 

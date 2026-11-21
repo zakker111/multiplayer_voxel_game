@@ -238,6 +238,7 @@ export interface GameState {
   crateStock: number | null;
   jeepNearby: boolean;
   jeepDriving: boolean;
+  jeepRiding: boolean;
   jeepHp: number;
   jeepSpeed: number;
   isDead: boolean;
@@ -482,6 +483,8 @@ export class Game {
   private workshopMeshes: THREE.Group[] = [];
   private jeeps = new Map<string, { state: JeepSnapshot; mesh: THREE.Group }>();
   private drivingJeepId: string | null = null;
+  /** The jeep whose second seat this player is riding in, online or offline. */
+  private ridingJeepId: string | null = null;
   /** Client-owned vehicles for a local match. A connected server owns jeeps
    *  instead; offline Beta keeps the vehicle roadmap playable on the client with
    *  the same build/board/drive rules the server applies. */
@@ -984,7 +987,8 @@ export class Game {
         if (object instanceof THREE.Mesh && state.wreck) (object.material as THREE.MeshStandardMaterial).color.setHex(0x3b3b3b);
       });
     }
-    const occupied = new Set(states.map(state => state.driverId).filter((id): id is string => !!id));
+    const occupied = new Set([...states.map(state => state.driverId), ...states.map(state => state.passengerId)]
+      .filter((id): id is string => !!id));
     for (const [id, remote] of this.remotePlayers) remote.mesh.visible = !remote.state.isDead && !occupied.has(id);
     const driving = states.find(state => state.driverId === this.localPlayerId && !state.wreck);
     if (driving && this.drivingJeepId !== driving.id) {
@@ -998,13 +1002,23 @@ export class Game {
       this.player.clearKeys();
       this.weaponContainer.visible = !this.isSpectating;
     }
+    const riding = states.find(state => state.passengerId === this.localPlayerId && !state.wreck);
+    if (riding && this.ridingJeepId !== riding.id) {
+      this.ridingJeepId = riding.id;
+      this.player.clearKeys(); this.jeepBrake = false;
+      this.isLeftDown = false; this.isRightDown = false;
+    }
+    if (!riding && this.ridingJeepId) this.ridingJeepId = null;
   }
 
   private nearestJeep(): JeepSnapshot | null {
     let closest: JeepSnapshot | null = null;
     let distance = JEEP_ENTER_REACH;
     for (const { state } of this.jeeps.values()) {
-      if (state.team !== this.playerTeam || state.wreck || state.driverId) continue;
+      if (state.team !== this.playerTeam || state.wreck) continue;
+      // A driven jeep offers its free second seat; a full one offers nothing.
+      if (state.driverId && state.passengerId) continue;
+      if (state.driverId === this.localPlayerId || state.passengerId === this.localPlayerId) continue;
       const d = this.player.position.distanceTo(new THREE.Vector3(state.position.x, state.position.y, state.position.z));
       if (d < distance) { distance = d; closest = state; }
     }
@@ -1087,7 +1101,7 @@ export class Game {
     workshop.stock -= spec.cost;
     const jeep: JeepSnapshot = {
       id: `local_jeep_${++this.localJeepSeq}`,
-      kind: 'jeep', team, position: { x, y, z }, yaw, speed: 0, hp: spec.maxHp, driverId: null, wreck: false,
+      kind: 'jeep', team, position: { x, y, z }, yaw, speed: 0, hp: spec.maxHp, driverId: null, passengerId: null, wreck: false,
     };
     this.localJeeps.push(jeep);
     this.applyJeeps(this.localJeeps);
@@ -1096,16 +1110,14 @@ export class Game {
 
   /** Bodies the shared vehicle rules should account for in local play: every
    *  local jeep, the player's own capsule and each bot's body. */
-  private localVehicleBodies(ignoreVehicleId: string | null = null, ignorePlayerId: string | null = null): ClearanceBodies {
-    return {
-      vehicles: this.localJeeps,
-      players: [
-        { id: this.localPlayerId ?? 'local-player', position: this.player.position, isDead: this.player.isDead, isSpectating: this.isSpectating },
-        ...this.bots.map(bot => ({ id: bot.name, position: bot.position, isDead: bot.isDead })),
-      ],
-      ignoreVehicleId,
-      ignorePlayerId,
-    };
+  private localVehicleBodies(ignoreVehicleId: string | null = null, ignorePlayerId: string | null = null, ignorePlayerIds: string[] = []): ClearanceBodies {
+    const ignored = new Set<string>(ignorePlayerIds);
+    if (ignorePlayerId) ignored.add(ignorePlayerId);
+    const players = [
+      { id: this.localPlayerId ?? 'local-player', position: this.player.position, isDead: this.player.isDead, isSpectating: this.isSpectating },
+      ...this.bots.map(bot => ({ id: bot.name, position: bot.position, isDead: bot.isDead })),
+    ].filter(p => !ignored.has(p.id));
+    return { vehicles: this.localJeeps, players, ignoreVehicleId, ignorePlayerId: null };
   }
 
   /** Ground and footprint tests come from the shared vehicle rules, so the
@@ -1114,8 +1126,19 @@ export class Game {
     return vehicleGround(this.world, position, yaw, spec);
   }
 
-  private localJeepClear(position: Position, yaw: number, spec: Footprint, ignoreId: string | null, ignorePlayerId: string | null = null): boolean {
-    return vehicleClear(this.world, position, yaw, spec, this.localVehicleBodies(ignoreId, ignorePlayerId));
+  private localJeepClear(position: Position, yaw: number, spec: Footprint, ignoreId: string | null, ignorePlayerId: string | null = null, ignorePlayerIds: string[] = []): boolean {
+    return vehicleClear(this.world, position, yaw, spec, this.localVehicleBodies(ignoreId, ignorePlayerId, ignorePlayerIds));
+  }
+
+  /** Which seat, if any, the local player holds in a Beta jeep. */
+  private localSeat(): { jeep: JeepSnapshot; seat: 'driver' | 'passenger' } | null {
+    const id = this.localPlayerId ?? 'local-player';
+    for (const jeep of this.localJeeps) {
+      if (jeep.wreck) continue;
+      if (jeep.driverId === id) return { jeep, seat: 'driver' };
+      if (jeep.passengerId === id) return { jeep, seat: 'passenger' };
+    }
+    return null;
   }
 
   /** The same clearance test without infantry: voxels and other vehicles only,
@@ -1127,15 +1150,20 @@ export class Game {
 
   private enterLocalJeep(jeep: JeepSnapshot): void {
     const spec = vehicleSpec(jeep.kind);
-    if (jeep.wreck || jeep.driverId || jeep.team !== this.playerTeam) return;
+    if (jeep.wreck || jeep.team !== this.playerTeam) return;
+    if (jeep.driverId && jeep.passengerId) return;
+    if (this.localSeat()) return;
     if (this.player.carryingFlag) { this.showMessage('Drop the flag before boarding a jeep'); return; }
     if (Math.hypot(
       this.player.position.x - jeep.position.x,
       this.player.position.y - jeep.position.y,
       this.player.position.z - jeep.position.z,
     ) > spec.enterReach) return;
-    jeep.driverId = this.localPlayerId ?? 'local-player';
-    jeep.speed = 0;
+    const playerId = this.localPlayerId ?? 'local-player';
+    if (!jeep.driverId) {
+      jeep.driverId = playerId;
+      jeep.speed = 0;
+    } else jeep.passengerId = playerId;
     this.player.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
     this.player.velocity.set(0, 0, 0);
     this.applyJeeps(this.localJeeps);
@@ -1147,13 +1175,25 @@ export class Game {
   }
 
   private exitLocalJeep(): void {
-    const driverId = this.localPlayerId ?? 'local-player';
-    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
-    if (!jeep) return;
+    const found = this.localSeat();
+    if (!found) return;
+    const { jeep, seat } = found;
     const spot = this.localJeepExitSpot(jeep);
-    jeep.driverId = null;
-    jeep.speed = 0;
+    if (seat === 'driver') {
+      jeep.driverId = null;
+      jeep.speed = 0;
+      // The bot riding along gets out too: nobody is left in a driverless jeep.
+      const passenger = jeep.passengerId ? this.bots.find(bot => bot.name === jeep.passengerId) : undefined;
+      jeep.passengerId = null;
+      if (passenger) {
+        const passengerSpot = this.localJeepExitSpot(jeep, passenger.name);
+        passenger.mesh.visible = true;
+        if (passengerSpot) passenger.position.set(passengerSpot.x, passengerSpot.y, passengerSpot.z);
+        passenger.mesh.position.copy(passenger.position);
+      }
+    } else jeep.passengerId = null;
     this.drivingJeepId = null;
+    this.ridingJeepId = null;
     this.player.clearKeys();
     this.weaponContainer.visible = !this.isSpectating;
     if (spot) this.player.position.set(spot.x, spot.y, spot.z);
@@ -1173,7 +1213,7 @@ export class Game {
     const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
     const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
     const y = this.localJeepGround({ x, y: jeep.position.y, z }, yaw, spec);
-    if (y === null || !this.localJeepClear({ x, y, z }, yaw, spec, jeep.id, jeep.driverId)) {
+    if (y === null || !this.localJeepClear({ x, y, z }, yaw, spec, jeep.id, jeep.driverId, jeep.passengerId ? [jeep.passengerId] : [])) {
       // A wall or a drop stops the jeep instead of letting it slide through.
       // The yaw is only kept with a move that happened, as on the server: turning
       // a blocked jeep swings its long body into whatever is beside it, and that
@@ -1190,9 +1230,9 @@ export class Game {
    *  bots' errands, and the mesh sync. */
   private updateLocalVehicles(dt: number): void {
     this.localTime += dt;
-    const driverId = this.localPlayerId ?? 'local-player';
-    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
-    if (jeep) {
+    const seat = this.localSeat();
+    if (seat && seat.seat === 'driver') {
+      const jeep = seat.jeep;
       if (this.player.isDead || this.isSpectating) {
         // Dying or spectating at the wheel leaves the jeep parked instead of
         // pinning the respawned player back into it, like the server's exit.
@@ -1206,12 +1246,45 @@ export class Game {
         this.player.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
         this.player.velocity.set(0, 0, 0);
       }
+    } else if (seat && seat.seat === 'passenger') {
+      const jeep = seat.jeep;
+      if (this.player.isDead || this.isSpectating) jeep.passengerId = null;
+      else {
+        this.player.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+        this.player.velocity.set(0, 0, 0);
+      }
     }
+    this.updateLocalBotPassengers();
     this.localJeepSync += dt;
     if (this.localJeepSync >= 0.1) {
       this.localJeepSync = 0;
       this.assignBotJeepMissions();
       this.applyJeeps(this.localJeeps);
+    }
+  }
+
+  /** A passing team jeep with a free second seat picks up foot bots, and while
+   *  they ride their bodies are pinned to it like the server's passengers. */
+  private updateLocalBotPassengers(): void {
+    for (const jeep of this.localJeeps) {
+      if (jeep.passengerId && !jeep.driverId) { this.releaseLocalBotPassenger(jeep); continue; }
+      const passenger = jeep.passengerId ? this.bots.find(bot => bot.name === jeep.passengerId) : undefined;
+      if (passenger) {
+        if (passenger.isDead || jeep.wreck) { jeep.passengerId = null; passenger.mesh.visible = true; continue; }
+        passenger.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+        passenger.mesh.position.copy(passenger.position);
+      }
+      if (jeep.wreck || !jeep.driverId || jeep.passengerId) continue;
+      const spec = vehicleSpec(jeep.kind);
+      const rider = this.bots.find(bot => bot.team === jeep.team && !bot.isDead && !bot.carryingFlag &&
+        bot.name !== jeep.driverId && !this.localJeeps.some(v => v.passengerId === bot.name || v.driverId === bot.name) &&
+        Math.hypot(bot.position.x - jeep.position.x, bot.position.y - jeep.position.y, bot.position.z - jeep.position.z) <= spec.enterReach - 0.4);
+      if (rider) {
+        jeep.passengerId = rider.name;
+        rider.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+        rider.mesh.position.copy(rider.position);
+        rider.mesh.visible = false;
+      }
     }
   }
 
@@ -2209,7 +2282,7 @@ export class Game {
           const nx = x - Math.sin(yaw) * speed * step;
           const nz = z - Math.cos(yaw) * speed * step;
           const ny = this.localJeepGround({ x: nx, y, z: nz }, yaw, spec);
-          if (ny === null || !this.localJeepClear({ x: nx, y: ny, z: nz }, yaw, spec, jeep.id, jeep.driverId)) { blocked = true; break; }
+          if (ny === null || !this.localJeepClear({ x: nx, y: ny, z: nz }, yaw, spec, jeep.id, jeep.driverId, jeep.passengerId ? [jeep.passengerId] : [])) { blocked = true; break; }
           travelled += Math.hypot(nx - x, nz - z);
           x = nx; y = ny; z = nz;
         }
@@ -2221,12 +2294,28 @@ export class Game {
     return best;
   }
 
+  /** Put a bot passenger back on its feet beside the jeep. */
+  private releaseLocalBotPassenger(jeep: JeepSnapshot): void {
+    const id = jeep.passengerId;
+    if (!id) return;
+    jeep.passengerId = null;
+    const passenger = this.bots.find(bot => bot.name === id);
+    if (!passenger) return;
+    passenger.mesh.visible = true;
+    if (passenger.isDead) return;
+    const spot = this.localJeepExitSpot(jeep, id);
+    if (spot) passenger.position.set(spot.x, spot.y, spot.z);
+    else passenger.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+    passenger.mesh.position.copy(passenger.position);
+  }
+
   /** Finished at the enemy base: drop the bot beside the jeep and release it. */
   private exitBotJeep(bot: Bot, jeep: JeepSnapshot): void {
     const spot = this.localJeepExitSpot(jeep);
     if (!spot) return; // no room this frame; the errand ends next frame instead
     jeep.driverId = null;
     jeep.speed = 0;
+    this.releaseLocalBotPassenger(jeep);
     bot.mesh.visible = true;
     bot.position.set(spot.x, spot.y, spot.z);
     bot.mesh.position.copy(bot.position);
@@ -2244,6 +2333,7 @@ export class Game {
     if (jeep && jeep.driverId === bot.name) {
       jeep.driverId = null;
       jeep.speed = 0;
+      this.releaseLocalBotPassenger(jeep);
       // A live driver was hidden while riding; put it back beside its jeep so
       // the AI does not run an invisible bot for the rest of the round.
       if (!bot.isDead) {
@@ -2263,7 +2353,7 @@ export class Game {
    *  server jeeps soak damage for their driver. Returns the damage left over
    *  for the bot itself (nothing while it is riding). */
   private absorbJeepDamage(bot: Bot, damage: number): number {
-    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === bot.name && !vehicle.wreck);
+    const jeep = this.localJeeps.find(vehicle => !vehicle.wreck && (vehicle.driverId === bot.name || vehicle.passengerId === bot.name));
     if (!jeep) return damage;
     // Small arms glance off the bodywork of a moving jeep. Without this an
     // errand crossing the whole enemy team died about 200m short every time,
@@ -3927,6 +4017,7 @@ export class Game {
     });
     this.networkClient.onMessage('jeepExited', (msg: any) => {
       this.drivingJeepId = null;
+      this.ridingJeepId = null;
       this.player.clearKeys();
       this.weaponContainer.visible = !this.isSpectating;
       if (msg.position) {
@@ -4900,7 +4991,7 @@ export class Game {
 
     if (!this.player.isDead && !e.repeat && e.code === 'KeyF') {
       if (this.gameMode === 'online') {
-        if (this.drivingJeepId) this.networkClient?.send({ type: 'exitJeep' });
+        if (this.drivingJeepId || this.ridingJeepId) this.networkClient?.send({ type: 'exitJeep' });
         else if (this.mountedEmplacementId) this.networkClient?.send({ type: 'dismountEmplacement' });
         else {
           const nest = this.nearbyMannableEmplacement();
@@ -4910,7 +5001,7 @@ export class Game {
             if (jeep) this.networkClient?.send({ type: 'enterJeep', vehicleId: jeep.id });
           }
         }
-      } else if (this.drivingJeepId) {
+      } else if (this.drivingJeepId || this.ridingJeepId) {
         this.exitLocalJeep();
       } else if (this.mountedEmplacementId) {
         this.dismountLocalEmplacement();
@@ -4926,6 +5017,11 @@ export class Game {
     }
     if (this.drivingJeepId) {
       if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code)) { e.preventDefault(); if (e.code !== 'Space') this.player.handleKeyDown(e.code); else this.jeepBrake = true; }
+      return;
+    }
+    if (this.ridingJeepId) {
+      // The driver owns the controls; the passenger only looks around and fires.
+      if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code)) e.preventDefault();
       return;
     }
     if (e.code === 'KeyG' && !e.repeat && !this.player.isDead && this.workshops) {
@@ -5941,7 +6037,9 @@ export class Game {
     // The camera itself is chosen once, at the end of the frame (see the camera
     // chain below), so nothing has to guard against a later overwrite here.
     const driving = this.drivingJeepId ? this.jeeps.get(this.drivingJeepId) : undefined;
+    const riding = this.ridingJeepId ? this.jeeps.get(this.ridingJeepId) : undefined;
     const seatedJeep = driving && !this.isSpectating && !this.player.isDead ? driving : undefined;
+    const seatedPassenger = riding && !this.isSpectating && !this.player.isDead ? riding : undefined;
     if (seatedJeep) {
       const state = seatedJeep.state;
       this.player.position.set(state.position.x, state.position.y, state.position.z);
@@ -5951,6 +6049,12 @@ export class Game {
         this.lastDriveInput = now;
         this.networkClient?.send({ type: 'driveJeep', throttle: (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0), steering: (this.player.hasKey('KeyA') ? 1 : 0) - (this.player.hasKey('KeyD') ? 1 : 0), brake: this.jeepBrake });
       }
+    } else if (seatedPassenger) {
+      // Server jeeps pin the passenger to the vehicle too; follow the snapshot
+      // so the camera rides with it between state broadcasts.
+      const state = seatedPassenger.state;
+      this.player.position.set(state.position.x, state.position.y, state.position.z);
+      this.player.velocity.set(0, 0, 0);
     } else if (this.mountedEmplacementId) {
       // The server pins the gunner to the nest; mirror that locally so the
       // camera does not slide away from the gun while walking keys are held.
@@ -6539,8 +6643,19 @@ export class Game {
     for (let i = 0; i < this.bots.length; i++) {
       const bot = this.bots[i];
 
+      // Riding shotgun: the jeep owns the body, so the foot AI stays out.
+      const ride = this.localJeeps.find(vehicle => !vehicle.wreck && vehicle.passengerId === bot.name);
+      if (ride && !bot.isDead) {
+        bot.position.set(ride.position.x, ride.position.y, ride.position.z);
+        bot.mesh.position.copy(bot.position);
+        bot.mesh.visible = false;
+        continue;
+      }
+
       // Respawn handling
       if (bot.isDead) {
+        const passengerJeep = this.localJeeps.find(vehicle => vehicle.passengerId === bot.name);
+        if (passengerJeep) passengerJeep.passengerId = null;
         if (this.botJeepMissions.has(bot.name)) this.abandonBotJeepMission(bot);
         bot.respawnTimer -= dt;
         if (bot.respawnTimer <= 0) {
@@ -7871,6 +7986,7 @@ export class Game {
         workshopCapacity: this.workshops?.[this.playerTeam].capacity ?? 0,
         jeepNearby: !!this.nearestJeep(),
         jeepDriving: !!this.drivingJeepId,
+        jeepRiding: !!this.ridingJeepId,
         jeepHp: this.drivingJeepId ? (this.jeeps.get(this.drivingJeepId)?.state.hp ?? 0) : 0,
         jeepSpeed: this.drivingJeepId ? (this.jeeps.get(this.drivingJeepId)?.state.speed ?? 0) : 0,
         workshopDistance: this.workshops ? this.player.position.distanceTo(new THREE.Vector3(

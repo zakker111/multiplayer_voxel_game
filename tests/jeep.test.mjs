@@ -184,3 +184,124 @@ test('jeep construction, authority, terrain, exits, damage and lifecycle', () =>
   game.startNextRound();
   assert.equal(game.jeeps.size, 0, 'round reset removes jeeps');
 });
+
+test('the second seat is server-authoritative and keeps flag rules intact', () => {
+  const game = new ServerGame();
+  const frames = [], passengerFrames = [], thirdFrames = [], enemyFrames = [];
+  const driverId = game.addPlayer(conn(frames));
+  const passengerId = game.addPlayer(conn(passengerFrames));
+  const thirdId = game.addPlayer(conn(thirdFrames));
+  const enemyId = game.addPlayer(conn(enemyFrames));
+  game.handleMessage(driverId, { type: 'join', team: 'blue' });
+  game.handleMessage(passengerId, { type: 'join', team: 'blue' });
+  game.handleMessage(thirdId, { type: 'join', team: 'blue' });
+  game.handleMessage(enemyId, { type: 'join', team: 'red' });
+  const driver = game.players.get(driverId), passenger = game.players.get(passengerId);
+  const third = game.players.get(thirdId), enemy = game.players.get(enemyId);
+  driver.position = { ...game.getWorkshops().blue.position };
+  game.handleMessage(driverId, { type: 'buildJeep' });
+  const jeep = [...game.jeeps.values()][0];
+  assert.equal(jeep.passengerId, null);
+
+  driver.position = { ...jeep.position, x: jeep.position.x - 3 };
+  game.handleMessage(driverId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.driverId, driverId);
+
+  passenger.position = { ...jeep.position, x: jeep.position.x + 3 };
+  game.handleMessage(passengerId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.passengerId, passengerId, 'a second player takes the passenger seat');
+  assert.equal(game.jeepSnapshots()[0].passengerId, passengerId, 'snapshot carries the passenger');
+
+  // Full jeep and enemy boarders are turned away.
+  third.position = { ...jeep.position, z: jeep.position.z + 3 };
+  game.handleMessage(thirdId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.driverId, driverId);
+  assert.equal(jeep.passengerId, passengerId);
+  enemy.position = { ...jeep.position, x: jeep.position.x + 2 };
+  game.handleMessage(enemyId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.passengerId, passengerId, 'enemy cannot take the second seat');
+  enemy.position = { x: 0, y: 10, z: 0 };
+
+  // A passenger cannot drive, spoof position or pick up a flag.
+  game.handleMessage(passengerId, { type: 'driveJeep', throttle: 1, steering: 0, brake: false });
+  assert.equal(jeep.throttle, 0, 'passenger cannot drive');
+  passenger.position = { x: 0, y: 10, z: 0 };
+  game.update(0.05);
+  assert.deepEqual(passenger.position, jeep.position, 'passenger is server-positioned');
+  passenger.position = { ...RED_FLAG_POS, y: 10 };
+  game.handleMessage(passengerId, { type: 'pickupFlag' });
+  assert.equal(passenger.carryingFlag, false, 'passenger cannot pick up a flag');
+  passenger.position = { ...jeep.position };
+
+  // A blocked exit keeps the passenger seated; a clear one puts them out.
+  const savedExit = game.safeJeepExit.bind(game);
+  game.safeJeepExit = () => null;
+  game.handleMessage(passengerId, { type: 'exitJeep' });
+  assert.equal(jeep.passengerId, passengerId, 'blocked exit leaves the passenger seated');
+  game.safeJeepExit = savedExit;
+  passenger.position = { ...jeep.position };
+  game.handleMessage(passengerId, { type: 'exitJeep' });
+  assert.equal(jeep.passengerId, null);
+  assert.equal(jeep.driverId, driverId, 'passenger exit leaves the driver');
+  assert.ok(passengerFrames.some(frame => frame.type === 'jeepExited'));
+  assert.ok(Math.hypot(passenger.position.x - jeep.position.x, passenger.position.z - jeep.position.z) >= 2);
+
+  // Flag carriers may not board either seat.
+  passenger.position = { ...jeep.position, x: jeep.position.x + 3 };
+  passenger.carryingFlag = true;
+  game.handleMessage(passengerId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.passengerId, null, 'flag carrier cannot take the passenger seat');
+  passenger.carryingFlag = false;
+  game.handleMessage(passengerId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.passengerId, passengerId);
+
+  // The occupied footprint is ignored while driving: the jeep does not collide
+  // with the passenger sitting inside it.
+  third.position = { x: 0, y: 10, z: 0 };
+  const start = { ...jeep.position };
+  for (let i = 0; i < 10; i++) {
+    game.handleMessage(driverId, { type: 'driveJeep', throttle: 1, steering: 0, brake: false });
+    game.update(0.05);
+  }
+  assert.ok(Math.hypot(jeep.position.x - start.x, jeep.position.z - start.z) > 0.5, 'occupied jeep still drives');
+  assert.deepEqual(passenger.position, jeep.position);
+
+  // Driver leaving releases the passenger too: no driverless occupied jeep.
+  game.handleMessage(driverId, { type: 'exitJeep' });
+  assert.equal(jeep.driverId, null);
+  assert.equal(jeep.passengerId, null, 'driver exit releases the passenger');
+  assert.ok(passengerFrames.filter(frame => frame.type === 'jeepExited').length >= 2);
+});
+
+test('bots can take the passenger seat and leave with the driver', () => {
+  const game = new ServerGame();
+  const frames = [];
+  const driverId = game.addPlayer(conn(frames));
+  game.handleMessage(driverId, { type: 'join', team: 'blue' });
+  const driver = game.players.get(driverId);
+  driver.position = { ...game.getWorkshops().blue.position };
+  game.handleMessage(driverId, { type: 'buildJeep' });
+  const jeep = [...game.jeeps.values()][0];
+  game.workshopStock.blue = 0; // no second jeep errand to pull the rider away
+  driver.position = { ...jeep.position, x: jeep.position.x - 3 };
+  game.handleMessage(driverId, { type: 'enterJeep', vehicleId: jeep.id });
+
+  const squad = [];
+  for (let i = 0; i < 4; i++) squad.push(game.players.get(game.addBot('blue', `Passenger ${i}`)));
+  const rider = squad.find(bot => !bot.isEngineer && !bot.isLogistics);
+  assert.ok(rider, 'a line bot is available to ride');
+  rider.hp = rider.maxHp;
+  rider.position = { ...jeep.position, x: jeep.position.x + 2 };
+  assert.equal(game.maybeBoardBotPassenger(rider), true, 'a bot boards a driven jeep with a free seat');
+  assert.equal(jeep.passengerId, rider.id);
+  assert.equal(game.botJeepStats.passengerRides, 1);
+
+  rider.position = { x: 0, y: 10, z: 0 };
+  game.update(0.05);
+  assert.deepEqual(rider.position, jeep.position, 'riding bot is pinned to the jeep, not walked by its AI');
+
+  game.handleMessage(driverId, { type: 'exitJeep' });
+  assert.equal(jeep.driverId, null);
+  assert.equal(jeep.passengerId, null, 'bot passenger is released with the driver');
+  assert.ok(Math.hypot(rider.position.x - jeep.position.x, rider.position.z - jeep.position.z) >= 2);
+});
