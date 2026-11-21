@@ -35,3 +35,57 @@ jobs:
 
       - name: Run voxel gameplay tests
         run: npm test
+
+  beta-probe:
+    name: Beta protocol probe (PHASE=all)
+    runs-on: ubuntu-latest
+    # Drives the real HTTP/SSE/WS protocol the browser uses. The probe teleports
+    # on purpose (flag capture, workshop, jeep) so it needs a botless server with
+    # MOVE_VALIDATION=off, and a freshly started one: flag and round state
+    # persist between runs, so a reused process fails the CTF checks.
+    env:
+      PROBE_PORT: '3121'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Start a fresh botless server
+        run: |
+          nohup env NODE_ENV=production PORT="$PROBE_PORT" SERVER_BOT_COUNT=0 \
+            MOVE_VALIDATION=off node dist/server.cjs > beta-probe-server.log 2>&1 &
+          echo $! > beta-probe-server.pid
+          for attempt in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:$PROBE_PORT/api/status" > /dev/null; then
+              echo "server ready after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo '::error::server never answered /api/status'
+          cat beta-probe-server.log
+          exit 1
+
+      - name: Run Beta probe
+        run: BASE="http://127.0.0.1:$PROBE_PORT" PHASE=all node scripts/beta-probe.mjs
+
+      - name: Server log and cleanup
+        if: always()
+        run: |
+          cat beta-probe-server.log || true
+          if [ -f beta-probe-server.pid ]; then kill "$(cat beta-probe-server.pid)" || true; fi
