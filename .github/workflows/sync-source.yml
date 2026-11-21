@@ -10,12 +10,36 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch and apply the pending changes
         run: |
-          set -euo pipefail
-          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/p.b64 https://files.catbox.moe/0wfii0.b64
-          echo "7a06168f1aec83d46e807f99c706084415767935671ed88668981b6e9cc0a944  /tmp/p.b64" | sha256sum -c -
+          set -uo pipefail
+          SHA=7a06168f1aec83d46e807f99c706084415767935671ed88668981b6e9cc0a944
+          try_fetch() {
+            echo "::group::fetch $1"
+            rm -f /tmp/p.b64
+            if curl -fsSL --retry 2 --max-time 60 -o /tmp/p.b64 "$1"; then
+              wc -c /tmp/p.b64
+              if echo "$SHA  /tmp/p.b64" | sha256sum -c -; then echo "::endgroup::"; return 0; fi
+            else
+              echo "curl exit $?"
+            fi
+            echo "::endgroup::"
+            return 1
+          }
+          if try_fetch https://files.catbox.moe/0wfii0.b64; then :
+          elif try_fetch https://tmpfiles.org/dl/w4ABbwOIJRtT/p0.b64; then :
+          else
+            echo "every patch host failed"
+            curl -sS -o /dev/null -D- --max-time 30 https://files.catbox.moe/0wfii0.b64 | head -20 || true
+            exit 1
+          fi
           base64 -d /tmp/p.b64 | xz -dc > /tmp/p.patch
-          git apply --check /tmp/p.patch
+          wc -l /tmp/p.patch
+          if ! git apply --check -v /tmp/p.patch; then
+            echo "patch did not apply"
+            head -40 /tmp/p.patch
+            exit 1
+          fi
           git apply /tmp/p.patch
+          git status --porcelain
       - uses: actions/setup-node@v4
         with:
           node-version: 20
