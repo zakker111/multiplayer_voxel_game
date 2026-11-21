@@ -56,7 +56,35 @@ if (!gun) {
 console.log('nest at', JSON.stringify(gun.position));
 
 const dirAt = (yaw) => ({ x: -Math.sin(yaw), z: -Math.cos(yaw) });
-// Pick a lane with clear LOS at every test range.
+// A lane only counts when every ray the burst can take is open: both fire
+// origins (the server's 0.9 m offset and the Beta client's barrel marker at
+// 2.08 m), torso and head height, and both edges of the spread cone. A hit
+// anywhere before the sample point blocks the lane; the old rule only cast the
+// centre line and forgave a hit in the last 0.6 m.
+const LANE_CLEARANCE = 0.05;
+const LANE_ORIGINS = [{ forward: 0.9, up: 1.15 }, { forward: 2.08, up: 1.23 }];
+const laneOpen = (nest, target, yaw, range) => {
+  const dir = dirAt(yaw);
+  const side = { x: -dir.z, z: dir.x };
+  const edge = Math.tan(EMPLACEMENT_MG_SPREAD) * range;
+  const samples = [
+    { x: target.x, y: target.y + 1.0, z: target.z },
+    { x: target.x, y: target.y + 1.55, z: target.z },
+    { x: target.x + side.x * edge, y: target.y + 1.0, z: target.z + side.z * edge },
+    { x: target.x - side.x * edge, y: target.y + 1.0, z: target.z - side.z * edge },
+  ];
+  for (const origin of LANE_ORIGINS) {
+    const from = { x: nest.x + dir.x * origin.forward, y: nest.y + origin.up, z: nest.z + dir.z * origin.forward };
+    for (const to of samples) {
+      const vx = to.x - from.x, vy = to.y - from.y, vz = to.z - from.z;
+      const len = Math.hypot(vx, vy, vz);
+      const hit = game.world.raycast(from, { x: vx / len, y: vy / len, z: vz / len }, len + 1);
+      if (hit && hit.distance < len - LANE_CLEARANCE) return false;
+    }
+  }
+  return true;
+};
+// Pick a lane that is genuinely open at every test range.
 let laneYaw = null;
 for (let i = 0; i < 48 && laneYaw === null; i++) {
   const yaw = (i / 48) * Math.PI * 2;
@@ -68,11 +96,7 @@ for (let i = 0; i < 48 && laneYaw === null; i++) {
     if (Math.abs(tx) > 150 || Math.abs(tz) > 150) { ok = false; break; }
     const ty = ground(game, tx, tz);
     if (Math.abs(ty - gun.position.y) > 1.5) { ok = false; break; }
-    const origin = { x: gun.position.x + dir.x * 0.9, y: gun.position.y + 1.15, z: gun.position.z + dir.z * 0.9 };
-    const vx = tx - origin.x, vy = ty + 1.0 - origin.y, vz = tz - origin.z;
-    const len = Math.hypot(vx, vy, vz);
-    const hit = game.world.raycast(origin, { x: vx / len, y: vy / len, z: vz / len }, len + 1);
-    if (hit && hit.distance < len - 0.6) { ok = false; break; }
+    if (!laneOpen(gun.position, { x: tx, y: ty, z: tz }, yaw, d)) { ok = false; break; }
   }
   if (ok) laneYaw = yaw;
 }

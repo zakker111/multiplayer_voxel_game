@@ -53,7 +53,39 @@ const mulberry32 = (seed) => {
   };
 };
 
-/** A flat nest spot with an unobstructed lane to a flat target `range` metres
+// A lane is only counted as open when every ray the burst itself can take is
+// clear: the server starts a nest round 0.9 m ahead at 1.15 m, while the Beta
+// client starts it at the barrel marker (2.08 m ahead, 1.23 m up), so both
+// origins are checked. Each origin is checked at torso and head height and at
+// both edges of the spread cone, and a terrain hit anywhere before the sample
+// point blocks the lane. The old check looked only along the centre line and
+// forgave a hit up to 0.6 m short of the target, so it counted lanes as clear
+// while the cone was eating a bank a few metres in front of the target.
+const LANE_CLEARANCE = 0.05;
+const LANE_ORIGINS = [{ forward: 0.9, up: 1.15 }, { forward: 2.08, up: 1.23 }];
+const laneOpen = (game, spot, target, yaw, range) => {
+  const dir = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+  const side = { x: -dir.z, z: dir.x };
+  const edge = Math.tan(EMPLACEMENT_MG_SPREAD) * range;
+  const samples = [
+    { x: target.x, y: target.y + 1.0, z: target.z },
+    { x: target.x, y: target.y + 1.55, z: target.z },
+    { x: target.x + side.x * edge, y: target.y + 1.0, z: target.z + side.z * edge },
+    { x: target.x - side.x * edge, y: target.y + 1.0, z: target.z - side.z * edge },
+  ];
+  for (const origin of LANE_ORIGINS) {
+    const from = { x: spot.x + dir.x * origin.forward, y: spot.y + origin.up, z: spot.z + dir.z * origin.forward };
+    for (const to of samples) {
+      const vx = to.x - from.x, vy = to.y - from.y, vz = to.z - from.z;
+      const len = Math.hypot(vx, vy, vz);
+      const hit = game.world.raycast(from, { x: vx / len, y: vy / len, z: vz / len }, len + 1);
+      if (hit && hit.distance < len - LANE_CLEARANCE) return false;
+    }
+  }
+  return true;
+};
+
+/** A flat nest spot with a genuinely open lane to a flat target `range` metres
  *  away, so a long-range test measures the cone and not the terrain. */
 const findLongLane = (game, range) => {
   for (let z = -80; z <= 80; z += 4) {
@@ -68,11 +100,7 @@ const findLongLane = (game, range) => {
         if (!isFlat(game, tx, tz)) continue;
         const ty = groundTop(game, tx, tz);
         if (ty === null || Math.abs(ty - y) > 1.5) continue;
-        const origin = { x: x + dir.x * 0.9, y: y + 1.15, z: z + dir.z * 0.9 };
-        const vx = tx - origin.x, vy = ty + 1 - origin.y, vz = tz - origin.z;
-        const len = Math.hypot(vx, vy, vz);
-        const hit = game.world.raycast(origin, { x: vx / len, y: vy / len, z: vz / len }, len + 1);
-        if (hit && hit.distance < len - 0.6) continue;
+        if (!laneOpen(game, { x, y, z }, { x: tx, y: ty, z: tz }, yaw, range)) continue;
         return { x, y, z, yaw, target: { x: tx, y: ty, z: tz } };
       }
     }
