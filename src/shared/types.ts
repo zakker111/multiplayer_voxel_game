@@ -386,8 +386,11 @@ export const EMPLACEMENT_ROUND_DAMAGE = 30;
 /** How far up or down the gunner may tilt the nest, in radians. */
 export const EMPLACEMENT_MAX_PITCH = 0.6;
 /** Half-angle a belt-fed nest walks each round off the aim line. A nest hoses
- *  an area; it is not a precision rifle, so a burst visibly sprays. */
-export const EMPLACEMENT_MG_SPREAD = 0.035;
+ *  an area; it is not a precision rifle, so a burst visibly sprays. Measured
+ *  through the real fire path at 30/45/60/75/88m (scripts/measure-mg-nest.mjs):
+ *  a 0.035 cone spent most of a 200-round belt without a kill past 60m, while
+ *  this keeps the hose readable and drops a 130 HP bot in ~2.5s at 88m. */
+export const EMPLACEMENT_MG_SPREAD = 0.016;
 
 /** One MG nest round's direction: the aimed line plus a random cone offset.
  *  Shared so a server-run nest sprays exactly like the offline one. */
