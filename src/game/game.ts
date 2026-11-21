@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VoxelWorld, VOXEL_BUILT, VOXEL_SIZE, WORLD_SIZE, CHUNK_SIZE } from './world';
 import { Player } from './player';
+import { vehicleClear, vehicleExitSpot, vehicleGround, type ClearanceBodies } from '../shared/vehiclePhysics';
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
 import { PlayerState, PlayerInput, Position, PlayerStats, Workshops, JeepSnapshot, WorkshopSnapshot } from '../shared/types';
@@ -80,7 +81,10 @@ const BOT_JEEP_COOLDOWN_SECONDS = 30;
 const BOT_JEEP_ARRIVE_RADIUS = 75;
 /** Give up walking to the workshop / driving if the errand stalls this long. */
 const BOT_JEEP_APPROACH_SECONDS = 35;
-const BOT_JEEP_DRIVE_SECONDS = 45;
+// The jeep now collides with infantry exactly as it does on the server, so a
+// crowded midfield costs a detour or two on the way across. The window allows
+// for that without letting a genuinely stuck errand run forever.
+const BOT_JEEP_DRIVE_SECONDS = 75;
 
 /** Squared distance to a plain snapshot position, so the per-frame reach checks
  *  allocate nothing. */
@@ -981,14 +985,18 @@ export class Game {
           }
         }
       }
-      for (let ring = 1; ring <= 2; ring++) {
-        const top = GROUND_LEVEL - ring;
-        for (let x = center.x - 5 - ring; x <= center.x + 17 + ring; x++) {
-          for (let z = center.z - 7 - ring; z <= center.z + 7 + ring; z++) {
-            if (x > center.x - 5 - ring && x < center.x + 17 + ring && z > center.z - 7 - ring && z < center.z + 7 + ring) continue;
-            if (this.world.getGroundHeight(x, z) - 0.5 >= top) continue;
-            liftTo(x, z, top);
-          }
+      // One wide apron exactly one voxel below the pad, rather than a staircase
+      // of one-metre terraces: the shared vehicle rule samples a 2m ring, so a
+      // single step is drivable in both directions while a second terrace would
+      // read as a wall and pen the jeep in.
+      const apron = 3;
+      const apronTop = GROUND_LEVEL - 1;
+      for (let x = center.x - 5 - apron; x <= center.x + 17 + apron; x++) {
+        for (let z = center.z - 7 - apron; z <= center.z + 7 + apron; z++) {
+          const onPad = x >= center.x - 5 && x <= center.x + 17 && z >= center.z - 7 && z <= center.z + 7;
+          if (onPad) continue;
+          if (this.world.getGroundHeight(x, z) - 0.5 >= apronTop) continue;
+          liftTo(x, z, apronTop);
         }
       }
     }
@@ -1028,9 +1036,9 @@ export class Game {
     if (this.localJeeps.filter(jeep => jeep.team === team && !jeep.wreck).length >= spec.teamLimit) return null;
     const x = workshop.position.x + 11;
     const z = workshop.position.z;
-    const y = this.world.getGroundHeight(x, z);
     const yaw = team === 'blue' ? Math.PI : 0;
-    if (!this.localJeepClear(x, y, z, yaw, null)) return null;
+    const y = this.localJeepGround(x, z, workshop.position.y);
+    if (y === null || !this.localJeepClear({ x, y, z }, yaw, spec, null)) return null;
     workshop.stock -= spec.cost;
     const jeep: JeepSnapshot = {
       id: `local_jeep_${++this.localJeepSeq}`,
@@ -1041,28 +1049,35 @@ export class Game {
     return jeep;
   }
 
-  /** The server's oriented-rectangle test, simplified for the client: the body
-   *  must sit on ground within a step of the pad and no voxel may be inside it. */
-  private localJeepClear(x: number, y: number, z: number, yaw: number, ignoreId: string | null): boolean {
-    const spec = vehicleSpec('jeep');
-    const forwardX = -Math.sin(yaw), forwardZ = -Math.cos(yaw);
-    const rightX = -forwardZ, rightZ = forwardX;
-    const samples: Array<[number, number]> = [[0, 0], [spec.halfLength, 0], [-spec.halfLength, 0], [0, spec.halfWidth], [0, -spec.halfWidth]];
-    for (const [forward, side] of samples) {
-      const px = x + forwardX * forward + rightX * side;
-      const pz = z + forwardZ * forward + rightZ * side;
-      if (Math.abs(px) > WORLD_HALF - 1 || Math.abs(pz) > WORLD_HALF - 1) return false;
-      const ground = this.world.getGroundHeight(px, pz);
-      // A one-voxel step is drivable; anything taller is a wall. Clearance is
-      // measured from each sample's own ground, so stepping off the pad onto a
-      // lower skirt is not mistaken for driving into it.
-      if (Math.abs(ground - y) > 1) return false;
-      for (const up of [0.5, 1.5]) {
-        if (this.world.isSolid(Math.round(px), Math.round(ground + up), Math.round(pz))) return false;
-      }
-    }
-    return !this.localJeeps.some(other => other.id !== ignoreId && !other.wreck &&
-      Math.abs(other.position.y - y) < 2 && Math.hypot(other.position.x - x, other.position.z - z) < 4);
+  /** Bodies the shared vehicle rules should account for in local play: every
+   *  local jeep, the player's own capsule and each bot's body. */
+  private localVehicleBodies(ignoreVehicleId: string | null = null, ignorePlayerId: string | null = null): ClearanceBodies {
+    return {
+      vehicles: this.localJeeps,
+      players: [
+        { id: this.localPlayerId ?? 'local-player', position: this.player.position, isDead: this.player.isDead, isSpectating: this.isSpectating },
+        ...this.bots.map(bot => ({ id: bot.name, position: bot.position, isDead: bot.isDead })),
+      ],
+      ignoreVehicleId,
+      ignorePlayerId,
+    };
+  }
+
+  /** Ground and footprint tests come from the shared vehicle rules, so the
+   *  offline jeep is held to exactly what the server enforces online. */
+  private localJeepGround(x: number, z: number, currentY: number): number | null {
+    return vehicleGround(this.world, x, z, currentY);
+  }
+
+  private localJeepClear(position: Position, yaw: number, spec: Footprint, ignoreId: string | null, ignorePlayerId: string | null = null): boolean {
+    return vehicleClear(this.world, position, yaw, spec, this.localVehicleBodies(ignoreId, ignorePlayerId));
+  }
+
+  /** The same clearance test without infantry: voxels and other vehicles only.
+   *  A driver uses this to tell a wall it must back away from from a bot that
+   *  will simply walk on. */
+  private localJeepRockClear(position: Position, yaw: number, spec: Footprint, ignoreId: string | null): boolean {
+    return vehicleClear(this.world, position, yaw, spec, { vehicles: this.localJeeps, ignoreVehicleId: ignoreId });
   }
 
   private enterLocalJeep(jeep: JeepSnapshot): void {
@@ -1081,24 +1096,9 @@ export class Game {
     this.applyJeeps(this.localJeeps);
   }
 
-  /** First ring spot a body fits in, like the server's safeJeepExit, so nobody
-   *  is left standing inside a wall after leaving a jeep. */
-  private localJeepExitSpot(jeep: JeepSnapshot): Position | null {
-    let spot: Position | null = null;
-    for (const radius of [3.5, 4.5, 6]) {
-      for (let i = 0; i < 8 && !spot; i++) {
-        const angle = jeep.yaw + i * Math.PI / 4;
-        const x = jeep.position.x + Math.cos(angle) * radius;
-        const z = jeep.position.z + Math.sin(angle) * radius;
-        const y = this.world.getGroundHeight(x, z);
-        if (Math.abs(y - jeep.position.y) > 2) continue;
-        if (this.world.isSolid(Math.round(x), Math.round(y + 0.9), Math.round(z))) continue;
-        if (this.world.isSolid(Math.round(x), Math.round(y + 1.8), Math.round(z))) continue;
-        spot = { x, y, z };
-      }
-      if (spot) break;
-    }
-    return spot;
+  /** First safe spot to step out, from the same exit ring the server sweeps. */
+  private localJeepExitSpot(jeep: JeepSnapshot, driverId: string | null = jeep.driverId): Position | null {
+    return vehicleExitSpot(this.world, jeep, this.localVehicleBodies(jeep.id, driverId));
   }
 
   private exitLocalJeep(): void {
@@ -1127,9 +1127,9 @@ export class Game {
     const yaw = jeep.yaw + turn;
     const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
     const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
-    const y = this.world.getGroundHeight(x, z);
+    const y = this.localJeepGround(x, z, jeep.position.y);
     jeep.yaw = yaw;
-    if (!this.localJeepClear(x, y, z, yaw, jeep.id)) {
+    if (y === null || !this.localJeepClear({ x, y, z }, yaw, spec, jeep.id, jeep.driverId)) {
       // A wall or a drop stops the jeep instead of letting it slide through.
       jeep.speed = 0;
       return false;
@@ -1727,15 +1727,28 @@ export class Game {
       mission.lastPos = { x: jeep.position.x, z: jeep.position.z };
       mission.lastProgressAt = this.localTime;
       if (moved < 1.5) {
-        mission.recoveries++;
-        if (mission.recoveries > 4) { this.exitBotJeep(bot, jeep); return; }
-        mission.reverseUntil = this.localTime + 1.4;
-        const side = mission.recoveries % 2 ? 1 : -1;
-        mission.detour = {
-          x: jeep.position.x + Math.cos(jeep.yaw) * side * 16,
-          z: jeep.position.z - Math.sin(jeep.yaw) * side * 16,
-        };
-        mission.detourUntil = this.localTime + 6;
+        // A pedestrian in the way is temporary: reversing for one turns a
+        // two-second wait into an eight-second recovery, and the field is full
+        // of walking bots. Only a wall, a trench or another vehicle counts as
+        // a stall worth backing out of.
+        const stepX = jeep.position.x - Math.sin(jeep.yaw) * 1.6;
+        const stepZ = jeep.position.z - Math.cos(jeep.yaw) * 1.6;
+        const stepGround = this.localJeepGround(stepX, stepZ, jeep.position.y);
+        const rockBlocked = stepGround === null ||
+          !this.localJeepRockClear({ x: stepX, y: stepGround, z: stepZ }, jeep.yaw, spec, jeep.id);
+        const crowdBlocked = this.bots.some(other => !other.isDead && other.name !== bot.name &&
+          Math.hypot(other.position.x - jeep.position.x, other.position.z - jeep.position.z) < 3.5);
+        if (rockBlocked || !crowdBlocked) {
+          mission.recoveries++;
+          if (mission.recoveries > 4) { this.exitBotJeep(bot, jeep); return; }
+          mission.reverseUntil = this.localTime + 1.4;
+          const side = mission.recoveries % 2 ? 1 : -1;
+          mission.detour = {
+            x: jeep.position.x + Math.cos(jeep.yaw) * side * 16,
+            z: jeep.position.z - Math.sin(jeep.yaw) * side * 16,
+          };
+          mission.detourUntil = this.localTime + 6;
+        }
       }
     }
     if (this.localTime < mission.reverseUntil) {
@@ -1772,8 +1785,8 @@ export class Game {
           yaw += steering * Math.min(Math.abs(speed) / spec.fullTurnSpeed, 1) * spec.turnRate * step;
           const nx = x - Math.sin(yaw) * speed * step;
           const nz = z - Math.cos(yaw) * speed * step;
-          const ny = this.world.getGroundHeight(nx, nz);
-          if (!this.localJeepClear(nx, ny, nz, yaw, jeep.id)) { blocked = true; break; }
+          const ny = this.localJeepGround(nx, nz, y);
+          if (ny === null || !this.localJeepClear({ x: nx, y: ny, z: nz }, yaw, spec, jeep.id, jeep.driverId)) { blocked = true; break; }
           travelled += Math.hypot(nx - x, nz - z);
           x = nx; y = ny; z = nz;
         }
@@ -1811,7 +1824,7 @@ export class Game {
       // A live driver was hidden while riding; put it back beside its jeep so
       // the AI does not run an invisible bot for the rest of the round.
       if (!bot.isDead) {
-        const spot = this.localJeepExitSpot(jeep);
+        const spot = this.localJeepExitSpot(jeep, bot.name);
         if (spot) bot.position.set(spot.x, spot.y, spot.z);
         else bot.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
         bot.mesh.position.copy(bot.position);
