@@ -363,6 +363,12 @@ interface Bot {
   // Building behavior properties
   hasBlocks: boolean;
   inventoryBlocks: number;
+  /** MG nest this bot is manning, or null. */
+  nestId: string | null;
+  /** Seconds seated without a target before it steps back out. */
+  nestIdleTimer: number;
+  /** Seconds before this bot looks for another MG post. */
+  nestCooldown: number;
   isBuilding: boolean;
   buildTimer: number;
   buildTarget: { x: number; y: number; z: number } | null;
@@ -1248,7 +1254,7 @@ export class Game {
   /** The server's spot rules, mirrored: map bounds, base and pad clearance,
    *  solid flat ground, separation from other builds, and the team limit. */
   private localEmplacementSpot(
-    kind: EmplacementKind, position: Position, yaw: number,
+    kind: EmplacementKind, position: Position, yaw: number, team: Team = this.playerTeam,
   ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number } | { ok: false; reason: string } {
     const spec = emplacementSpec(kind);
     if (!spec) return { ok: false, reason: 'Unknown blueprint' };
@@ -1256,15 +1262,15 @@ export class Game {
     if (Math.abs(position.x) > WORLD_HALF - extent - 1 || Math.abs(position.z) > WORLD_HALF - extent - 1) {
       return { ok: false, reason: 'Outside the map' };
     }
-    const ownFlag = this.playerTeam === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
-    const enemyFlag = this.playerTeam === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    const ownFlag = team === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
+    const enemyFlag = team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
     if (Math.hypot(position.x - enemyFlag.x, position.z - enemyFlag.z) < LOCAL_EMPLACEMENT_ENEMY_BASE_RING) {
       return { ok: false, reason: 'Too close to the enemy base' };
     }
     if (Math.hypot(position.x - ownFlag.x, position.z - ownFlag.z) < LOCAL_EMPLACEMENT_OWN_FLAG_CLEARANCE) {
       return { ok: false, reason: 'Too close to your flag stand' };
     }
-    const workshop = this.workshops?.[this.playerTeam].position;
+    const workshop = this.workshops?.[team].position;
     if (workshop && Math.hypot(position.x - workshop.x, position.z - workshop.z) < LOCAL_EMPLACEMENT_WORKSHOP_CLEARANCE) {
       return { ok: false, reason: 'Keep the workshop pad clear' };
     }
@@ -1283,7 +1289,7 @@ export class Game {
       }
     }
 
-    const built = this.localEmplacements.filter(e => e.team === this.playerTeam && e.kind === kind).length;
+    const built = this.localEmplacements.filter(e => e.team === team && e.kind === kind).length;
     if (built >= spec.teamLimit) return { ok: false, reason: 'Team limit for that build reached' };
     return { ok: true, spec, spot, rotation };
   }
@@ -1404,6 +1410,184 @@ export class Game {
     return null;
   }
 
+  /** The nest a bot is sitting in, if it still exists and the bot still holds it. */
+  private botNest(bot: Bot): EmplacementSnapshot | null {
+    if (!bot.nestId) return null;
+    const nest = this.localEmplacements.find(e => e.id === bot.nestId);
+    if (!nest || nest.team !== bot.team || nest.gunnerId !== bot.name) {
+      bot.nestId = null;
+      return null;
+    }
+    return nest;
+  }
+
+  /** Seat a bot in one of its team's nests: pinned, weapon out, no foot AI. */
+  private mountBotNest(bot: Bot, nest: EmplacementSnapshot): void {
+    if (nest.gunnerId) return;
+    nest.gunnerId = bot.name;
+    nest.yaw = nest.baseYaw;
+    bot.nestId = nest.id;
+    bot.nestIdleTimer = 0;
+    bot.position.set(nest.position.x, nest.position.y, nest.position.z);
+    bot.lastPos.copy(bot.position);
+    bot.velocity.set(0, 0, 0);
+    bot.mesh.position.copy(bot.position);
+    bot.mesh.rotation.y = nest.yaw;
+    bot.targetPos.copy(bot.position);
+    if (bot.bodyParts) {
+      bot.bodyParts.weaponGroup.visible = true;
+      bot.bodyParts.spadeGroup.visible = false;
+      bot.bodyParts.blockGroup.visible = false;
+    }
+    this.updateBotNameTag(bot, '🔫 MANNING MG NEST', '#ffd166');
+  }
+
+  /** Give up a nest seat; a living bot steps out beside the nest. */
+  private releaseBotNest(bot: Bot, stepOut: boolean): void {
+    const nest = this.localEmplacements.find(e => e.id === bot.nestId);
+    if (nest && nest.gunnerId === bot.name) {
+      nest.gunnerId = null;
+      nest.yaw = nest.baseYaw;
+      this.localEmplacementFireAt.delete(nest.id);
+      const pivot = this.emplacementMeshes.get(nest.id)?.getObjectByName('gunPivot');
+      if (pivot) pivot.rotation.y = 0;
+      if (stepOut && !bot.isDead) {
+        const exit = this.localEmplacementExitSpot(nest);
+        if (exit) {
+          bot.position.set(exit.x, exit.y, exit.z);
+          bot.lastPos.copy(bot.position);
+          bot.mesh.position.copy(bot.position);
+        }
+      }
+    }
+    bot.nestId = null;
+    bot.nestIdleTimer = 0;
+    bot.nestCooldown = 12;
+  }
+
+  /** Nearest enemy a nest can actually shoot: any facing, but inside its arc,
+   *  range and with clear line of sight. A turret scans; it does not share the
+   *  infantry's narrow field of view. */
+  private findNestTarget(nest: EmplacementSnapshot, team: Team): { x: number; y: number; z: number } | null {
+    const spec = emplacementSpec(nest.kind);
+    if (!spec) return null;
+    const origin = new THREE.Vector3(nest.position.x, nest.position.y + 1.15, nest.position.z);
+    const candidates: Array<{ x: number; y: number; z: number; distance: number }> = [];
+    const consider = (x: number, y: number, z: number) => {
+      const dx = x - origin.x, dy = y + 1.0 - origin.y, dz = z - origin.z;
+      const flat = Math.hypot(dx, dz);
+      if (flat < 1 || flat > spec.maxRange) return;
+      const yaw = Math.atan2(-dx, -dz);
+      const offset = Math.atan2(Math.sin(yaw - nest.baseYaw), Math.cos(yaw - nest.baseYaw));
+      if (Math.abs(offset) > spec.arc / 2) return;
+      const len = Math.hypot(dx, dy, dz);
+      const hit = this.world.raycast(origin, new THREE.Vector3(dx / len, dy / len, dz / len), len + 0.5);
+      if (hit && hit.hit && hit.distance < len - 0.6) return;
+      candidates.push({ x, y, z, distance: flat });
+    };
+    for (const other of this.bots) {
+      if (other.isDead || other.team === team) continue;
+      consider(other.position.x, other.position.y, other.position.z);
+    }
+    if (this.playerTeam !== team && !this.player.isDead && !this.isSpectating) {
+      consider(this.player.position.x, this.player.position.y, this.player.position.z);
+    }
+    return candidates.length > 0
+      ? candidates.reduce((nearest, candidate) => candidate.distance < nearest.distance ? candidate : nearest)
+      : null;
+  }
+
+  /** MG post duty for one bot. Returns true when the frame belonged to a nest,
+   *  so the infantry AI does not also walk or shoot the body out of the seat. */
+  private updateBotNest(bot: Bot, dt: number): boolean {
+    bot.nestCooldown = Math.max(0, bot.nestCooldown - dt);
+    const nest = this.botNest(bot);
+    if (nest) {
+      const spec = emplacementSpec(nest.kind);
+      if (!spec || nest.ammo <= 0) { this.releaseBotNest(bot, true); return false; }
+      // The seat pins the body: no walking, no cover, no voxel building.
+      bot.position.set(nest.position.x, nest.position.y, nest.position.z);
+      bot.lastPos.copy(bot.position);
+      bot.velocity.set(0, 0, 0);
+      bot.mesh.position.copy(bot.position);
+      bot.isBuilding = false;
+      bot.isDigging = false;
+      bot.isCrouching = false;
+
+      const enemy = this.findNestTarget(nest, bot.team);
+      if (enemy) {
+        const dist = Math.hypot(enemy.x - nest.position.x, enemy.z - nest.position.z);
+        const yawTo = Math.atan2(-(enemy.x - nest.position.x), -(enemy.z - nest.position.z));
+        bot.nestIdleTimer = 0;
+        nest.yaw = yawTo;
+        bot.mesh.rotation.y = yawTo;
+        const pivot = this.emplacementMeshes.get(nest.id)?.getObjectByName('gunPivot');
+        if (pivot) pivot.rotation.y = nest.yaw - nest.baseYaw;
+        const pitch = Math.max(-EMPLACEMENT_MAX_PITCH, Math.min(EMPLACEMENT_MAX_PITCH,
+          Math.atan2(enemy.y + 1.0 - (nest.position.y + 1.15), Math.max(0.1, dist))));
+        const last = this.localEmplacementFireAt.get(nest.id);
+        if (last === undefined || this.localTime - last >= spec.fireInterval) {
+          this.localEmplacementFireAt.set(nest.id, this.localTime);
+          nest.ammo -= 1;
+          this.fireNestRound(nest, pitch);
+          this.applyEmplacements(this.localEmplacements);
+        }
+      } else {
+        // Nothing in the arc: hold the seat a while, then go back to the fight.
+        bot.nestIdleTimer += dt;
+        if (bot.nestIdleTimer > 20) { this.releaseBotNest(bot, true); return false; }
+      }
+      return true;
+    }
+
+    if (bot.isDead || bot.carryingFlag || bot.nestCooldown > 0) return false;
+
+    // A free friendly nest within a few strides is worth climbing into.
+    const free = this.localEmplacements.find(e => e.kind === 'mgNest' && e.team === bot.team && !e.gunnerId && e.ammo > 0
+      && Math.abs(e.position.y - bot.position.y) < 2
+      && Math.hypot(e.position.x - bot.position.x, e.position.z - bot.position.z) < 10);
+    if (free) { this.mountBotNest(bot, free); return true; }
+
+    // Otherwise a forward bot sets one up on quiet ground. One nest per lane:
+    // the team limit and the "nest already near" check keep the map readable.
+    if (!this.workshops) return false;
+    const enemy = this.findNearestEnemy(bot);
+    if (enemy && Math.hypot(enemy.pos.x - bot.position.x, enemy.pos.z - bot.position.z) < 35) return false;
+    const ownFlag = bot.team === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
+    const enemyFlag = bot.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    // Only on the enemy side of the midpoint: a nest behind your own spawn
+    // never sees a fight.
+    if (Math.hypot(bot.position.x - enemyFlag.x, bot.position.z - enemyFlag.z)
+      > Math.hypot(bot.position.x - ownFlag.x, bot.position.z - ownFlag.z) - 40) return false;
+    if (this.localEmplacements.some(e => e.kind === 'mgNest' && e.team === bot.team
+      && Math.hypot(e.position.x - bot.position.x, e.position.z - bot.position.z) < 60)) return false;
+    const spec = emplacementSpec('mgNest');
+    const workshop = this.workshops[bot.team];
+    if (!spec || workshop.stock < spec.cost) { bot.buildCooldown = 8; return false; }
+    const yaw = Math.atan2(-(enemyFlag.x - bot.position.x), -(enemyFlag.z - bot.position.z));
+    const x = Math.round(bot.position.x), z = Math.round(bot.position.z);
+    const verdict = this.localEmplacementSpot('mgNest', { x, y: this.world.getGroundHeight(x, z), z }, yaw, bot.team);
+    if (!verdict.ok) { bot.buildCooldown = 4; return false; }
+    workshop.stock -= spec.cost;
+    const built: EmplacementSnapshot = {
+      id: `local_emp_${++this.localEmplacementSeq}`,
+      kind: 'mgNest',
+      team: bot.team,
+      position: verdict.spot,
+      yaw: verdict.rotation,
+      baseYaw: verdict.rotation,
+      hp: spec.maxHp,
+      ammo: spec.ammo,
+      stock: 0,
+      gunnerId: null,
+    };
+    this.localEmplacements.push(built);
+    this.applyEmplacements(this.localEmplacements);
+    this.mountBotNest(bot, built);
+    this.updateBotNameTag(bot, '🏗️ SETTING UP MG NEST', '#ffd166');
+    return true;
+  }
+
   /** One round from the manned build. The nest aims itself: yaw comes from the
    *  clamped gun, pitch from the gunner's look, never from a client ray. */
   private fireLocalEmplacement(): void {
@@ -1424,7 +1608,25 @@ export class Game {
       return;
     }
 
-    this.sounds.rifleShot();
+    this.fireNestRound(emplacement, pitch);
+    this.applyEmplacements(this.localEmplacements);
+  }
+
+  /** One round from a manned MG nest, whoever mans it. The cone, muzzle,
+   *  terrain and target rules are shared, so a bot-run nest is the same
+   *  weapon balance the player's is. */
+  private fireNestRound(emplacement: EmplacementSnapshot, pitch: number): void {
+    const spec = emplacementSpec(emplacement.kind);
+    if (!spec) return;
+    const gunnerIsPlayer = emplacement.gunnerId === this.localPlayerId;
+    if (gunnerIsPlayer) {
+      this.sounds.rifleShot();
+    } else {
+      const dist = Math.hypot(emplacement.position.x - this.player.position.x, emplacement.position.z - this.player.position.z);
+      const pan = Math.sin(Math.atan2(emplacement.position.x - this.player.position.x, emplacement.position.z - this.player.position.z) - this.player.yaw);
+      this.sounds.playDistantShot('rifle', dist, pan);
+    }
+
     // A belt-fed nest hoses an area: every round walks off the aim line, so a
     // burst reads as a spray of tracers and impacts instead of one laser.
     const direction = emplacedShotDirection(emplacement.yaw, pitch);
@@ -1445,32 +1647,45 @@ export class Game {
     const terrainHit = this.world.raycast(muzzle, rayDir, spec.maxRange);
     const maxDist = terrainHit ? terrainHit.distance : spec.maxRange;
 
-    let best: { bot: Bot; distance: number; headshot: boolean } | null = null;
-    for (const bot of this.bots) {
-      if (bot.isDead || bot.team === emplacement.team) continue;
+    type NestTarget =
+      | { kind: 'bot'; bot: Bot; distance: number; headshot: boolean }
+      | { kind: 'player'; distance: number; headshot: boolean };
+    const candidates: NestTarget[] = [];
+    const consider = (x: number, y: number, z: number, kind: 'bot' | 'player', bot?: Bot) => {
       for (const [height, headshot] of [[1.55, true], [1.0, false]] as const) {
-        const to = {
-          x: bot.position.x - origin.x,
-          y: bot.position.y + height - origin.y,
-          z: bot.position.z - origin.z,
-        };
+        const to = { x: x - origin.x, y: y + height - origin.y, z: z - origin.z };
         const along = to.x * direction.x + to.y * direction.y + to.z * direction.z;
         if (along <= 0 || along > maxDist) continue;
         const perp = Math.hypot(to.x - direction.x * along, to.y - direction.y * along, to.z - direction.z * along);
         if (perp > (headshot ? 0.35 : 0.6)) continue;
-        if (!best || along < best.distance) best = { bot, distance: along, headshot };
+        candidates.push(kind === 'bot'
+          ? { kind, bot: bot as Bot, distance: along, headshot }
+          : { kind, distance: along, headshot });
       }
+    };
+    for (const bot of this.bots) {
+      if (bot.isDead || bot.team === emplacement.team) continue;
+      consider(bot.position.x, bot.position.y, bot.position.z, 'bot', bot);
     }
+    if (this.playerTeam !== emplacement.team && !this.player.isDead && !this.isSpectating) {
+      consider(this.player.position.x, this.player.position.y, this.player.position.z, 'player');
+    }
+    const best = candidates.length > 0
+      ? candidates.reduce((nearest, candidate) => candidate.distance < nearest.distance ? candidate : nearest)
+      : null;
 
     const tracerDist = best ? best.distance : maxDist;
     this.createMuzzleFlash(muzzle, rayDir);
     this.createBulletTracer(muzzle, rayDir, tracerDist, 300);
-    if (best) {
-      const impact = muzzle.clone().add(rayDir.clone().multiplyScalar(best.distance));
-      this.createImpactSparks(impact);
-      this.damageLocalBot(best.bot, EMPLACEMENT_ROUND_DAMAGE * (best.headshot ? 1.5 : 1), best.headshot);
+    if (!best) return;
+    const impact = muzzle.clone().add(rayDir.clone().multiplyScalar(best.distance));
+    this.createImpactSparks(impact);
+    const damage = EMPLACEMENT_ROUND_DAMAGE * (best.headshot ? 1.5 : 1);
+    if (best.kind === 'bot') {
+      this.damageLocalBot(best.bot, damage, best.headshot, { team: emplacement.team, announce: gunnerIsPlayer });
+    } else {
+      this.damageLocalPlayerFromNest(emplacement, damage, best.headshot);
     }
-    this.applyEmplacements(this.localEmplacements);
   }
 
   /** Cannon rounds fly flat and fast; mortar rounds leave at 45 degrees so they
@@ -1590,6 +1805,8 @@ export class Game {
     this.emplacementFlashes.set(id, { until: performance.now() + 180, color: new THREE.Color(0xffffff) });
     if (emplacement.hp > 0) return;
     if (this.mountedEmplacementId === id) this.dismountLocalEmplacement(true);
+    const botGunner = emplacement.gunnerId ? this.bots.find(b => b.name === emplacement.gunnerId) : undefined;
+    if (botGunner) { botGunner.nestId = null; botGunner.nestIdleTimer = 0; botGunner.nestCooldown = 8; }
     this.localEmplacements = this.localEmplacements.filter(e => e.id !== id);
     this.localEmplacementFireAt.delete(id);
     this.applyEmplacements(this.localEmplacements);
@@ -1597,20 +1814,27 @@ export class Game {
   }
 
   /** Shots from a build land like player shots: hp, flinch, hit marker, and the
-   *  team's kill counter plus the flag drop when the target goes down. */
-  private damageLocalBot(bot: Bot, damage: number, headshot: boolean): void {
+   *  scoring team's kill counter plus the flag drop when the target goes down.
+   *  A bot-manned nest passes its own team and silences the player's HUD cue. */
+  private damageLocalBot(
+    bot: Bot, damage: number, headshot: boolean,
+    credit: { team: Team; announce: boolean } = { team: this.playerTeam, announce: true },
+  ): void {
     if (bot.isDead) return;
     bot.hp -= damage;
     bot.lastDamageTime = Date.now();
     bot.flinchTimer = 0.22;
-    this.hitMarkerTimer = 0.25;
-    this.sounds.hitMarker();
-    if (headshot) this.sounds.headshot();
+    if (credit.announce) {
+      this.hitMarkerTimer = 0.25;
+      this.sounds.hitMarker();
+      if (headshot) this.sounds.headshot();
+    }
     if (bot.hp > 0) {
       this.updateBotNameTag(bot, bot.hp < 30 ? '🏃 TACTICAL RETREAT' : '⚡ UNDER HOSTILE ATTACK!', '#ff4444');
       return;
     }
     bot.isDead = true;
+    if (bot.nestId) this.releaseBotNest(bot, false);
     bot.mesh.visible = false;
     bot.respawnTimer = 4;
     if (bot.carryingFlag) {
@@ -1627,9 +1851,40 @@ export class Game {
       }
       bot.carryingFlag = false;
     }
-    if (this.playerTeam === 'blue') this.blueKills++; else this.redKills++;
+    if (credit.team === 'blue') this.blueKills++; else this.redKills++;
+    if (credit.announce) {
+      this.sounds.killSound();
+      this.showMessage(`🎯 Your emplacement killed ${bot.name}${headshot ? ' (HEADSHOT!)' : ''}`);
+    }
+  }
+
+  /** A nest round that found the local player. Same damage, shake and death
+   *  bookkeeping a bot's rifle uses, credited to the nest's team. */
+  private damageLocalPlayerFromNest(nest: EmplacementSnapshot, damage: number, headshot: boolean): void {
+    this.player.takeDamage(damage);
+    this.player.addCameraShake(headshot ? 0.32 : 0.18);
+    this.sounds.hurt();
+    if (!this.player.isDead) {
+      if (headshot) this.showMessage('💥 MG nest headshot!');
+      return;
+    }
+    if (this.player.carryingFlag) {
+      const enemyF = this.playerTeam === 'blue' ? this.redFlag : this.blueFlag;
+      if (enemyF) {
+        enemyF.carrier = null;
+        enemyF.isDropped = true;
+        enemyF.dropTimer = 30;
+        const dropY = this.world.getGroundHeight(this.player.position.x, this.player.position.z);
+        enemyF.currentPos.set(this.player.position.x, dropY, this.player.position.z);
+        enemyF.mesh.position.copy(enemyF.currentPos);
+        enemyF.mesh.visible = true;
+        this.showMessage(`🚩 ${enemyF.team.toUpperCase()} flag was dropped!`);
+      }
+      this.player.carryingFlag = false;
+    }
+    if (nest.team === 'blue') this.blueKills++; else this.redKills++;
     this.sounds.killSound();
-    this.showMessage(`🎯 Your emplacement killed ${bot.name}${headshot ? ' (HEADSHOT!)' : ''}`);
+    this.showMessage(`☠️ A ${nest.team} MG nest eliminated you!`);
   }
 
   /** G/E at a forward crate offline: blocks in so a squad can resupply away
@@ -2716,6 +2971,9 @@ export class Game {
         trenchDepth: 0,
         isInTrench: false,
         isBuilding: false,
+        nestId: null,
+        nestIdleTimer: 0,
+        nestCooldown: 0,
         buildTimer: 0,
         buildTarget: null,
         panicLevel: 0,
@@ -6279,6 +6537,9 @@ export class Game {
           bot.isDigging = false;
           bot.digTimer = 0;
           bot.digTarget = null;
+          bot.nestId = null;
+          bot.nestIdleTimer = 0;
+          bot.nestCooldown = 0;
           bot.isBuilding = false;
           bot.buildTimer = 0;
           bot.buildTarget = null;
@@ -6328,6 +6589,10 @@ export class Game {
       // the workshop, boarding, or driving, which is the whole point of it.
       const jeepMission = this.botJeepMissions.get(bot.name);
       if (jeepMission) { this.updateBotJeepMission(bot, jeepMission, dt); continue; }
+
+      // MG post duty: a bot manning a nest spends the frame shooting from it,
+      // and one standing by a free nest climbs in. Both skip the foot AI.
+      if (this.updateBotNest(bot, dt)) continue;
 
       const eFlag = enemyFlag(bot.team);
       const fFlag = friendlyFlag(bot.team);
