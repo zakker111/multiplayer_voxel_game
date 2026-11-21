@@ -887,6 +887,14 @@ export class Game {
    * a slope and every build would be refused as "blocked".
    */
   private startLocalWorkshops(): void {
+    // A flat pad on a raised terrace fences in both vehicles and players: the
+    // jeep refuses a two-voxel drop and the player only steps up one voxel, so
+    // grade a one-voxel skirt down to the surrounding terrain. Without it the
+    // garage pad is a pen the jeep can never drive out of.
+    const liftTo = (x: number, z: number, top: number): void => {
+      const current = Math.floor(this.world.getGroundHeight(x, z));
+      for (let y = current + 1; y <= top; y++) this.world.setVoxel(x, y, z, y === top ? VOXEL_GRASS : VOXEL_DIRT, 3);
+    };
     for (const center of Object.values(WORKSHOP_CENTERS)) {
       for (let x = center.x - 5; x <= center.x + 17; x++) {
         for (let z = center.z - 7; z <= center.z + 7; z++) {
@@ -894,6 +902,16 @@ export class Game {
             const desired = y < GROUND_LEVEL ? VOXEL_DIRT : y === GROUND_LEVEL ? VOXEL_GRASS : VOXEL_AIR;
             if ((this.world.getVoxel(x, y, z)?.type ?? VOXEL_AIR) === desired) continue;
             this.world.setVoxel(x, y, z, desired, desired === VOXEL_AIR ? 0 : 3);
+          }
+        }
+      }
+      for (let ring = 1; ring <= 2; ring++) {
+        const top = GROUND_LEVEL - ring;
+        for (let x = center.x - 5 - ring; x <= center.x + 17 + ring; x++) {
+          for (let z = center.z - 7 - ring; z <= center.z + 7 + ring; z++) {
+            if (x > center.x - 5 - ring && x < center.x + 17 + ring && z > center.z - 7 - ring && z < center.z + 7 + ring) continue;
+            if (this.world.getGroundHeight(x, z) - 0.5 >= top) continue;
+            liftTo(x, z, top);
           }
         }
       }
@@ -944,9 +962,14 @@ export class Game {
       const px = x + forwardX * forward + rightX * side;
       const pz = z + forwardZ * forward + rightZ * side;
       if (Math.abs(px) > WORLD_HALF - 1 || Math.abs(pz) > WORLD_HALF - 1) return false;
-      if (Math.abs(this.world.getGroundHeight(px, pz) - y) > 1) return false;
-      if (this.world.isSolid(Math.round(px), Math.round(y + 0.8), Math.round(pz))) return false;
-      if (this.world.isSolid(Math.round(px), Math.round(y + 1.8), Math.round(pz))) return false;
+      const ground = this.world.getGroundHeight(px, pz);
+      // A one-voxel step is drivable; anything taller is a wall. Clearance is
+      // measured from each sample's own ground, so stepping off the pad onto a
+      // lower skirt is not mistaken for driving into it.
+      if (Math.abs(ground - y) > 1) return false;
+      for (const up of [0.5, 1.5]) {
+        if (this.world.isSolid(Math.round(px), Math.round(ground + up), Math.round(pz))) return false;
+      }
     }
     return !this.localJeeps.some(other => other.id !== ignoreId && !other.wreck &&
       Math.abs(other.position.y - y) < 2 && Math.hypot(other.position.x - x, other.position.z - z) < 4);
