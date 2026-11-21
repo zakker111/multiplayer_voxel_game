@@ -25,7 +25,7 @@ import {
   VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
   emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
-  EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE,
+  EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE, emplacedShotDirection,
   CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW,
   type EmplacementSpec, type Footprint,
@@ -42,6 +42,16 @@ const KILLFEED_SECONDS = 8;
 const DAMAGE_INDICATOR_SECONDS = 2;
 /** Latency probe interval (ms, measured every N seconds). */
 const PING_INTERVAL_SECONDS = 2;
+
+/** One round's landing: a flash, a ground/wall ring and a few debris chips. */
+interface ImpactBurst {
+  flash: THREE.Mesh;
+  dust: THREE.Mesh;
+  ring: THREE.Mesh;
+  chips: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3 }>;
+  life: number;
+  maxLife: number;
+}
 
 /** Offline Beta judges build spots with the server's own layout rules
  *  (serverGame.ts), so a ghost that reads green places exactly the same way. */
@@ -585,6 +595,13 @@ export class Game {
     targetDistance?: number;
     startPos?: THREE.Vector3;
   }> = [];
+
+  /** Landing bursts, stepped in one pass so a spraying nest cannot spawn a
+   *  requestAnimationFrame loop per round. */
+  private impactBursts: ImpactBurst[] = [];
+  private readonly impactFlashGeometry = new THREE.SphereGeometry(0.26, 6, 4);
+  private readonly impactChipGeometry = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+  private readonly impactRingGeometry = new THREE.RingGeometry(0.22, 0.5, 14);
 
   collapseAnimations: Array<{
     mesh: THREE.Mesh;
@@ -1408,14 +1425,22 @@ export class Game {
     }
 
     this.sounds.rifleShot();
-    const cosPitch = Math.cos(pitch);
-    const direction = { x: -Math.sin(emplacement.yaw) * cosPitch, y: Math.sin(pitch), z: -Math.cos(emplacement.yaw) * cosPitch };
+    // A belt-fed nest hoses an area: every round walks off the aim line, so a
+    // burst reads as a spray of tracers and impacts instead of one laser.
+    const direction = emplacedShotDirection(emplacement.yaw, pitch);
     const origin = {
       x: emplacement.position.x + direction.x * 0.9,
-      y: emplacement.position.y + 1.15,
+      y: emplacement.position.y + 1.2,
       z: emplacement.position.z + direction.z * 0.9,
     };
     const muzzle = new THREE.Vector3(origin.x, origin.y, origin.z);
+    // Hang the flash on the barrel the player can see, not on the nest centre.
+    const gunMesh = this.emplacementMeshes.get(emplacement.id);
+    const muzzleMarker = gunMesh?.getObjectByName('emplacementMuzzle');
+    if (gunMesh && muzzleMarker) {
+      gunMesh.updateMatrixWorld(true);
+      muzzleMarker.getWorldPosition(muzzle);
+    }
     const rayDir = new THREE.Vector3(direction.x, direction.y, direction.z);
     const terrainHit = this.world.raycast(muzzle, rayDir, spec.maxRange);
     const maxDist = terrainHit ? terrainHit.distance : spec.maxRange;
@@ -1438,6 +1463,7 @@ export class Game {
     }
 
     const tracerDist = best ? best.distance : maxDist;
+    this.createMuzzleFlash(muzzle, rayDir);
     this.createBulletTracer(muzzle, rayDir, tracerDist, 300);
     if (best) {
       const impact = muzzle.clone().add(rayDir.clone().multiplyScalar(best.distance));
@@ -3983,7 +4009,17 @@ export class Game {
     const remote = this.remotePlayers.get(playerId);
     let muzzlePos = o;
     let receiverPos = o;
-    if (remote) {
+    if (weaponType === 'mgNest') {
+      // The gun is the nest, not the gunner's rifle: fire the flash out of the
+      // barrel marker of the build standing at the reported origin.
+      const nest = [...this.emplacedSnapshots.values()].find((build) => build.kind === 'mgNest'
+        && Math.hypot(build.position.x - origin.x, build.position.z - origin.z) < 3.5
+        && Math.abs(build.position.y - origin.y) < 3.5);
+      const nestMesh = nest ? this.emplacementMeshes.get(nest.id) : undefined;
+      if (nestMesh) nestMesh.updateMatrixWorld(true);
+      const marker = nestMesh?.getObjectByName('emplacementMuzzle');
+      muzzlePos = marker ? marker.getWorldPosition(new THREE.Vector3()) : o.clone().addScaledVector(d, 1.0);
+    } else if (remote) {
       remote.mesh.updateMatrixWorld(true);
       const muzzleObj = remote.mesh.getObjectByName('barrelMuzzle');
       const ejectionObj = remote.mesh.getObjectByName('ejectionPort');
@@ -3999,7 +4035,8 @@ export class Game {
 
     this.createMuzzleFlash(muzzlePos, d);
     this.createBulletTracer(muzzlePos, d, maxDist, speed);
-    this.createBulletShell(receiverPos, d, true);
+    // A belt-fed nest throws brass too, but its receiver is inside the model.
+    if (weaponType !== 'mgNest') this.createBulletShell(receiverPos, d, true);
     if (weaponType === 'smg') {
       this.sounds.smgShot();
     } else {
@@ -4035,7 +4072,7 @@ export class Game {
     this.ghostValid = false;
     this.ghostRequestedAt = 0;
     this.ghostMaterial = new THREE.MeshStandardMaterial({ color: 0xe04949, transparent: true, opacity: 0.45, depthWrite: false });
-    this.ghost = this.createGhostMesh(kind, this.ghostMaterial);
+    this.ghost = this.createEmplacementMesh(kind, this.ghostMaterial);
     this.ghost.visible = false;
     this.scene.add(this.ghost);
     this.showMessage(`🔧 ${spec.kind} blueprint in slot ${index + 1} · Q rotate · click place · right-click cancel`);
@@ -4105,19 +4142,83 @@ export class Game {
     this.ghostValid = false;
   }
 
-  /** Blocky placeholder silhouettes; real models come with the HUD pass. */
-  private createGhostMesh(kind: EmplacementKind, material: THREE.Material): THREE.Group {
+  /** Blocky models for every build. Each armed one carries its gun on a pivot
+   *  named `gunPivot` so the barrel follows the nest's aim, plus a marker named
+   *  `emplacementMuzzle` where the flash and tracer start. */
+  private createEmplacementMesh(
+    kind: EmplacementKind,
+    material: THREE.Material,
+    weaponMaterial: THREE.Material = material,
+  ): THREE.Group {
     const group = new THREE.Group();
-    const box = (w: number, h: number, d: number, x: number, y: number, z: number) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+    const box = (
+      parent: THREE.Object3D, w: number, h: number, d: number,
+      x: number, y: number, z: number, mat: THREE.Material = material,
+    ) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
       mesh.position.set(x, y + h / 2, z);
-      group.add(mesh);
+      // Remember the paint so a damage flash can restore it exactly.
+      mesh.userData.baseColor = (mat as THREE.MeshStandardMaterial).color?.getHex?.() ?? 0xffffff;
+      parent.add(mesh);
+      return mesh;
     };
-    if (kind === 'mgNest') { box(2.2, 0.5, 2.2, 0, 0, 0); box(0.3, 1.1, 0.3, 0.6, 0.5, 0.6); }
-    else if (kind === 'cannon') { box(1.6, 0.5, 1.6, 0, 0, 0); box(0.3, 0.3, 1.8, 0, 0.6, -0.6); }
-    else if (kind === 'mortar') { box(1.2, 0.4, 1.2, 0, 0, 0); box(0.35, 0.35, 1.4, 0, 0.7, -0.3); }
-    else if (kind === 'supplyCrate') { box(1.4, 1.1, 1.4, 0, 0, 0); }
-    else { box(1.2, 0.4, 1.2, 0, 0, 0); box(0.25, 3.6, 0.25, 0, 0.4, 0); }
+    // The gun swings inside the build's arc; the base it stands on does not.
+    const pivot = new THREE.Group();
+    pivot.name = 'gunPivot';
+    group.add(pivot);
+    const muzzle = (y: number, z: number) => {
+      const marker = new THREE.Object3D();
+      marker.name = 'emplacementMuzzle';
+      marker.position.set(0, y, z);
+      pivot.add(marker);
+    };
+
+    if (kind === 'mgNest') {
+      // Low sandbag parapet with a pintle-mounted MG in the middle: receiver,
+      // jacket and a long barrel have to read as a machine gun from 10 m out.
+      box(group, 2.2, 0.3, 2.2, 0, 0, 0);
+      box(group, 0.34, 0.75, 1.95, -0.93, 0.3, 0);
+      box(group, 0.34, 0.75, 1.95, 0.93, 0.3, 0);
+      box(group, 2.2, 0.75, 0.34, 0, 0.3, 0.93);
+      box(group, 0.18, 0.9, 0.18, 0, 0.6, 0.1, weaponMaterial);
+      box(pivot, 0.9, 0.55, 0.12, 0, 0.85, -0.72, weaponMaterial);
+      box(pivot, 0.5, 0.42, 1.15, 0, 1.02, 0.05, weaponMaterial);
+      box(pivot, 0.3, 0.3, 0.55, 0, 1.08, -0.72, weaponMaterial);
+      box(pivot, 0.16, 0.16, 1.25, 0, 1.15, -1.45, weaponMaterial);
+      box(pivot, 0.42, 0.34, 0.4, 0.42, 0.95, 0.18, weaponMaterial);
+      muzzle(1.23, -2.08);
+    } else if (kind === 'cannon') {
+      box(group, 1.9, 0.3, 1.9, 0, 0, 0);
+      box(group, 0.28, 0.85, 0.85, -1.0, 0.15, 0.35, weaponMaterial);
+      box(group, 0.28, 0.85, 0.85, 1.0, 0.15, 0.35, weaponMaterial);
+      box(pivot, 1.7, 0.9, 0.14, 0, 0.35, -0.75, weaponMaterial);
+      box(pivot, 0.55, 0.55, 0.7, 0, 0.75, 0.05, weaponMaterial);
+      box(pivot, 0.28, 0.28, 2.2, 0, 0.9, -1.25, weaponMaterial);
+      muzzle(1.04, -2.35);
+    } else if (kind === 'mortar') {
+      box(group, 1.3, 0.18, 1.3, 0, 0, 0);
+      box(group, 0.12, 0.85, 0.12, -0.45, 0.15, -0.25, weaponMaterial);
+      box(group, 0.12, 0.85, 0.12, 0.45, 0.15, -0.25, weaponMaterial);
+      const tube = box(pivot, 0.26, 1.9, 0.26, 0, 0.35, -0.2, weaponMaterial);
+      tube.rotation.x = -0.55; // elevated toward -z, the mortar's lob
+      muzzle(1.3 + Math.cos(0.55) * 0.95, -0.2 - Math.sin(0.55) * 0.95);
+    } else if (kind === 'supplyCrate') {
+      box(group, 1.4, 1.0, 1.4, 0, 0, 0);
+      box(group, 1.5, 0.12, 1.5, 0, 1.0, 0);
+      box(group, 1.46, 0.14, 0.16, 0, 0.3, 0.66, weaponMaterial);
+      box(group, 1.46, 0.14, 0.16, 0, 0.7, 0.66, weaponMaterial);
+    } else {
+      box(group, 0.16, 3.6, 0.16, -0.5, 0, -0.5);
+      box(group, 0.16, 3.6, 0.16, 0.5, 0, -0.5);
+      box(group, 0.16, 3.6, 0.16, -0.5, 0, 0.5);
+      box(group, 0.16, 3.6, 0.16, 0.5, 0, 0.5);
+      box(group, 1.5, 0.16, 1.5, 0, 3.6, 0);
+      box(group, 1.5, 0.12, 0.12, 0, 4.2, -0.69, weaponMaterial);
+      box(group, 1.5, 0.12, 0.12, 0, 4.2, 0.69, weaponMaterial);
+      box(group, 0.12, 0.12, 1.5, -0.69, 4.2, 0, weaponMaterial);
+      box(group, 0.12, 0.12, 1.5, 0.69, 4.2, 0, weaponMaterial);
+      box(group, 0.3, 0.4, 0.3, 0, 3.76, 0, weaponMaterial);
+    }
     return group;
   }
 
@@ -4169,13 +4270,19 @@ export class Game {
           color: snapshot.team === 'blue' ? 0x4a6fa8 : 0xa8544a,
           roughness: 0.85,
         });
-        mesh = this.createGhostMesh(snapshot.kind, material);
+        // Guns are bare metal, not team paint: a sandbag nest should not hide
+        // its barrel just because the base is blue or red.
+        const weaponMaterial = new THREE.MeshStandardMaterial({ color: 0x2b2f36, metalness: 0.55, roughness: 0.4 });
+        mesh = this.createEmplacementMesh(snapshot.kind, material, weaponMaterial);
         this.scene.add(mesh);
         this.emplacementMeshes.set(snapshot.id, mesh);
-        this.attachHealthBar(snapshot.id, snapshot.team, material);
+        this.attachHealthBar(snapshot.id, snapshot.team, emplacementSpec(snapshot.kind)?.height ?? 1.6);
       }
       mesh.position.set(snapshot.position.x, snapshot.position.y, snapshot.position.z);
-      mesh.rotation.y = snapshot.yaw;
+      // The placement faces baseYaw; the gun tracks the gunner's aim on top.
+      mesh.rotation.y = snapshot.baseYaw;
+      const pivot = mesh.getObjectByName('gunPivot');
+      if (pivot) pivot.rotation.y = snapshot.yaw - snapshot.baseYaw;
       this.updateHealthBarVisibility(snapshot.id, snapshot.hp, emplacementSpec(snapshot.kind)?.maxHp ?? 0);
     }
 
@@ -4211,17 +4318,17 @@ export class Game {
   }
 
   /** A small bar hovering just above the build: full = hidden, empty = fully red. */
-  private attachHealthBar(id: string, team: 'red' | 'blue', _parentMaterial: THREE.Material): void {
+  private attachHealthBar(id: string, team: 'red' | 'blue', height: number): void {
     const color = team === 'blue' ? 0x4a6fa8 : 0xa8544a;
     const bg = new THREE.Mesh(
       new THREE.PlaneGeometry(2.4, 0.2),
       new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.55, depthWrite: false }),
     );
-    bg.position.set(0, 2.1, 0);
+    bg.position.set(0, height + 0.6, 0);
     bg.rotation.x = -0.35;
     const barMat = new THREE.MeshBasicMaterial({ color, depthWrite: false });
     const bar = new THREE.Mesh(new THREE.PlaneGeometry(2.24, 0.13), barMat);
-    bar.position.set(0, 2.1, 0.001);
+    bar.position.set(0, height + 0.6, 0.001);
     bar.rotation.x = -0.35;
     // Keep the bar glued to the build: parent it to the emplacement group so it
     // moves/rotates with the mesh, but keep its scale in local space.
@@ -4262,16 +4369,14 @@ export class Game {
         this.emplacementFlashes.delete(id);
         const mesh = this.emplacementMeshes.get(id);
         if (!mesh) continue;
-        // Reset each material back to its base team color.
-        const snapshot = this.emplacedSnapshots.get(id);
-        const baseColor = snapshot?.team === 'blue' ? 0x4a6fa8 : 0xa8544a;
+        // Reset each part to the paint it was built with (team base, bare gun).
         mesh.traverse((object) => {
           const part = object as THREE.Mesh;
           if (!part.isMesh) return;
           const mats = Array.isArray(part.material) ? part.material : [part.material];
           for (const m of mats) {
             if (m instanceof THREE.MeshStandardMaterial) {
-              m.color.setHex(baseColor);
+              m.color.setHex(typeof part.userData.baseColor === 'number' ? part.userData.baseColor : 0x9a9a9a);
               m.emissive.setHex(0x000000);
             }
           }
@@ -4282,14 +4387,13 @@ export class Game {
       const mesh = this.emplacementMeshes.get(id);
       if (!mesh) continue;
       const t = 1 - (flash.until - now) / 180;
-      const snapshot = this.emplacedSnapshots.get(id);
-      const baseColor = new THREE.Color(snapshot?.team === 'blue' ? 0x4a6fa8 : 0xa8544a);
       mesh.traverse((object) => {
         const part = object as THREE.Mesh;
         if (!part.isMesh) return;
         const mats = Array.isArray(part.material) ? part.material : [part.material];
         for (const m of mats) {
           if (m instanceof THREE.MeshStandardMaterial) {
+            const baseColor = new THREE.Color(typeof part.userData.baseColor === 'number' ? part.userData.baseColor : 0x9a9a9a);
             m.color.copy(baseColor).lerp(flash.color, Math.max(0, 1 - t * 2));
             m.emissive.copy(flash.color).multiplyScalar(Math.max(0, 0.6 * (1 - t)));
           }
@@ -5234,26 +5338,64 @@ export class Game {
     requestAnimationFrame(fadeOut);
   }
 
+  /** Mark where a round landed: a bright flash, a ring on the surface and a few
+   *  debris chips. Big enough to read a spraying nest at range. */
   private createImpactSparks(position: THREE.Vector3, normal?: THREE.Vector3): void {
-    const sparkGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
-    const sparkMat = new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.9 });
-    const sparkMesh = new THREE.Mesh(sparkGeo, sparkMat);
-    sparkMesh.position.copy(position);
-    if (normal) sparkMesh.position.addScaledVector(normal, 0.08);
-    this.scene.add(sparkMesh);
+    const surface = normal ? normal.clone().normalize() : new THREE.Vector3(0, 1, 0);
 
-    const fadeOut = () => {
-      sparkMat.opacity -= 0.2;
-      sparkMesh.scale.multiplyScalar(0.9);
-      if (sparkMat.opacity > 0) {
-        requestAnimationFrame(fadeOut);
-      } else {
-        this.scene.remove(sparkMesh);
-        sparkGeo.dispose();
-        sparkMat.dispose();
-      }
-    };
-    requestAnimationFrame(fadeOut);
+    const flash = new THREE.Mesh(
+      this.impactFlashGeometry,
+      new THREE.MeshBasicMaterial({ color: 0xfff1a8, transparent: true, opacity: 0.95, depthWrite: false }),
+    );
+    flash.position.copy(position).addScaledVector(surface, 0.06);
+    this.scene.add(flash);
+
+    // A dust puff makes a strike legible at 50-90 m, where a spark is a pixel.
+    const dust = new THREE.Mesh(
+      this.impactFlashGeometry,
+      new THREE.MeshBasicMaterial({ color: 0xd8cdb4, transparent: true, opacity: 0.5, depthWrite: false }),
+    );
+    dust.position.copy(flash.position);
+    this.scene.add(dust);
+
+    // RingGeometry lies in its local XY plane, so face it along the surface.
+    const ring = new THREE.Mesh(
+      this.impactRingGeometry,
+      new THREE.MeshBasicMaterial({ color: 0xffc44d, transparent: true, opacity: 0.75, depthWrite: false, side: THREE.DoubleSide }),
+    );
+    ring.position.copy(flash.position);
+    ring.lookAt(flash.position.clone().add(surface));
+    this.scene.add(ring);
+
+    const chips: Array<{ mesh: THREE.Mesh; velocity: THREE.Vector3 }> = [];
+    for (let i = 0; i < 4; i++) {
+      const chip = new THREE.Mesh(
+        this.impactChipGeometry,
+        new THREE.MeshBasicMaterial({ color: 0xffdd77, transparent: true, opacity: 0.95 }),
+      );
+      chip.position.copy(position);
+      const velocity = surface.clone().multiplyScalar(1.5 + Math.random() * 2)
+        .add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(5));
+      this.scene.add(chip);
+      chips.push({ mesh: chip, velocity });
+    }
+
+    this.impactBursts.push({ flash, dust, ring, chips, life: 0, maxLife: 1.0 });
+    // A long firefight must not grow the effect list without bound.
+    if (this.impactBursts.length > 60) {
+      const oldest = this.impactBursts.shift();
+      if (oldest) this.removeImpactBurst(oldest);
+    }
+  }
+
+  /** Drop one burst's meshes and per-burst materials; the geometries are shared. */
+  private removeImpactBurst(burst: ImpactBurst): void {
+    for (const mesh of [burst.flash, burst.dust, burst.ring, ...burst.chips.map((chip) => chip.mesh)]) {
+      this.scene.remove(mesh);
+      const material = mesh.material;
+      if (Array.isArray(material)) material.forEach((entry) => entry.dispose());
+      else material.dispose();
+    }
   }
 
   private startReload(): void {
@@ -5348,7 +5490,9 @@ export class Game {
     mesh.lookAt(origin.clone().add(direction));
     this.scene.add(mesh);
 
-    const clampedDist = Math.max(8, Math.min(350, maxDistance));
+    // The endpoint is where the round lands, so it must not be padded out to a
+    // minimum: a wall two metres away would otherwise get its spark 8 m on.
+    const clampedDist = Math.max(0.5, Math.min(350, maxDistance));
     const velocity = direction.clone().multiplyScalar(speed);
     const maxLife = clampedDist / speed;
 
@@ -5631,6 +5775,31 @@ export class Game {
           }
         });
         this.muzzleFlashes.splice(i, 1);
+      }
+    }
+
+    for (let i = this.impactBursts.length - 1; i >= 0; i--) {
+      const burst = this.impactBursts[i];
+      burst.life += dt;
+      const t = Math.min(1, burst.life / burst.maxLife);
+      const flashMaterial = burst.flash.material as THREE.MeshBasicMaterial;
+      flashMaterial.opacity = Math.max(0, 0.95 * (1 - t * 2.2));
+      burst.flash.scale.setScalar(1 + t * 2.2);
+      const dustMaterial = burst.dust.material as THREE.MeshBasicMaterial;
+      dustMaterial.opacity = Math.max(0, 0.5 * (1 - t));
+      burst.dust.scale.setScalar(1 + t * 2.8);
+      const ringMaterial = burst.ring.material as THREE.MeshBasicMaterial;
+      ringMaterial.opacity = Math.max(0, 0.75 * (1 - t));
+      burst.ring.scale.setScalar(1 + t * 2.6);
+      for (const chip of burst.chips) {
+        chip.velocity.y -= 12 * dt;
+        chip.mesh.position.addScaledVector(chip.velocity, dt);
+        chip.mesh.rotation.x += dt * 9;
+        (chip.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.95 * (1 - t));
+      }
+      if (burst.life >= burst.maxLife) {
+        this.removeImpactBurst(burst);
+        this.impactBursts.splice(i, 1);
       }
     }
 

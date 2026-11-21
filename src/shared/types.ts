@@ -385,6 +385,32 @@ export const MORTAR_BLAST_DAMAGE = 90;
 export const EMPLACEMENT_ROUND_DAMAGE = 30;
 /** How far up or down the gunner may tilt the nest, in radians. */
 export const EMPLACEMENT_MAX_PITCH = 0.6;
+/** Half-angle a belt-fed nest walks each round off the aim line. A nest hoses
+ *  an area; it is not a precision rifle, so a burst visibly sprays. */
+export const EMPLACEMENT_MG_SPREAD = 0.035;
+
+/** One MG nest round's direction: the aimed line plus a random cone offset.
+ *  Shared so a server-run nest sprays exactly like the offline one. */
+export function emplacedShotDirection(
+  yaw: number,
+  pitch: number,
+  spread: number = EMPLACEMENT_MG_SPREAD,
+  random: () => number = Math.random,
+): { x: number; y: number; z: number } {
+  const cosPitch = Math.cos(pitch);
+  const aimX = -Math.sin(yaw) * cosPitch;
+  const aimY = Math.sin(pitch);
+  const aimZ = -Math.cos(yaw) * cosPitch;
+  // Right of the aim line: with forward (-sin, 0, -cos) this is (cos, 0, -sin),
+  // which is +x when the nest faces -z.
+  const side = (random() - 0.5) * 2 * spread;
+  const lift = (random() - 0.5) * 2 * spread;
+  const x = aimX + Math.cos(yaw) * side;
+  const y = aimY + lift;
+  const z = aimZ - Math.sin(yaw) * side;
+  const length = Math.hypot(x, y, z) || 1;
+  return { x: x / length, y: y / length, z: z / length };
+}
 
 // Named aliases keep existing call sites readable; VEHICLES is the only source.
 export const JEEP_COST = VEHICLES.jeep.cost;

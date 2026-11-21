@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
 const {
   emplacementSpec, EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE,
-  MORTAR_BLAST_RADIUS, MANNED_EMPLACEMENTS,
+  MORTAR_BLAST_RADIUS, MANNED_EMPLACEMENTS, EMPLACEMENT_MG_SPREAD, emplacedShotDirection,
 } = require('../dist/tests/sharedTypes.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 
@@ -215,6 +215,43 @@ test('an empty cannon stays silent', () => {
     gunner.frames.some((f) => f.type === 'emplacementMessage' && /out of rounds/i.test(f.message)),
     'the gunner hears the click',
   );
+});
+
+test('the MG nest cone stays centred on the aim and is actually used', () => {
+  assert.ok(EMPLACEMENT_MG_SPREAD > 0, 'a belt-fed nest has a spread cone');
+  const aim = emplacedShotDirection(0, 0, 0);
+  assert.ok(Math.abs(aim.x) < 1e-9 && Math.abs(aim.y) < 1e-9 && aim.z < -0.99, 'yaw 0 fires down -z');
+
+  let widest = 0;
+  for (let i = 0; i < 200; i++) {
+    const direction = emplacedShotDirection(0, 0);
+    assert.ok(Math.abs(Math.hypot(direction.x, direction.y, direction.z) - 1) < 1e-9, 'directions stay unit length');
+    // Each axis offset is at most `spread`, so the cone's edge is < 1.5x it.
+    widest = Math.max(widest, Math.acos(Math.min(1, -direction.z)));
+  }
+  assert.ok(widest > EMPLACEMENT_MG_SPREAD * 0.5, 'rounds walk off the aim line');
+  assert.ok(widest < EMPLACEMENT_MG_SPREAD * 1.5, 'but never leave the cone');
+});
+
+test('a held MG nest trigger fans its rounds instead of drilling one line', () => {
+  const game = new ServerGame();
+  const { gun, gunner } = manGun(game, 'mgNest');
+  const observer = join(game, 'red');
+  gunner.frames.length = 0;
+  assert.ok(gun.ammo >= 20, 'the belt has rounds to spare');
+
+  for (let i = 0; i < 20; i++) {
+    game.handleMessage(gunner.id, { type: 'fireEmplacement' });
+    game.world.updateTime(0.1); // clear the nest's fire interval
+  }
+
+  const shots = observer.frames.filter((frame) => frame.type === 'playerShot' && frame.weapon === 'mgNest');
+  assert.equal(shots.length, 20, 'the observer saw every round');
+  const lanes = new Set(shots.map((shot) => shot.direction.x.toFixed(3)));
+  assert.ok(lanes.size > 5, 'the burst covers several lanes');
+  for (const shot of shots) {
+    assert.ok(Math.acos(Math.min(1, -shot.direction.z)) < EMPLACEMENT_MG_SPREAD * 1.5, 'every round is inside the cone');
+  }
 });
 
 test('a round reset takes the shells with it', () => {

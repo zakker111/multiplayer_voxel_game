@@ -60,7 +60,7 @@ import {
   WORLD_HALF, vehicleSpec, emplacementSpec, BENCH_REACH, benchPosition, EmplacementKind,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_USE_REACH,
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW,
-  EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH,
+  EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH, emplacedShotDirection,
   EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
   type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots,
 } from '../shared/types';
@@ -526,8 +526,9 @@ export class ServerGame {
       return;
     }
 
-    const cosPitch = Math.cos(pitch);
-    const direction = { x: -Math.sin(yaw) * cosPitch, y: Math.sin(pitch), z: -Math.cos(yaw) * cosPitch };
+    // Every round walks off the aim line inside the nest's spread cone, so a
+    // held trigger hoses an area instead of drilling one point.
+    const direction = emplacedShotDirection(yaw, pitch);
     const origin = {
       x: emplacement.position.x + direction.x * 0.9,
       y: emplacement.position.y + 1.15,
