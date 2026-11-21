@@ -967,14 +967,6 @@ export class Game {
    * a slope and every build would be refused as "blocked".
    */
   private startLocalWorkshops(): void {
-    // A flat pad on a raised terrace fences in both vehicles and players: the
-    // jeep refuses a two-voxel drop and the player only steps up one voxel, so
-    // grade a one-voxel skirt down to the surrounding terrain. Without it the
-    // garage pad is a pen the jeep can never drive out of.
-    const liftTo = (x: number, z: number, top: number): void => {
-      const current = Math.floor(this.world.getGroundHeight(x, z));
-      for (let y = current + 1; y <= top; y++) this.world.setVoxel(x, y, z, y === top ? VOXEL_GRASS : VOXEL_DIRT, 3);
-    };
     for (const center of Object.values(WORKSHOP_CENTERS)) {
       for (let x = center.x - 5; x <= center.x + 17; x++) {
         for (let z = center.z - 7; z <= center.z + 7; z++) {
@@ -988,15 +980,17 @@ export class Game {
       // One wide apron exactly one voxel below the pad, rather than a staircase
       // of one-metre terraces: the shared vehicle rule samples a 2m ring, so a
       // single step is drivable in both directions while a second terrace would
-      // read as a wall and pen the jeep in.
+      // read as a wall and pen the jeep in. The pad itself is above the apron
+      // already, so the height test covers it.
       const apron = 3;
       const apronTop = GROUND_LEVEL - 1;
       for (let x = center.x - 5 - apron; x <= center.x + 17 + apron; x++) {
         for (let z = center.z - 7 - apron; z <= center.z + 7 + apron; z++) {
-          const onPad = x >= center.x - 5 && x <= center.x + 17 && z >= center.z - 7 && z <= center.z + 7;
-          if (onPad) continue;
-          if (this.world.getGroundHeight(x, z) - 0.5 >= apronTop) continue;
-          liftTo(x, z, apronTop);
+          const ground = this.world.getGroundHeight(x, z);
+          if (ground - 0.5 >= apronTop) continue;
+          for (let y = Math.floor(ground) + 1; y <= apronTop; y++) {
+            this.world.setVoxel(x, y, z, y === apronTop ? VOXEL_GRASS : VOXEL_DIRT, 3);
+          }
         }
       }
     }
@@ -1073,9 +1067,9 @@ export class Game {
     return vehicleClear(this.world, position, yaw, spec, this.localVehicleBodies(ignoreId, ignorePlayerId));
   }
 
-  /** The same clearance test without infantry: voxels and other vehicles only.
-   *  A driver uses this to tell a wall it must back away from from a bot that
-   *  will simply walk on. */
+  /** The same clearance test without infantry: voxels and other vehicles only,
+   *  so a stall can tell a wall it must back away from from a bot that will
+   *  simply walk on. */
   private localJeepRockClear(position: Position, yaw: number, spec: Footprint, ignoreId: string | null): boolean {
     return vehicleClear(this.world, position, yaw, spec, { vehicles: this.localJeeps, ignoreVehicleId: ignoreId });
   }
@@ -1734,11 +1728,11 @@ export class Game {
         const stepX = jeep.position.x - Math.sin(jeep.yaw) * 1.6;
         const stepZ = jeep.position.z - Math.cos(jeep.yaw) * 1.6;
         const stepGround = this.localJeepGround(stepX, stepZ, jeep.position.y);
-        const rockBlocked = stepGround === null ||
+        const blockedByRock = stepGround === null ||
           !this.localJeepRockClear({ x: stepX, y: stepGround, z: stepZ }, jeep.yaw, spec, jeep.id);
-        const crowdBlocked = this.bots.some(other => !other.isDead && other.name !== bot.name &&
+        const stalledOnCrowd = !blockedByRock && this.bots.some(other => !other.isDead && other.name !== bot.name &&
           Math.hypot(other.position.x - jeep.position.x, other.position.z - jeep.position.z) < 3.5);
-        if (rockBlocked || !crowdBlocked) {
+        if (!stalledOnCrowd) {
           mission.recoveries++;
           if (mission.recoveries > 4) { this.exitBotJeep(bot, jeep); return; }
           mission.reverseUntil = this.localTime + 1.4;

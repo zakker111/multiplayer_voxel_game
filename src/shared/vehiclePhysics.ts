@@ -1,13 +1,10 @@
 import { WORLD_HALF, vehicleSpec, type Footprint, type Position, type VehicleKind } from './types';
 
 /**
- * Vehicle physics shared by the authoritative server and the offline client.
- *
- * Online, these rules live only in the server's head: how a jeep finds the
- * ground, whether a body fits in a spot, and where a driver can step out. The
- * offline Beta build needs the same answers, so they live here as pure
- * functions over a tiny world interface instead of being copied into the
- * client, where the two would drift apart.
+ * Vehicle physics shared by the authoritative server and the offline client:
+ * how a jeep finds the ground, whether a body fits, and where a driver can
+ * step out. Pure functions over a one-method world interface, so the two sides
+ * cannot drift apart.
  */
 
 /** What the vehicle helpers may ask of a world: one solid-voxel query. */
@@ -38,6 +35,9 @@ export interface ClearanceBodies {
   ignoreVehicleId?: string | null;
   ignorePlayerId?: string | null;
 }
+
+/** One 1×1 voxel cell as a footprint, for the grid scan in vehicleClear. */
+const CELL: Footprint = { halfWidth: 0.5, halfLength: 0.5, height: 1 };
 
 /** Separating-axis test for two oriented footprints on the XZ plane. Touching
  *  edges count as clear, so parked vehicles can be adjacent, and each side uses
@@ -102,20 +102,9 @@ export function vehicleClear(
   const extentX = spec.halfLength * Math.abs(forward.x) + spec.halfWidth * Math.abs(side.x);
   const extentZ = spec.halfLength * Math.abs(forward.z) + spec.halfWidth * Math.abs(side.z);
   if (Math.abs(position.x) + extentX >= WORLD_HALF || Math.abs(position.z) + extentZ >= WORLD_HALF) return false;
-  const axes = [forward, side, { x: 1, z: 0 }, { x: 0, z: 1 }];
-  // Separating-axis test of the vehicle rectangle against each candidate cell
-  // (a 1×1 square centred on integer coordinates).
-  const cellOverlaps = (x: number, z: number): boolean => axes.every(axis => {
-    const jeepAt = position.x * axis.x + position.z * axis.z;
-    const jeepHalf = spec.halfLength * Math.abs(forward.x * axis.x + forward.z * axis.z) +
-      spec.halfWidth * Math.abs(side.x * axis.x + side.z * axis.z);
-    const cellAt = x * axis.x + z * axis.z;
-    const cellHalf = 0.5 * (Math.abs(axis.x) + Math.abs(axis.z));
-    return Math.abs(jeepAt - cellAt) <= jeepHalf + cellHalf;
-  });
   for (let x = Math.floor(position.x - extentX - 0.5); x <= Math.ceil(position.x + extentX + 0.5); x++) {
     for (let z = Math.floor(position.z - extentZ - 0.5); z <= Math.ceil(position.z + extentZ + 0.5); z++) {
-      if (!cellOverlaps(x, z)) continue;
+      if (!vehicleRectsOverlap(position.x, position.z, yaw, spec, x, z, 0, CELL)) continue;
       for (let y = Math.floor(position.y + 0.5); y <= Math.ceil(position.y + spec.height - 0.5); y++) {
         if (sampler.isSolid(x, y, z)) return false;
       }
@@ -151,6 +140,8 @@ export function vehicleExitSpot(
   sampler: SolidSampler, vehicle: VehicleBody, bodies: ClearanceBodies = {},
 ): Position | null {
   const spec = vehicleSpec(vehicle.kind);
+  const players = [...(bodies.players ?? [])];
+  const vehicles = [...(bodies.vehicles ?? [])];
   // Step out sideways, then further: the first ring clears the body itself.
   for (const radius of [spec.halfLength + 1.5, spec.halfLength + 2.5, spec.halfLength + 4]) {
     for (let i = 0; i < 8; i++) {
@@ -163,9 +154,9 @@ export function vehicleExitSpot(
         if (sampler.isSolid(Math.round(x + dx), Math.round(y + dy), Math.round(z + dz))) clear = false;
       }
       if (!clear) continue;
-      if ([...(bodies.players ?? [])].some(p => p.id !== bodies.ignorePlayerId && !p.isDead && !p.isSpectating &&
+      if (players.some(p => p.id !== bodies.ignorePlayerId && !p.isDead && !p.isSpectating &&
         Math.abs(p.position.y - y) < 2 && Math.hypot(p.position.x - x, p.position.z - z) < 1)) continue;
-      if ([...(bodies.vehicles ?? [])].some(v => v.id !== vehicle.id && v.id !== bodies.ignoreVehicleId &&
+      if (vehicles.some(v => v.id !== vehicle.id && v.id !== bodies.ignoreVehicleId &&
         Math.abs(v.position.y - y) < 2 && Math.hypot(v.position.x - x, v.position.z - z) < 3)) continue;
       return { x, y, z };
     }
