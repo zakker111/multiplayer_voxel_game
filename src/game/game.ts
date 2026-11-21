@@ -24,7 +24,10 @@ import {
   VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
   emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
-  EMPLACEMENT_USE_REACH,
+  EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE,
+  CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
+  SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW,
+  type EmplacementSpec, type Footprint,
   isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
@@ -38,6 +41,37 @@ const KILLFEED_SECONDS = 8;
 const DAMAGE_INDICATOR_SECONDS = 2;
 /** Latency probe interval (ms, measured every N seconds). */
 const PING_INTERVAL_SECONDS = 2;
+
+/** Offline Beta judges build spots with the server's own layout rules
+ *  (serverGame.ts), so a ghost that reads green places exactly the same way. */
+const LOCAL_EMPLACEMENT_ENEMY_BASE_RING = 40;
+const LOCAL_EMPLACEMENT_OWN_FLAG_CLEARANCE = 10;
+const LOCAL_EMPLACEMENT_WORKSHOP_CLEARANCE = 8;
+const LOCAL_EMPLACEMENT_SEPARATION = 0.5;
+const LOCAL_EMPLACEMENT_PREVIEW_INTERVAL = 120;
+
+/** Separating-axis test for two oriented footprints on the XZ plane, the same
+ *  rectangle test the server uses, so different build sizes compare correctly. */
+function localRectsOverlap(
+  ax: number, az: number, ayaw: number, aSpec: Footprint,
+  bx: number, bz: number, byaw: number, bSpec: Footprint,
+): boolean {
+  const rect = (yaw: number) => ({
+    f: { x: -Math.sin(yaw), z: -Math.cos(yaw) },
+    s: { x: Math.cos(yaw), z: -Math.sin(yaw) },
+  });
+  const a = rect(ayaw), b = rect(byaw);
+  for (const axis of [a.f, a.s, b.f, b.s]) {
+    const pa = ax * axis.x + az * axis.z;
+    const pb = bx * axis.x + bz * axis.z;
+    const ha = aSpec.halfLength * Math.abs(a.f.x * axis.x + a.f.z * axis.z) +
+      aSpec.halfWidth * Math.abs(a.s.x * axis.x + a.s.z * axis.z);
+    const hb = bSpec.halfLength * Math.abs(b.f.x * axis.x + b.f.z * axis.z) +
+      bSpec.halfWidth * Math.abs(b.s.x * axis.x + b.s.z * axis.z);
+    if (Math.abs(pa - pb) >= ha + hb) return false;
+  }
+  return true;
+}
 
 /** Offline Beta runs one bot jeep errand per team at a time, like the server. */
 const BOT_JEEP_MAX_DRIVERS_PER_TEAM = 1;
@@ -409,6 +443,15 @@ export class Game {
   private localJeeps: JeepSnapshot[] = [];
   private localJeepSeq = 0;
   private localJeepSync = 0;
+  /** Offline Beta builds and their shells, owned by the client like the jeeps. */
+  private localEmplacements: EmplacementSnapshot[] = [];
+  private localEmplacementSeq = 0;
+  private localEmplacementFireAt = new Map<string, number>();
+  private localShells: Array<{
+    id: string; kind: 'cannon' | 'mortar'; team: Team; mesh: THREE.Mesh;
+    position: THREE.Vector3; velocity: THREE.Vector3; firedAt: number;
+  }> = [];
+  private localShellSeq = 0;
   /** Bot jeep errands, keyed by bot name, plus a per-team cooldown between them. */
   private botJeepMissions = new Map<string, BotJeepMission>();
   private botJeepTeamReadyAt = new Map<Team, number>();
@@ -1122,6 +1165,448 @@ export class Game {
       this.assignBotJeepMissions();
       this.applyJeeps(this.localJeeps);
     }
+  }
+
+  // ---------------- Offline Beta emplacements --------------
+  // Online, the bench, the ghost verdict and every build rule live on the
+  // server. Beta runs the same loop here: craft at the bench, place the ghost,
+  // man the build, fire it, and resupply from a crate.
+
+  /** Per-frame work for offline builds: swing the manned gun with the look
+   *  direction inside its arc, and step every shell in the air. */
+  private updateLocalEmplacements(dt: number): void {
+    if (this.mountedEmplacementId) {
+      const nest = this.localEmplacements.find(e => e.id === this.mountedEmplacementId);
+      const spec = nest ? emplacementSpec(nest.kind) : undefined;
+      if (this.player.isDead || this.isSpectating || !nest || !spec) {
+        this.dismountLocalEmplacement(true);
+      } else {
+        const half = spec.arc / 2;
+        const offset = Math.atan2(Math.sin(this.player.yaw - nest.baseYaw), Math.cos(this.player.yaw - nest.baseYaw));
+        const yaw = Math.abs(offset) > half ? nest.baseYaw + Math.sign(offset) * half : this.player.yaw;
+        if (Math.abs(yaw - nest.yaw) > 0.01) {
+          nest.yaw = yaw;
+          this.applyEmplacements(this.localEmplacements);
+        }
+      }
+    }
+    this.updateLocalShells(dt);
+  }
+
+  /** Place a build offline, judged by the server's rules. The slot's crafted
+   *  blueprint is the deployment right; it is spent only on a clean placement. */
+  private placeLocalEmplacement(kind: EmplacementKind, position: Position, yaw: number, slot: number): void {
+    if (this.player.isDead || this.drivingJeepId) return;
+    if (this.craftedSlots[slot] !== kind) { this.showBenchMessage('No blueprint in that slot'); return; }
+    const verdict = this.localEmplacementSpot(kind, position, yaw);
+    if (!verdict.ok) { this.showBenchMessage(verdict.reason); return; }
+    this.craftedSlots[slot] = null;
+    const snapshot: EmplacementSnapshot = {
+      id: `local_emp_${++this.localEmplacementSeq}`,
+      kind,
+      team: this.playerTeam,
+      position: verdict.spot,
+      yaw: verdict.rotation,
+      baseYaw: verdict.rotation,
+      hp: verdict.spec.maxHp,
+      ammo: verdict.spec.ammo,
+      stock: 0,
+      gunnerId: null,
+    };
+    this.localEmplacements.push(snapshot);
+    this.applyEmplacements(this.localEmplacements);
+    this.cancelBlueprint();
+    this.showMessage(`🏗️ ${kind} placed · slot ${slot + 1} spent`);
+  }
+
+  /** The server's spot rules, mirrored: map bounds, base and pad clearance,
+   *  solid flat ground, separation from other builds, and the team limit. */
+  private localEmplacementSpot(
+    kind: EmplacementKind, position: Position, yaw: number,
+  ): { ok: true; spec: EmplacementSpec; spot: Position; rotation: number } | { ok: false; reason: string } {
+    const spec = emplacementSpec(kind);
+    if (!spec) return { ok: false, reason: 'Unknown blueprint' };
+    const extent = Math.hypot(spec.halfWidth, spec.halfLength);
+    if (Math.abs(position.x) > WORLD_HALF - extent - 1 || Math.abs(position.z) > WORLD_HALF - extent - 1) {
+      return { ok: false, reason: 'Outside the map' };
+    }
+    const ownFlag = this.playerTeam === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
+    const enemyFlag = this.playerTeam === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    if (Math.hypot(position.x - enemyFlag.x, position.z - enemyFlag.z) < LOCAL_EMPLACEMENT_ENEMY_BASE_RING) {
+      return { ok: false, reason: 'Too close to the enemy base' };
+    }
+    if (Math.hypot(position.x - ownFlag.x, position.z - ownFlag.z) < LOCAL_EMPLACEMENT_OWN_FLAG_CLEARANCE) {
+      return { ok: false, reason: 'Too close to your flag stand' };
+    }
+    const workshop = this.workshops?.[this.playerTeam].position;
+    if (workshop && Math.hypot(position.x - workshop.x, position.z - workshop.z) < LOCAL_EMPLACEMENT_WORKSHOP_CLEARANCE) {
+      return { ok: false, reason: 'Keep the workshop pad clear' };
+    }
+
+    const rotation = Number.isFinite(yaw) ? yaw : 0;
+    const ground = this.world.getGroundHeight(position.x, position.z);
+    const spot = { x: position.x, y: ground, z: position.z };
+    if (!this.localFootprintClear(spot.x, ground, spot.z, rotation, spec)) return { ok: false, reason: 'Needs flat, clear ground' };
+
+    const padded = { ...spec, halfWidth: spec.halfWidth + LOCAL_EMPLACEMENT_SEPARATION, halfLength: spec.halfLength + LOCAL_EMPLACEMENT_SEPARATION };
+    for (const other of this.localEmplacements) {
+      const otherSpec = emplacementSpec(other.kind) ?? spec;
+      if (Math.abs(other.position.y - ground) >= (spec.height + otherSpec.height) / 2) continue;
+      if (localRectsOverlap(spot.x, spot.z, rotation, padded, other.position.x, other.position.z, other.baseYaw, otherSpec)) {
+        return { ok: false, reason: 'Too close to another emplacement' };
+      }
+    }
+
+    const built = this.localEmplacements.filter(e => e.team === this.playerTeam && e.kind === kind).length;
+    if (built >= spec.teamLimit) return { ok: false, reason: 'Team limit for that build reached' };
+    return { ok: true, spec, spot, rotation };
+  }
+
+  /** Every corner of the footprint needs level ground and clear air up to the
+   *  build's full height, and no jeep may be parked inside it. */
+  private localFootprintClear(x: number, y: number, z: number, yaw: number, spec: EmplacementSpec): boolean {
+    const forwardX = -Math.sin(yaw), forwardZ = -Math.cos(yaw);
+    const rightX = -forwardZ, rightZ = forwardX;
+    const samples: Array<[number, number]> = [
+      [0, 0], [spec.halfLength, 0], [-spec.halfLength, 0], [0, spec.halfWidth], [0, -spec.halfWidth],
+      [spec.halfLength, spec.halfWidth], [spec.halfLength, -spec.halfWidth],
+      [-spec.halfLength, spec.halfWidth], [-spec.halfLength, -spec.halfWidth],
+    ];
+    for (const [forward, side] of samples) {
+      const px = x + forwardX * forward + rightX * side;
+      const pz = z + forwardZ * forward + rightZ * side;
+      if (Math.abs(px) > WORLD_HALF - 1 || Math.abs(pz) > WORLD_HALF - 1) return false;
+      const ground = this.world.getGroundHeight(px, pz);
+      if (Math.abs(ground - y) > 1) return false;
+      for (let up = 0.5; up < spec.height + 0.5; up += 0.5) {
+        if (this.world.isSolid(Math.round(px), Math.round(ground + up), Math.round(pz))) return false;
+      }
+    }
+    const radius = Math.hypot(spec.halfWidth, spec.halfLength) + Math.hypot(1.3, 2);
+    return !this.localJeeps.some(jeep => !jeep.wreck &&
+      Math.abs(jeep.position.y - y) < 2 && Math.hypot(jeep.position.x - x, jeep.position.z - z) < radius);
+  }
+
+  /** Craft one blueprint from the bench menu, paying the workshop stock. */
+  private craftLocalBlueprint(kind: EmplacementKind, slot: number): void {
+    if (this.player.isDead || this.drivingJeepId) { this.showBenchMessage('Cannot craft right now'); return; }
+    const spec = emplacementSpec(kind);
+    if (!spec) { this.showBenchMessage('That is not a real blueprint'); return; }
+    const bench = this.workshops ? benchPosition(this.workshops[this.playerTeam].position) : null;
+    if (!bench || this.player.position.distanceTo(new THREE.Vector3(bench.x, bench.y, bench.z)) > BENCH_REACH) {
+      this.showBenchMessage('Stand at your blueprint bench to craft');
+      return;
+    }
+    if (this.craftedSlots[slot] !== null) { this.showBenchMessage('That slot already has a blueprint in it'); return; }
+    const workshop = this.workshops![this.playerTeam];
+    if (workshop.stock < spec.cost) { this.showBenchMessage('Not enough workshop blocks for that build'); return; }
+    workshop.stock -= spec.cost;
+    this.craftedSlots[slot] = kind;
+    this.showBenchMessage(`🔧 Crafted ${kind} into slot ${slot + 1} · -${spec.cost} blocks`);
+  }
+
+  /** Climb into one of your own nests offline: reach, team, occupancy and the
+   *  flag rule are all checked here, exactly as the server checks them. */
+  private mountLocalEmplacement(emplacement: EmplacementSnapshot): void {
+    if (!MANNED_EMPLACEMENTS.includes(emplacement.kind)) { this.showMessage('That build cannot be manned'); return; }
+    if (emplacement.team !== this.playerTeam) { this.showMessage('That nest belongs to the other team'); return; }
+    if (emplacement.gunnerId) { this.showMessage('That nest is already manned'); return; }
+    if (this.drivingJeepId) return;
+    if (this.player.carryingFlag) { this.showMessage('Drop the flag before manning a nest'); return; }
+    if (this.player.position.distanceTo(new THREE.Vector3(emplacement.position.x, emplacement.position.y, emplacement.position.z)) > EMPLACEMENT_MOUNT_REACH) {
+      this.showMessage('Walk up to the nest to man it');
+      return;
+    }
+    emplacement.gunnerId = this.localPlayerId;
+    emplacement.yaw = emplacement.baseYaw;
+    this.player.position.set(emplacement.position.x, emplacement.position.y, emplacement.position.z);
+    this.player.velocity.set(0, 0, 0);
+    this.player.updateCamera();
+    this.mountedEmplacementId = emplacement.id;
+    this.cancelBlueprint();
+    this.weaponContainer.visible = false;
+    this.applyEmplacements(this.localEmplacements);
+    const label = emplacement.kind === 'mgNest' ? 'MG nest' : emplacement.kind;
+    this.showMessage(`🔫 Manning the ${label} · hold click to fire · F to step out`);
+  }
+
+  /** Step out of the nest; a forced exit falls back to the seat itself. */
+  private dismountLocalEmplacement(forced = false): void {
+    const emplacement = this.localEmplacements.find(e => e.id === this.mountedEmplacementId);
+    this.mountedEmplacementId = null;
+    this.isLeftDown = false;
+    this.weaponContainer.visible = !this.isSpectating;
+    if (!emplacement) return;
+    emplacement.gunnerId = null;
+    emplacement.yaw = emplacement.baseYaw;
+    this.localEmplacementFireAt.delete(emplacement.id);
+    if (!this.player.isDead) {
+      const spot = this.localEmplacementExitSpot(emplacement);
+      if (!spot && !forced) { this.showMessage('No clear way out of the nest'); }
+      if (spot) {
+        this.player.position.set(spot.x, spot.y, spot.z);
+        this.player.velocity.set(0, 0, 0);
+        this.player.updateCamera();
+      }
+    }
+    this.applyEmplacements(this.localEmplacements);
+  }
+
+  /** First ring spot a body fits in, like the server's safeEmplacementExit. */
+  private localEmplacementExitSpot(emplacement: EmplacementSnapshot): Position | null {
+    const spec = emplacementSpec(emplacement.kind);
+    if (!spec) return null;
+    const base = Math.hypot(spec.halfWidth, spec.halfLength);
+    for (const radius of [base + 1.2, base + 2.2, base + 3.4]) {
+      for (let i = 0; i < 8; i++) {
+        const angle = emplacement.baseYaw + i * Math.PI / 4;
+        const x = emplacement.position.x + Math.cos(angle) * radius;
+        const z = emplacement.position.z + Math.sin(angle) * radius;
+        if (Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) continue;
+        const y = this.world.getGroundHeight(x, z);
+        if (Math.abs(y - emplacement.position.y) > 1) continue;
+        let clear = true;
+        for (const dx of [-0.45, 0.45]) for (const dz of [-0.45, 0.45]) for (const dy of [0.3, 1, 1.8]) {
+          if (this.world.isSolid(Math.round(x + dx), Math.round(y + dy), Math.round(z + dz))) clear = false;
+        }
+        if (!clear) continue;
+        if (this.localEmplacements.some(e => e.id !== emplacement.id &&
+          Math.abs(e.position.y - y) < 2 && Math.hypot(e.position.x - x, e.position.z - z) < 2)) continue;
+        return { x, y, z };
+      }
+    }
+    return null;
+  }
+
+  /** One round from the manned build. The nest aims itself: yaw comes from the
+   *  clamped gun, pitch from the gunner's look, never from a client ray. */
+  private fireLocalEmplacement(): void {
+    const emplacement = this.localEmplacements.find(e => e.id === this.mountedEmplacementId);
+    if (!emplacement || this.player.isDead || this.isSpectating) return;
+    const spec = emplacementSpec(emplacement.kind);
+    if (!spec || !spec.fireInterval) return;
+    if (emplacement.ammo <= 0) { this.showMessage('The nest is out of rounds'); return; }
+    const last = this.localEmplacementFireAt.get(emplacement.id);
+    if (last !== undefined && this.localTime - last < spec.fireInterval) return;
+    this.localEmplacementFireAt.set(emplacement.id, this.localTime);
+    emplacement.ammo -= 1;
+
+    const pitch = Math.max(-EMPLACEMENT_MAX_PITCH, Math.min(EMPLACEMENT_MAX_PITCH, this.player.pitch));
+    if (emplacement.kind === 'cannon' || emplacement.kind === 'mortar') {
+      this.fireLocalShell(emplacement, pitch);
+      this.applyEmplacements(this.localEmplacements);
+      return;
+    }
+
+    this.sounds.rifleShot();
+    const cosPitch = Math.cos(pitch);
+    const direction = { x: -Math.sin(emplacement.yaw) * cosPitch, y: Math.sin(pitch), z: -Math.cos(emplacement.yaw) * cosPitch };
+    const origin = {
+      x: emplacement.position.x + direction.x * 0.9,
+      y: emplacement.position.y + 1.15,
+      z: emplacement.position.z + direction.z * 0.9,
+    };
+    const muzzle = new THREE.Vector3(origin.x, origin.y, origin.z);
+    const rayDir = new THREE.Vector3(direction.x, direction.y, direction.z);
+    const terrainHit = this.world.raycast(muzzle, rayDir, spec.maxRange);
+    const maxDist = terrainHit ? terrainHit.distance : spec.maxRange;
+
+    let best: { bot: Bot; distance: number; headshot: boolean } | null = null;
+    for (const bot of this.bots) {
+      if (bot.isDead || bot.team === emplacement.team) continue;
+      for (const [height, headshot] of [[1.55, true], [1.0, false]] as const) {
+        const to = {
+          x: bot.position.x - origin.x,
+          y: bot.position.y + height - origin.y,
+          z: bot.position.z - origin.z,
+        };
+        const along = to.x * direction.x + to.y * direction.y + to.z * direction.z;
+        if (along <= 0 || along > maxDist) continue;
+        const perp = Math.hypot(to.x - direction.x * along, to.y - direction.y * along, to.z - direction.z * along);
+        if (perp > (headshot ? 0.35 : 0.6)) continue;
+        if (!best || along < best.distance) best = { bot, distance: along, headshot };
+      }
+    }
+
+    const tracerDist = best ? best.distance : maxDist;
+    this.createBulletTracer(muzzle, rayDir, tracerDist, 300);
+    if (best) {
+      const impact = muzzle.clone().add(rayDir.clone().multiplyScalar(best.distance));
+      this.createImpactSparks(impact);
+      this.damageLocalBot(best.bot, EMPLACEMENT_ROUND_DAMAGE * (best.headshot ? 1.5 : 1), best.headshot);
+    }
+    this.applyEmplacements(this.localEmplacements);
+  }
+
+  /** Cannon rounds fly flat and fast; mortar rounds leave at 45 degrees so they
+   *  clear cover and drop on the far side, like the server's shells. */
+  private fireLocalShell(emplacement: EmplacementSnapshot, pitch: number): void {
+    const forward = { x: -Math.sin(emplacement.yaw), z: -Math.cos(emplacement.yaw) };
+    const isMortar = emplacement.kind === 'mortar';
+    const speed = isMortar ? 42 : 85;
+    const launchPitch = isMortar ? Math.max(pitch, Math.PI / 4) : pitch;
+    const cosPitch = Math.cos(launchPitch);
+    const muzzle = isMortar ? 1.0 : 1.6;
+    const position = new THREE.Vector3(
+      emplacement.position.x + forward.x * muzzle,
+      emplacement.position.y + 1.2,
+      emplacement.position.z + forward.z * muzzle,
+    );
+    const velocity = new THREE.Vector3(
+      forward.x * speed * cosPitch,
+      Math.sin(launchPitch) * speed,
+      forward.z * speed * cosPitch,
+    );
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(isMortar ? 0.28 : 0.2, 8, 6),
+      new THREE.MeshBasicMaterial({ color: isMortar ? 0x2b2b2b : 0x3a3a3a }),
+    );
+    mesh.position.copy(position);
+    this.scene.add(mesh);
+    this.localShells.push({
+      id: `local_shell_${++this.localShellSeq}`,
+      kind: isMortar ? 'mortar' : 'cannon',
+      team: emplacement.team,
+      mesh,
+      position,
+      velocity,
+      firedAt: this.localTime,
+    });
+    this.sounds.collapse();
+  }
+
+  /** Step the shells offline and burst them on ground, a body or a build. */
+  private updateLocalShells(dt: number): void {
+    if (this.localShells.length === 0) return;
+    for (let i = this.localShells.length - 1; i >= 0; i--) {
+      const shell = this.localShells[i];
+      shell.velocity.y -= EMPLACEMENT_SHELL_GRAVITY * dt;
+      shell.position.addScaledVector(shell.velocity, dt);
+      shell.mesh.position.copy(shell.position);
+
+      const ground = this.world.getGroundHeight(shell.position.x, shell.position.z);
+      let hitBot: Bot | null = null;
+      let botDistance = 1.2;
+      for (const bot of this.bots) {
+        if (bot.isDead || bot.team === shell.team) continue;
+        const distance = Math.hypot(
+          bot.position.x - shell.position.x,
+          bot.position.y + 1 - shell.position.y,
+          bot.position.z - shell.position.z,
+        );
+        if (distance < botDistance) { botDistance = distance; hitBot = bot; }
+      }
+      const hitBuild = this.localEmplacements.find(e => e.team !== shell.team &&
+        Math.hypot(e.position.x - shell.position.x, e.position.y + 0.8 - shell.position.y, e.position.z - shell.position.z) < 1.3);
+      const stale = this.localTime - shell.firedAt > 8;
+      if (shell.position.y > ground && !hitBot && !hitBuild && !stale) continue;
+
+      const impact = shell.position.clone();
+      impact.y = Math.max(ground, impact.y);
+      this.explodeLocalShell(shell.kind, shell.team, impact);
+      if (hitBuild) this.damageLocalEmplacement(hitBuild.id, shell.kind === 'mortar' ? MORTAR_BLAST_DAMAGE : CANNON_BLAST_DAMAGE);
+      this.scene.remove(shell.mesh);
+      shell.mesh.geometry.dispose();
+      (shell.mesh.material as THREE.Material).dispose();
+      this.localShells.splice(i, 1);
+    }
+  }
+
+  /** Splash damage with the shared radii and power, strongest at the centre. */
+  private explodeLocalShell(kind: 'cannon' | 'mortar', team: Team, impact: THREE.Vector3): void {
+    const radius = kind === 'mortar' ? MORTAR_BLAST_RADIUS : CANNON_BLAST_RADIUS;
+    const power = kind === 'mortar' ? MORTAR_BLAST_DAMAGE : CANNON_BLAST_DAMAGE;
+    const material = new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.85, depthWrite: false });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius * 0.6, 12, 8), material);
+    mesh.position.copy(impact);
+    this.scene.add(mesh);
+    this.shellBlasts.push({ mesh, material, until: performance.now() / 1000 + 0.35 });
+    this.sounds.collapse();
+    for (const bot of this.bots) {
+      if (bot.isDead || bot.team === team) continue;
+      const distance = Math.hypot(bot.position.x - impact.x, bot.position.y + 1 - impact.y, bot.position.z - impact.z);
+      if (distance > radius) continue;
+      this.damageLocalBot(bot, Math.max(power * 0.25, power * (1 - distance / radius)), false);
+    }
+  }
+
+  /** Damage a build offline; a wrecked one takes its gunner down with it. */
+  private damageLocalEmplacement(id: string, damage: number): void {
+    const emplacement = this.localEmplacements.find(e => e.id === id);
+    if (!emplacement) return;
+    const spec = emplacementSpec(emplacement.kind);
+    if (!spec) return;
+    emplacement.hp = Math.max(0, emplacement.hp - damage);
+    const snapshot = this.emplacedSnapshots.get(id);
+    if (snapshot) snapshot.hp = emplacement.hp;
+    this.updateHealthBarVisibility(id, emplacement.hp, spec.maxHp);
+    this.emplacementFlashes.set(id, { until: performance.now() + 180, color: new THREE.Color(0xffffff) });
+    if (emplacement.hp > 0) return;
+    if (this.mountedEmplacementId === id) this.dismountLocalEmplacement(true);
+    this.localEmplacements = this.localEmplacements.filter(e => e.id !== id);
+    this.localEmplacementFireAt.delete(id);
+    this.applyEmplacements(this.localEmplacements);
+    this.showMessage(`💥 Your ${emplacement.kind} was destroyed`);
+  }
+
+  /** Shots from a build land like player shots: hp, flinch, hit marker, and the
+   *  team's kill counter plus the flag drop when the target goes down. */
+  private damageLocalBot(bot: Bot, damage: number, headshot: boolean): void {
+    if (bot.isDead) return;
+    bot.hp -= damage;
+    bot.lastDamageTime = Date.now();
+    bot.flinchTimer = 0.22;
+    this.hitMarkerTimer = 0.25;
+    this.sounds.hitMarker();
+    if (headshot) this.sounds.headshot();
+    if (bot.hp > 0) {
+      this.updateBotNameTag(bot, bot.hp < 30 ? '🏃 TACTICAL RETREAT' : '⚡ UNDER HOSTILE ATTACK!', '#ff4444');
+      return;
+    }
+    bot.isDead = true;
+    bot.mesh.visible = false;
+    bot.respawnTimer = 4;
+    if (bot.carryingFlag) {
+      const carried = bot.team === 'blue' ? this.redFlag : this.blueFlag;
+      if (carried) {
+        carried.carrier = null;
+        carried.isDropped = true;
+        carried.dropTimer = 30;
+        const dropY = this.world.getGroundHeight(bot.position.x, bot.position.z);
+        carried.currentPos.set(bot.position.x, dropY, bot.position.z);
+        carried.mesh.position.copy(carried.currentPos);
+        carried.mesh.visible = true;
+        this.showMessage(`🚩 ${carried.team.toUpperCase()} flag was dropped by ${bot.name}!`);
+      }
+      bot.carryingFlag = false;
+    }
+    if (this.playerTeam === 'blue') this.blueKills++; else this.redKills++;
+    this.sounds.killSound();
+    this.showMessage(`🎯 Your emplacement killed ${bot.name}${headshot ? ' (HEADSHOT!)' : ''}`);
+  }
+
+  /** G/E at a forward crate offline: blocks in so a squad can resupply away
+   *  from the pad, or back out into the player's build inventory. */
+  private useLocalSupplyCrate(crate: EmplacementSnapshot, action: 'deposit' | 'draw'): void {
+    if (this.player.isDead) return;
+    if (this.player.position.distanceTo(new THREE.Vector3(crate.position.x, crate.position.y, crate.position.z)) > EMPLACEMENT_USE_REACH) {
+      this.showMessage('Walk up to the crate to use it');
+      return;
+    }
+    if (action === 'deposit') {
+      const amount = Math.min(this.inventory, SUPPLY_CRATE_CAPACITY - crate.stock);
+      if (amount <= 0) { this.showMessage(crate.stock >= SUPPLY_CRATE_CAPACITY ? 'The crate is full' : 'Mine blocks to fill the crate'); return; }
+      crate.stock += amount;
+      this.inventory -= amount;
+      this.showMessage(`📦 Stored ${amount} blocks · crate ${crate.stock}/${SUPPLY_CRATE_CAPACITY}`);
+    } else {
+      if (crate.stock <= 0) { this.showMessage('The crate is empty'); return; }
+      const amount = Math.min(SUPPLY_CRATE_DRAW, crate.stock);
+      crate.stock -= amount;
+      this.inventory += amount;
+      this.showMessage(`📦 Drew ${amount} blocks · carrying ${this.inventory}`);
+    }
+    this.applyEmplacements(this.localEmplacements);
   }
 
   /** Pick one bot per team to run a jeep errand. It is a demo of the vehicle
@@ -3402,7 +3887,7 @@ export class Game {
   // from the server's own placement rules, and a click just sends the intent.
 
   private toggleBlueprint(index: number): void {
-    if (this.gameMode !== 'online' || this.isSpectating || this.player.isDead || this.drivingJeepId) return;
+    if (!this.benchEnabled || this.isSpectating || this.player.isDead || this.drivingJeepId) return;
     const kind = this.craftedSlots[index];
     if (!kind) {
       this.clearGhost();
@@ -3462,7 +3947,14 @@ export class Game {
    *  reach check and the slot, so this only states the intent. */
   craftFromBench(kind: EmplacementKind, slot: number): void {
     if (!this.benchOpen) { this.showBenchMessage('Stand at your blueprint bench to craft'); return; }
+    if (this.gameMode !== 'online') { this.craftLocalBlueprint(kind, slot); return; }
     this.networkClient?.send({ type: 'craftBlueprint', kind, slot });
+  }
+
+  /** The bench is Beta's (or an online server's) to show; offline Beta runs it
+   *  here, and a plain local match leaves builds to the server-backed modes. */
+  private get benchEnabled(): boolean {
+    return this.betaLabel || this.gameMode === 'online';
   }
 
   private cancelBlueprint(): void {
@@ -3500,7 +3992,7 @@ export class Game {
 
   /** A mannable nest of your team within reach, or null. */
   private nearbyMannableEmplacement(): EmplacementSnapshot | null {
-    if (this.gameMode !== 'online') return null;
+    if (!this.benchEnabled) return null;
     const reachSq = EMPLACEMENT_MOUNT_REACH * EMPLACEMENT_MOUNT_REACH;
     let best: EmplacementSnapshot | null = null;
     let bestDistanceSq = Infinity;
@@ -3518,7 +4010,7 @@ export class Game {
 
   /** An own-team supply crate within reach, or null. */
   private nearbySupplyCrate(): EmplacementSnapshot | null {
-    if (this.gameMode !== 'online') return null;
+    if (!this.benchEnabled) return null;
     const reachSq = EMPLACEMENT_USE_REACH * EMPLACEMENT_USE_REACH;
     let best: EmplacementSnapshot | null = null;
     let bestDistanceSq = Infinity;
@@ -3583,6 +4075,7 @@ export class Game {
     const now = performance.now();
     if (now - this.lastEmplacementFire < 100) return;
     this.lastEmplacementFire = now;
+    if (this.gameMode !== 'online') { this.fireLocalEmplacement(); return; }
     this.networkClient?.send({ type: 'fireEmplacement' });
   }
 
@@ -3690,9 +4183,21 @@ export class Game {
     this.ghost.rotation.y = this.ghostYaw;
     this.ghost.visible = true;
     const now = performance.now();
-    if (now - this.ghostRequestedAt >= 120) {
+    if (now - this.ghostRequestedAt >= LOCAL_EMPLACEMENT_PREVIEW_INTERVAL) {
       this.ghostRequestedAt = now;
-      this.networkClient?.send({ type: 'previewEmplacement', kind, position: spot, yaw: this.ghostYaw, slot: this.blueprintIndex });
+      if (this.gameMode === 'online') {
+        this.networkClient?.send({ type: 'previewEmplacement', kind, position: spot, yaw: this.ghostYaw, slot: this.blueprintIndex });
+      } else {
+        // Offline the ghost is judged by the same rules a placement uses, so a
+        // green tint really means the click will build.
+        const verdict = this.localEmplacementSpot(kind, spot, this.ghostYaw);
+        this.ghostValid = verdict.ok;
+        if (verdict.ok) {
+          this.ghostPosition = verdict.spot;
+          this.ghost.position.set(verdict.spot.x, verdict.spot.y, verdict.spot.z);
+        }
+        this.tintGhost(verdict.ok);
+      }
     }
   }
 
@@ -3700,13 +4205,17 @@ export class Game {
     if (this.blueprintIndex === null || !this.ghostPosition || !this.ghostValid) return;
     const kind = this.craftedSlots[this.blueprintIndex];
     if (!kind) return;
-    this.networkClient?.send({
-      type: 'placeEmplacement',
-      kind,
-      position: this.ghostPosition,
-      yaw: this.ghostYaw,
-      slot: this.blueprintIndex,
-    });
+    if (this.gameMode === 'online') {
+      this.networkClient?.send({
+        type: 'placeEmplacement',
+        kind,
+        position: this.ghostPosition,
+        yaw: this.ghostYaw,
+        slot: this.blueprintIndex,
+      });
+    } else {
+      this.placeLocalEmplacement(kind, this.ghostPosition, this.ghostYaw, this.blueprintIndex);
+    }
     this.ghostRequestedAt = 0; // ask again at once in case that spot is taken now
   }
 
@@ -3869,9 +4378,15 @@ export class Game {
         }
       } else if (this.drivingJeepId) {
         this.exitLocalJeep();
+      } else if (this.mountedEmplacementId) {
+        this.dismountLocalEmplacement();
       } else {
-        const jeep = this.nearestJeep();
-        if (jeep) this.enterLocalJeep(jeep);
+        const nest = this.nearbyMannableEmplacement();
+        if (nest) this.mountLocalEmplacement(nest);
+        else {
+          const jeep = this.nearestJeep();
+          if (jeep) this.enterLocalJeep(jeep);
+        }
       }
       return;
     }
@@ -3890,6 +4405,9 @@ export class Game {
         }
       } else if (atWorkshop) {
         this.buildLocalJeep();
+      } else {
+        const crate = this.nearbySupplyCrate();
+        if (crate) this.useLocalSupplyCrate(crate, 'draw');
       }
       return;
     }
@@ -3904,6 +4422,9 @@ export class Game {
         }
       } else if (atWorkshop) {
         this.depositToLocalWorkshop();
+      } else {
+        const crate = this.nearbySupplyCrate();
+        if (crate) this.useLocalSupplyCrate(crate, 'deposit');
       }
       return;
     }
@@ -3920,7 +4441,7 @@ export class Game {
       this.ghostYaw += Math.PI / 2;
       this.ghostRequestedAt = 0; // re-ask the server for this rotation
     }
-    if (e.code === 'KeyB' && !e.repeat && this.gameMode === 'online') { this.toggleBenchMenu(); return; }
+    if (e.code === 'KeyB' && !e.repeat && this.benchEnabled) { this.toggleBenchMenu(); return; }
     if (e.code === 'KeyR') this.startReload();
 
     this.player.handleKeyDown(e.code);
@@ -4864,7 +5385,10 @@ export class Game {
       this.player.velocity.set(0, 0, 0);
     } else this.player.update(dt);
     // Offline matches drive their own jeeps; a connected server stays the owner.
-    if (this.gameMode !== 'online') this.updateLocalVehicles(dt);
+    if (this.gameMode !== 'online') {
+      this.updateLocalVehicles(dt);
+      this.updateLocalEmplacements(dt);
+    }
     for (const { state, mesh } of this.jeeps.values()) {
       mesh.position.lerp(new THREE.Vector3(state.position.x, state.position.y, state.position.z), Math.min(dt * 14, 1));
       const delta = Math.atan2(Math.sin(state.yaw - mesh.rotation.y), Math.cos(state.yaw - mesh.rotation.y));
