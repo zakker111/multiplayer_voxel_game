@@ -36,8 +36,26 @@ export interface ClearanceBodies {
   ignorePlayerId?: string | null;
 }
 
-/** One 1×1 voxel cell as a footprint, for the grid scan in vehicleClear. */
+/** One 1×1 voxel cell as a footprint, for the grid scans below. */
 const CELL: Footprint = { halfWidth: 0.5, halfLength: 0.5, height: 1 };
+
+/** The voxel cells a vehicle's oriented footprint overlaps. Ground and
+ *  clearance walk the same cells, so they cannot disagree about a step the body
+ *  is standing on: that disagreement used to stop a jeep dead at a one-voxel
+ *  ledge it could have climbed. */
+function footprintCells(position: Position, yaw: number, spec: Footprint): Array<[number, number]> {
+  const sin = Math.sin(yaw), cos = Math.cos(yaw);
+  const forward = { x: -sin, z: -cos }, side = { x: cos, z: -sin };
+  const extentX = spec.halfLength * Math.abs(forward.x) + spec.halfWidth * Math.abs(side.x);
+  const extentZ = spec.halfLength * Math.abs(forward.z) + spec.halfWidth * Math.abs(side.z);
+  const cells: Array<[number, number]> = [];
+  for (let x = Math.floor(position.x - extentX - 0.5); x <= Math.ceil(position.x + extentX + 0.5); x++) {
+    for (let z = Math.floor(position.z - extentZ - 0.5); z <= Math.ceil(position.z + extentZ + 0.5); z++) {
+      if (vehicleRectsOverlap(position.x, position.z, yaw, spec, x, z, 0, CELL)) cells.push([x, z]);
+    }
+  }
+  return cells;
+}
 
 /** Separating-axis test for two oriented footprints on the XZ plane. Touching
  *  edges count as clear, so parked vehicles can be adjacent, and each side uses
@@ -65,13 +83,34 @@ export function vehicleRectsOverlap(
 }
 
 /**
- * Ground a vehicle would sit on at (x, z). Samples a nine-point ring around the
- * centre: the surface must be within one voxel of level across the whole
- * footprint and within one voxel of where the vehicle is now, so a one-voxel
- * step is drivable while a wall or a taller drop is not. Returns the height, or
- * null when the spot is not drivable.
+ * Surface a vehicle body would rest on: the highest cell under its footprint,
+ * provided the whole footprint is within one voxel of level and within one
+ * voxel of where the body is now. A one-voxel step is drivable, and taking the
+ * highest cell means the body rises onto the step before it reaches it. Null
+ * when the spot is not drivable.
  */
-export function vehicleGround(sampler: SolidSampler, x: number, z: number, currentY: number): number | null {
+export function vehicleGround(sampler: SolidSampler, position: Position, yaw: number, spec: Footprint): number | null {
+  let high = -Infinity, low = Infinity;
+  for (const [x, z] of footprintCells(position, yaw, spec)) {
+    let top: number | null = null;
+    // Start a voxel above the body: a step up has to lift it before the body
+    // touches the step, or the body clips the step and the move is refused.
+    for (let y = Math.floor(position.y + 1.5); y >= Math.floor(position.y - 2.5); y--) {
+      if (sampler.isSolid(x, y, z)) { top = y + 0.5; break; }
+    }
+    if (top === null) return null;
+    high = Math.max(high, top);
+    low = Math.min(low, top);
+  }
+  return high - low <= 1 && Math.abs(high - position.y) <= 1 ? high : null;
+}
+
+/**
+ * Ground below a point, sampled as a nine-point ring: used for static things
+ * (blueprint placement, where an emplacement would sit) rather than for a body
+ * that moves and can stand on a one-voxel step.
+ */
+export function surfaceGround(sampler: SolidSampler, x: number, z: number, currentY: number): number | null {
   const heights: number[] = [];
   for (const [ox, oz] of [[0, 0], [-1, -1], [-1, 1], [1, -1], [1, 1], [-2, 0], [2, 0], [0, -2], [0, 2]]) {
     const gx = Math.round(x + ox), gz = Math.round(z + oz);
@@ -102,12 +141,9 @@ export function vehicleClear(
   const extentX = spec.halfLength * Math.abs(forward.x) + spec.halfWidth * Math.abs(side.x);
   const extentZ = spec.halfLength * Math.abs(forward.z) + spec.halfWidth * Math.abs(side.z);
   if (Math.abs(position.x) + extentX >= WORLD_HALF || Math.abs(position.z) + extentZ >= WORLD_HALF) return false;
-  for (let x = Math.floor(position.x - extentX - 0.5); x <= Math.ceil(position.x + extentX + 0.5); x++) {
-    for (let z = Math.floor(position.z - extentZ - 0.5); z <= Math.ceil(position.z + extentZ + 0.5); z++) {
-      if (!vehicleRectsOverlap(position.x, position.z, yaw, spec, x, z, 0, CELL)) continue;
-      for (let y = Math.floor(position.y + 0.5); y <= Math.ceil(position.y + spec.height - 0.5); y++) {
-        if (sampler.isSolid(x, y, z)) return false;
-      }
+  for (const [x, z] of footprintCells(position, yaw, spec)) {
+    for (let y = Math.floor(position.y + 0.5); y <= Math.ceil(position.y + spec.height - 0.5); y++) {
+      if (sampler.isSolid(x, y, z)) return false;
     }
   }
   for (const other of bodies.vehicles ?? []) {
@@ -147,7 +183,7 @@ export function vehicleExitSpot(
     for (let i = 0; i < 8; i++) {
       const angle = vehicle.yaw + i * Math.PI / 4;
       const x = vehicle.position.x + Math.cos(angle) * radius, z = vehicle.position.z + Math.sin(angle) * radius;
-      const y = vehicleGround(sampler, x, z, vehicle.position.y);
+      const y = vehicleGround(sampler, { x, y: vehicle.position.y, z }, vehicle.yaw, spec);
       if (y === null || Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) continue;
       let clear = true;
       for (const dx of [-0.45, 0.45]) for (const dz of [-0.45, 0.45]) for (const dy of [0.3, 1, 1.8]) {

@@ -64,7 +64,7 @@ import {
   EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
   type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots,
 } from '../shared/types';
-import { vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
+import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -264,7 +264,7 @@ export class ServerGame {
     }
 
     // Snap to the ground the server sees, never to the client's y.
-    const ground = this.jeepGround(position.x, position.z, position.y);
+    const ground = surfaceGround(this.world, position.x, position.z, position.y);
     if (ground === null) return { ok: false, reason: 'Needs flat, solid ground' };
     const spot = { x: position.x, y: ground, z: position.z };
     const rotation = typeof yaw === 'number' && Number.isFinite(yaw) ? yaw : 0;
@@ -454,7 +454,7 @@ export class ServerGame {
         const angle = emplacement.yaw + i * Math.PI / 4;
         const x = emplacement.position.x + Math.cos(angle) * radius;
         const z = emplacement.position.z + Math.sin(angle) * radius;
-        const y = this.jeepGround(x, z, emplacement.position.y);
+        const y = surfaceGround(this.world, x, z, emplacement.position.y);
         if (y === null || Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) continue;
         let clear = true;
         for (const dx of [-0.45, 0.45]) for (const dz of [-0.45, 0.45]) for (const dy of [0.3, 1, 1.8]) {
@@ -729,8 +729,8 @@ export class ServerGame {
     });
   }
 
-  private jeepGround(x: number, z: number, currentY: number): number | null {
-    return vehicleGround(this.world, x, z, currentY);
+  private jeepGround(position: Position, yaw: number, spec: Footprint): number | null {
+    return vehicleGround(this.world, position, yaw, spec);
   }
 
   private buildJeep(playerId: string): void {
@@ -743,7 +743,7 @@ export class ServerGame {
     if ([...this.jeeps.values()].filter(v => v.team === player.team && !v.wreck).length >= spec.teamLimit) return this.jeepMessage(playerId, 'Team jeep limit reached');
     const position = { x: workshop.position.x + 11, y: workshop.position.y, z: workshop.position.z };
     const yaw = player.team === 'blue' ? Math.PI : 0;
-    if (this.jeepGround(position.x, position.z, position.y) === null || !this.jeepClear(position, yaw, spec)) return this.jeepMessage(playerId, 'Garage pad is blocked');
+    if (this.jeepGround(position, yaw, spec) === null || !this.jeepClear(position, yaw, spec)) return this.jeepMessage(playerId, 'Garage pad is blocked');
     const jeep: ServerJeep = { id: `jeep_${++this.jeepSequence}`, kind: spec.kind, team: player.team, position, yaw, speed: 0, hp: spec.maxHp, driverId: null, wreck: false, throttle: 0, steering: 0, brake: false, lastInput: this.world.serverTime, wreckUntil: 0 };
     this.workshopStock[player.team] -= spec.cost;
     this.jeeps.set(jeep.id, jeep);
@@ -822,7 +822,7 @@ export class ServerGame {
       const yaw = jeep.yaw + turn;
       const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
       const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
-      const y = this.jeepGround(x, z, jeep.position.y);
+      const y = this.jeepGround({ x, y: jeep.position.y, z }, yaw, spec);
       if (y !== null && this.jeepClear({ x, y, z }, yaw, spec, jeep.id, driver.id)) {
         jeep.position = { x, y, z }; jeep.yaw = yaw;
       } else jeep.speed = 0;
@@ -1781,7 +1781,7 @@ export class ServerGame {
           yaw += steering * Math.min(Math.abs(speed) / 4, 1) * (speed < 0 ? -1 : 1) * 1.4 * 0.05;
           const nx = x - Math.sin(yaw) * speed * 0.05;
           const nz = z - Math.cos(yaw) * speed * 0.05;
-          const ground = this.jeepGround(nx, nz, y);
+          const ground = this.jeepGround({ x: nx, y, z: nz }, yaw, vehicleSpec(jeep.kind));
           if (ground === null || !this.jeepClear({ x: nx, y: ground, z: nz }, yaw, vehicleSpec(jeep.kind), jeep.id, jeep.driverId ?? undefined)) { blocked = true; break; }
           travelled += Math.hypot(nx - x, nz - z);
           x = nx; y = ground; z = nz;

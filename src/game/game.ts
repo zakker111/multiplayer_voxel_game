@@ -81,10 +81,20 @@ const BOT_JEEP_COOLDOWN_SECONDS = 30;
 const BOT_JEEP_ARRIVE_RADIUS = 75;
 /** Give up walking to the workshop / driving if the errand stalls this long. */
 const BOT_JEEP_APPROACH_SECONDS = 35;
-// The jeep now collides with infantry exactly as it does on the server, so a
-// crowded midfield costs a detour or two on the way across. The window allows
-// for that without letting a genuinely stuck errand run forever.
+// The jeep collides with infantry exactly as it does on the server, so a
+// crowded midfield costs a wait or a wide route. The window allows for that
+// without letting a genuinely stuck errand run forever.
 const BOT_JEEP_DRIVE_SECONDS = 75;
+/** Errand routing works on this many metres per cell, which is more than the
+ *  jeep's own body, so a fortification between the pad and the flag is a run of
+ *  blocked cells the route can go around. */
+const JEEP_ROUTE_STEP = 4;
+/** Route cells A* may expand before an errand falls back to steering straight. */
+const JEEP_ROUTE_BUDGET = 2500;
+/** Extra route cost per metre inside this many metres of the centre line: the
+ *  fight lives there, so a jeep swings wide around it when the detour is short
+ *  enough, which is what keeps an errand alive to reach the far flag. */
+const JEEP_ROUTE_DANGER = 80;
 
 /** Squared distance to a plain snapshot position, so the per-frame reach checks
  *  allocate nothing. */
@@ -419,9 +429,11 @@ interface BotJeepMission {
   lastPos: { x: number; z: number };
   recoveries: number;
   reverseUntil: number;
-  /** Temporary sideways waypoint used to get around whatever blocked the jeep. */
-  detour: { x: number; z: number } | null;
-  detourUntil: number;
+  /** Route waypoints still to drive, next first; empty asks for a fresh plan. */
+  route: { x: number; z: number }[];
+  nextRouteAt: number;
+  /** Cells a stall proved impassable, keyed like a grid cell (jeepRouteKey). */
+  walls: Set<string>;
   /** Look-ahead drive plan, refreshed a few times a second. */
   plannedSteering: number;
   plannedThrottle: number;
@@ -1031,7 +1043,7 @@ export class Game {
     const x = workshop.position.x + 11;
     const z = workshop.position.z;
     const yaw = team === 'blue' ? Math.PI : 0;
-    const y = this.localJeepGround(x, z, workshop.position.y);
+    const y = this.localJeepGround({ x, y: workshop.position.y, z }, yaw, spec);
     if (y === null || !this.localJeepClear({ x, y, z }, yaw, spec, null)) return null;
     workshop.stock -= spec.cost;
     const jeep: JeepSnapshot = {
@@ -1059,8 +1071,8 @@ export class Game {
 
   /** Ground and footprint tests come from the shared vehicle rules, so the
    *  offline jeep is held to exactly what the server enforces online. */
-  private localJeepGround(x: number, z: number, currentY: number): number | null {
-    return vehicleGround(this.world, x, z, currentY);
+  private localJeepGround(position: Position, yaw: number, spec: Footprint): number | null {
+    return vehicleGround(this.world, position, yaw, spec);
   }
 
   private localJeepClear(position: Position, yaw: number, spec: Footprint, ignoreId: string | null, ignorePlayerId: string | null = null): boolean {
@@ -1121,13 +1133,16 @@ export class Game {
     const yaw = jeep.yaw + turn;
     const x = jeep.position.x - Math.sin(yaw) * jeep.speed * step;
     const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
-    const y = this.localJeepGround(x, z, jeep.position.y);
-    jeep.yaw = yaw;
+    const y = this.localJeepGround({ x, y: jeep.position.y, z }, yaw, spec);
     if (y === null || !this.localJeepClear({ x, y, z }, yaw, spec, jeep.id, jeep.driverId)) {
       // A wall or a drop stops the jeep instead of letting it slide through.
+      // The yaw is only kept with a move that happened, as on the server: turning
+      // a blocked jeep swings its long body into whatever is beside it, and that
+      // is how a jeep wedged itself against a single block and could never move.
       jeep.speed = 0;
       return false;
     }
+    jeep.yaw = yaw;
     jeep.position = { x, y, z };
     return true;
   }
@@ -1631,7 +1646,7 @@ export class Game {
         jeepId: waiting ? waiting.id : null,
         startedAt: this.localTime, lastProgressAt: this.localTime,
         lastPos: { x: bot.position.x, z: bot.position.z }, recoveries: 0, reverseUntil: 0,
-        detour: null, detourUntil: 0,
+        route: [], nextRouteAt: 0, walls: new Set(),
         plannedSteering: 0, plannedThrottle: 1, nextPlanAt: 0,
       });
       this.updateBotNameTag(bot, '🚙 JEEP DETAIL', '#fbbf24');
@@ -1705,17 +1720,33 @@ export class Game {
     // errands used to meet on the centre line, block each other, and both give
     // up half way across the map.
     const lane = bot.team === 'blue' ? 35 : -35;
-    const target = mission.detour && this.localTime < mission.detourUntil
-      ? mission.detour
-      : { x: enemyFlag.x + lane, z: enemyFlag.z };
-    if (mission.detour && Math.hypot(target.x - jeep.position.x, target.z - jeep.position.z) < 5) mission.detour = null;
+    const destination = { x: enemyFlag.x + lane, z: enemyFlag.z };
     const flagDistance = Math.hypot(jeep.position.x - enemyFlag.x, jeep.position.z - enemyFlag.z);
     if (flagDistance <= BOT_JEEP_ARRIVE_RADIUS || this.localTime - mission.startedAt > BOT_JEEP_DRIVE_SECONDS) {
       this.exitBotJeep(bot, jeep);
       return;
     }
+    // A straight line at the flag runs into whatever the bots have built, so
+    // the jeep follows a route through cells it fits in. A stall marks the cell
+    // ahead as walled off and the next plan routes around it.
+    if (!mission.route.length && this.localTime >= mission.nextRouteAt) {
+      mission.nextRouteAt = this.localTime + 4;
+      const route = this.planJeepRoute(jeep.position, destination, mission.walls);
+      if (route) mission.route = route;
+    }
+    while (mission.route.length > 0 &&
+      Math.hypot(mission.route[0].x - jeep.position.x, mission.route[0].z - jeep.position.z) < JEEP_ROUTE_STEP) {
+      mission.route.shift();
+    }
+    // Steer a little way down the route: a waypoint 4m away gives the arc
+    // planner no gradient to choose between arcs.
+    let target: { x: number; z: number } = destination;
+    for (const point of mission.route) {
+      if (Math.hypot(point.x - jeep.position.x, point.z - jeep.position.z) > 14) break;
+      target = point;
+    }
     // No progress for two seconds means a wall, a trench or another jeep: back
-    // off, swing sideways, and hand the jeep back after a few failed tries.
+    // off and route again, and hand the jeep back after a few failed tries.
     if (this.localTime >= mission.reverseUntil && this.localTime - mission.lastProgressAt >= 2) {
       const moved = Math.hypot(jeep.position.x - mission.lastPos.x, jeep.position.z - mission.lastPos.z);
       mission.lastPos = { x: jeep.position.x, z: jeep.position.z };
@@ -1727,21 +1758,20 @@ export class Game {
         // a stall worth backing out of.
         const stepX = jeep.position.x - Math.sin(jeep.yaw) * 1.6;
         const stepZ = jeep.position.z - Math.cos(jeep.yaw) * 1.6;
-        const stepGround = this.localJeepGround(stepX, stepZ, jeep.position.y);
+        const stepGround = this.localJeepGround({ x: stepX, y: jeep.position.y, z: stepZ }, jeep.yaw, spec);
         const blockedByRock = stepGround === null ||
           !this.localJeepRockClear({ x: stepX, y: stepGround, z: stepZ }, jeep.yaw, spec, jeep.id);
         const stalledOnCrowd = !blockedByRock && this.bots.some(other => !other.isDead && other.name !== bot.name &&
           Math.hypot(other.position.x - jeep.position.x, other.position.z - jeep.position.z) < 3.5);
         if (!stalledOnCrowd) {
           mission.recoveries++;
-          if (mission.recoveries > 4) { this.exitBotJeep(bot, jeep); return; }
+          if (mission.recoveries > 6) { this.exitBotJeep(bot, jeep); return; }
+          // Remember the cell as walled off for this errand, back off, and plan
+          // a fresh route from wherever the jeep ends up.
+          mission.walls.add(this.jeepRouteKey(stepX, stepZ));
+          mission.route.length = 0;
+          mission.nextRouteAt = 0;
           mission.reverseUntil = this.localTime + 1.4;
-          const side = mission.recoveries % 2 ? 1 : -1;
-          mission.detour = {
-            x: jeep.position.x + Math.cos(jeep.yaw) * side * 16,
-            z: jeep.position.z - Math.sin(jeep.yaw) * side * 16,
-          };
-          mission.detourUntil = this.localTime + 6;
         }
       }
     }
@@ -1757,6 +1787,96 @@ export class Game {
       this.stepLocalJeep(jeep, dt, mission.plannedThrottle, mission.plannedSteering, false);
     }
     bot.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+  }
+
+  /** Cell key for the errand route grid. */
+  private jeepRouteKey(x: number, z: number): string {
+    return `${Math.round(x / JEEP_ROUTE_STEP)},${Math.round(z / JEEP_ROUTE_STEP)}`;
+  }
+
+  /** Whether a jeep fits in a route cell. The tested square covers the cell edge
+   *  to edge, so a thin wall between two cell centres cannot slip through a gap
+   *  between cells that both look clear. */
+  private jeepRouteCellOpen(x: number, z: number): boolean {
+    const half = JEEP_ROUTE_STEP / 2;
+    const square = { halfWidth: half, halfLength: half, height: vehicleSpec('jeep').height };
+    const at = { x, y: this.world.getGroundHeight(x, z), z };
+    const y = this.localJeepGround(at, 0, square);
+    if (y === null) return false;
+    return vehicleClear(this.world, { x, y, z }, 0, square);
+  }
+
+  /** Shortest chain of route cells from a jeep to a point: A* on an 8-way grid
+   *  where a cell counts only if the jeep fits in it. Cells this errand was
+   *  already stopped by count as walls, so a second try goes around the
+   *  fortification instead of into it. Null when there is no way through, and
+   *  the caller steers straight at the target as a fallback. */
+  private planJeepRoute(
+    from: Position, to: { x: number; z: number }, walls: Set<string>,
+  ): { x: number; z: number }[] | null {
+    const step = JEEP_ROUTE_STEP;
+    const key = (x: number, z: number): string => `${x},${z}`;
+    const startX = Math.round(from.x / step), startZ = Math.round(from.z / step);
+    const startKey = key(startX, startZ);
+    const cells = new Map<string, boolean>();
+    const open = (x: number, z: number): boolean => {
+      if (walls.has(key(x, z))) return false;
+      if (Math.abs(x * step) >= WORLD_HALF - step || Math.abs(z * step) >= WORLD_HALF - step) return false;
+      let known = cells.get(key(x, z));
+      if (known === undefined) {
+        known = this.jeepRouteCellOpen(x * step, z * step);
+        cells.set(key(x, z), known);
+      }
+      return known;
+    };
+    // The lane point can itself be built over; end the route at the nearest cell
+    // the jeep fits in instead.
+    const goalX = Math.round(to.x / step), goalZ = Math.round(to.z / step);
+    let goal: [number, number] | null = null;
+    for (const [ox, oz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
+      if (open(goalX + ox, goalZ + oz)) { goal = [goalX + ox, goalZ + oz]; break; }
+    }
+    if (!goal) return null;
+    const [endX, endZ] = goal;
+    const estimate = (x: number, z: number): number => {
+      const dx = Math.abs(x - endX), dz = Math.abs(z - endZ);
+      return Math.max(dx, dz) + 0.414 * Math.min(dx, dz);
+    };
+    /** Per-metre cost of driving where the two teams meet. */
+    const danger = (x: number): number => Math.max(0, JEEP_ROUTE_DANGER - Math.abs(x)) * 0.06;
+    const cameFrom = new Map<string, string>();
+    const cost = new Map<string, number>([[startKey, 0]]);
+    const frontier: Array<{ x: number; z: number; f: number }> = [{ x: startX, z: startZ, f: estimate(startX, startZ) }];
+    let reached = false;
+    for (let expanded = 0; expanded < JEEP_ROUTE_BUDGET && frontier.length > 0; expanded++) {
+      // A linear scan of a short frontier is cheaper to read than a heap.
+      let bestIndex = 0;
+      for (let i = 1; i < frontier.length; i++) if (frontier[i].f < frontier[bestIndex].f) bestIndex = i;
+      const node = frontier.splice(bestIndex, 1)[0];
+      const nodeKey = key(node.x, node.z);
+      if (nodeKey === key(endX, endZ)) { reached = true; break; }
+      const spent = cost.get(nodeKey) ?? 0;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        const nx = node.x + dx, nz = node.z + dz;
+        const nextKey = key(nx, nz);
+        if (nextKey !== startKey && !open(nx, nz)) continue;
+        const nextCost = spent + (dx !== 0 && dz !== 0 ? 1.414 : 1) + danger(nx * step);
+        const known = cost.get(nextKey);
+        if (known !== undefined && known <= nextCost) continue;
+        cost.set(nextKey, nextCost);
+        cameFrom.set(nextKey, nodeKey);
+        frontier.push({ x: nx, z: nz, f: nextCost + estimate(nx, nz) });
+      }
+    }
+    if (!reached) return null;
+    const route: { x: number; z: number }[] = [];
+    let at: string | undefined = key(endX, endZ);
+    while (at && at !== startKey) {
+      const [x, z] = at.split(',').map(Number);
+      route.push({ x: x * step, z: z * step });
+      at = cameFrom.get(at);
+    }
+    return route.reverse();
   }
 
   /** Look ahead along a few steering arcs using the same clearance rules the jeep
@@ -1779,7 +1899,7 @@ export class Game {
           yaw += steering * Math.min(Math.abs(speed) / spec.fullTurnSpeed, 1) * spec.turnRate * step;
           const nx = x - Math.sin(yaw) * speed * step;
           const nz = z - Math.cos(yaw) * speed * step;
-          const ny = this.localJeepGround(nx, nz, y);
+          const ny = this.localJeepGround({ x: nx, y, z: nz }, yaw, spec);
           if (ny === null || !this.localJeepClear({ x: nx, y: ny, z: nz }, yaw, spec, jeep.id, jeep.driverId)) { blocked = true; break; }
           travelled += Math.hypot(nx - x, nz - z);
           x = nx; y = ny; z = nz;
@@ -1836,7 +1956,11 @@ export class Game {
   private absorbJeepDamage(bot: Bot, damage: number): number {
     const jeep = this.localJeeps.find(vehicle => vehicle.driverId === bot.name && !vehicle.wreck);
     if (!jeep) return damage;
-    jeep.hp = Math.max(0, jeep.hp - damage);
+    // Small arms glance off the bodywork of a moving jeep. Without this an
+    // errand crossing the whole enemy team died about 200m short every time,
+    // so the vehicle roadmap never reached a flag; a jeep is still lost to
+    // focused fire, it just has to be focused.
+    jeep.hp = Math.max(0, jeep.hp - Math.max(1, Math.round(damage / 2)));
     if (jeep.hp <= 0) {
       jeep.wreck = true;
       jeep.speed = 0;
