@@ -9,6 +9,7 @@ const { ServerGame } = require('../dist/tests/serverGame.cjs');
 const {
   emplacementSpec, EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE,
   MORTAR_BLAST_RADIUS, MANNED_EMPLACEMENTS, EMPLACEMENT_MG_SPREAD, emplacedShotDirection,
+  WEAPONS,
 } = require('../dist/tests/sharedTypes.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 
@@ -37,6 +38,46 @@ const findSpots = (game, count) => {
     }
   }
   return spots;
+};
+
+/** Small seeded PRNG (mulberry32). The long-range burst test swaps this in for
+ *  Math.random so the belt's cone is the same every run and can never flake. */
+const mulberry32 = (seed) => {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+};
+
+/** A flat nest spot with an unobstructed lane to a flat target `range` metres
+ *  away, so a long-range test measures the cone and not the terrain. */
+const findLongLane = (game, range) => {
+  for (let z = -80; z <= 80; z += 4) {
+    for (let x = -80; x <= 80; x += 4) {
+      if (!isFlat(game, x, z)) continue;
+      const y = groundTop(game, x, z);
+      for (let i = 0; i < 32; i++) {
+        const yaw = (i / 32) * Math.PI * 2;
+        const dir = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+        const tx = x + dir.x * range;
+        const tz = z + dir.z * range;
+        if (!isFlat(game, tx, tz)) continue;
+        const ty = groundTop(game, tx, tz);
+        if (ty === null || Math.abs(ty - y) > 1.5) continue;
+        const origin = { x: x + dir.x * 0.9, y: y + 1.15, z: z + dir.z * 0.9 };
+        const vx = tx - origin.x, vy = ty + 1 - origin.y, vz = tz - origin.z;
+        const len = Math.hypot(vx, vy, vz);
+        const hit = game.world.raycast(origin, { x: vx / len, y: vy / len, z: vz / len }, len + 1);
+        if (hit && hit.distance < len - 0.6) continue;
+        return { x, y, z, yaw, target: { x: tx, y: ty, z: tz } };
+      }
+    }
+  }
+  return null;
 };
 
 const join = (game, team, frames = []) => {
@@ -252,6 +293,80 @@ test('a held MG nest trigger fans its rounds instead of drilling one line', () =
   for (const shot of shots) {
     assert.ok(Math.acos(Math.min(1, -shot.direction.z)) < EMPLACEMENT_MG_SPREAD * 1.5, 'every round is inside the cone');
   }
+});
+
+test('an 88m burst still kills a 130 HP bot inside the 200-round belt', () => {
+  const game = new ServerGame();
+  const lane = findLongLane(game, 88);
+  assert.ok(lane, 'the map has an 88m lane between flat spots');
+
+  const frames = [];
+  const gunner = join(game, 'blue', frames);
+  game.workshopStock.blue = 400;
+  game.handleMessage(gunner.id, { type: 'craftBlueprint', kind: 'mgNest', slot: 0 });
+  game.handleMessage(gunner.id, {
+    type: 'placeEmplacement', kind: 'mgNest', position: { x: lane.x, y: lane.y, z: lane.z }, yaw: lane.yaw, slot: 0,
+  });
+  const gun = [...game.emplacements.values()][0];
+  assert.ok(gun, 'the nest was placed on the lane');
+  gunner.player.position = { ...gun.position };
+  game.handleMessage(gunner.id, { type: 'mountEmplacement', emplacementId: gun.id });
+  assert.equal(gun.gunnerId, gunner.id, 'the nest is manned');
+
+  // Server bots carry 130 HP, so this is the target a gunner actually faces.
+  const target = join(game, 'red');
+  target.player.maxHp = 130;
+  target.player.hp = 130;
+  game.spawnProtectedUntil.delete(target.id);
+  game.spawnProtectedUntil.delete(gunner.id);
+
+  const belt = emplacementSpec('mgNest').ammo;
+  assert.equal(belt, 200, 'a nest belt holds 200 rounds');
+  assert.ok(
+    EMPLACEMENT_MG_SPREAD > WEAPONS.rifle.spread * 5,
+    'the belt still sprays much wider than a rifle',
+  );
+
+  gun.yaw = lane.yaw;
+  gun.baseYaw = lane.yaw;
+  gunner.player.rotation = {
+    yaw: lane.yaw,
+    pitch: Math.atan2(lane.target.y + 1.0 - (gun.position.y + 1.15), 88),
+  };
+
+  // Several seeded bursts: the same cone every run, sampled widely enough to
+  // catch a cone that has grown back out to a whole-belt spray.
+  const originalRandom = Math.random;
+  const bursts = [];
+  try {
+    for (let burst = 0; burst < 8; burst++) {
+      target.player.position = { ...lane.target };
+      target.player.maxHp = 130;
+      target.player.hp = 130;
+      target.player.isDead = false;
+      game.spawnProtectedUntil.delete(target.id);
+      game.respawnTimers.delete(target.id);
+      gun.ammo = belt;
+      game.emplacementFireAt.clear();
+      Math.random = mulberry32(0x5eed88 + burst * 7919);
+      let fired = 0;
+      while (!target.player.isDead && fired < belt) {
+        game.handleMessage(gunner.id, { type: 'fireEmplacement' });
+        fired++;
+        game.world.updateTime(0.1);
+      }
+      bursts.push({ fired, killed: target.player.isDead });
+    }
+  } finally {
+    Math.random = originalRandom;
+  }
+
+  for (const burst of bursts) {
+    assert.ok(burst.killed, `the burst killed inside the belt (${burst.fired}/200 rounds)`);
+  }
+  const rounds = bursts.map((burst) => burst.fired).sort((a, b) => a - b);
+  const median = rounds[Math.floor(rounds.length / 2)];
+  assert.ok(median <= 50, `the cone still lands: median ${median} of ${belt} rounds`);
 });
 
 test('a round reset takes the shells with it', () => {
