@@ -20,7 +20,7 @@ import {
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
-  WORKSHOP_CENTERS, WORKSHOP_START_STOCK, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec,
+  WORKSHOP_CENTERS, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec,
   VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
   emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
@@ -38,6 +38,15 @@ const KILLFEED_SECONDS = 8;
 const DAMAGE_INDICATOR_SECONDS = 2;
 /** Latency probe interval (ms, measured every N seconds). */
 const PING_INTERVAL_SECONDS = 2;
+
+/** Offline Beta runs one bot jeep errand per team at a time, like the server. */
+const BOT_JEEP_MAX_DRIVERS_PER_TEAM = 1;
+const BOT_JEEP_COOLDOWN_SECONDS = 30;
+/** A jeep errand ends once it is this close to the enemy flag stand. */
+const BOT_JEEP_ARRIVE_RADIUS = 75;
+/** Give up walking to the workshop / driving if the errand stalls this long. */
+const BOT_JEEP_APPROACH_SECONDS = 35;
+const BOT_JEEP_DRIVE_SECONDS = 45;
 
 /** Squared distance to a plain snapshot position, so the per-frame reach checks
  *  allocate nothing. */
@@ -362,6 +371,25 @@ const TEAM_COLORS: Record<Team, { body: number; accent: number; legs: number; la
   blue: { body: 0x2244cc, accent: 0x4488ff, legs: 0x112266, label: 'BLUE' },
 };
 
+/** One offline bot's vehicle errand: walk to the workshop, build or collect a
+ *  jeep, drive it at the enemy base, then hand the field back to the AI. */
+interface BotJeepMission {
+  phase: 'workshop' | 'board' | 'drive';
+  jeepId: string | null;
+  startedAt: number;
+  lastProgressAt: number;
+  lastPos: { x: number; z: number };
+  recoveries: number;
+  reverseUntil: number;
+  /** Temporary sideways waypoint used to get around whatever blocked the jeep. */
+  detour: { x: number; z: number } | null;
+  detourUntil: number;
+  /** Look-ahead drive plan, refreshed a few times a second. */
+  plannedSteering: number;
+  plannedThrottle: number;
+  nextPlanAt: number;
+}
+
 export class Game {
   scene: THREE.Scene;
   renderer: THREE.WebGLRenderer;
@@ -381,6 +409,11 @@ export class Game {
   private localJeeps: JeepSnapshot[] = [];
   private localJeepSeq = 0;
   private localJeepSync = 0;
+  /** Bot jeep errands, keyed by bot name, plus a per-team cooldown between them. */
+  private botJeepMissions = new Map<string, BotJeepMission>();
+  private botJeepTeamReadyAt = new Map<Team, number>();
+  /** Seconds of local match time; the only clock the offline errands need. */
+  private localTime = 0;
 
   // ---- Blueprint placement (Phase 4 prototype) ----
   /** What the bench can build into each slot (slot 1..3 = index 0..2). */
@@ -920,7 +953,7 @@ export class Game {
       const center = WORKSHOP_CENTERS[team];
       return {
         position: { x: center.x, y: GROUND_LEVEL + 0.5, z: center.z },
-        stock: WORKSHOP_START_STOCK,
+        stock: WORKSHOP_CAPACITY,
         capacity: WORKSHOP_CAPACITY,
       };
     };
@@ -934,21 +967,35 @@ export class Game {
     const workshop = this.workshops[this.playerTeam];
     const spec = vehicleSpec('jeep');
     if (workshop.stock < spec.cost) { this.showMessage('🚙 Not enough workshop blocks'); return; }
-    const live = this.localJeeps.filter(jeep => jeep.team === this.playerTeam && !jeep.wreck);
-    if (live.length >= spec.teamLimit) { this.showMessage(`🚙 Team jeep limit reached (${spec.teamLimit})`); return; }
+    if (this.localJeeps.filter(jeep => jeep.team === this.playerTeam && !jeep.wreck).length >= spec.teamLimit) {
+      this.showMessage(`🚙 Team jeep limit reached (${spec.teamLimit})`); return;
+    }
+    const jeep = this.spawnLocalJeep(this.playerTeam);
+    if (!jeep) { this.showMessage('🚙 Garage pad is blocked'); return; }
+    this.showMessage(`🚙 Jeep built · -${spec.cost} blocks · press F to board`);
+  }
+
+  /** Put a jeep on a team's garage pad, paying from that team's stock. Shared by
+   *  the player's G key and the bots' errands so both obey the same rules. */
+  private spawnLocalJeep(team: Team): JeepSnapshot | null {
+    if (!this.workshops) return null;
+    const workshop = this.workshops[team];
+    const spec = vehicleSpec('jeep');
+    if (workshop.stock < spec.cost) return null;
+    if (this.localJeeps.filter(jeep => jeep.team === team && !jeep.wreck).length >= spec.teamLimit) return null;
     const x = workshop.position.x + 11;
     const z = workshop.position.z;
     const y = this.world.getGroundHeight(x, z);
-    const yaw = this.playerTeam === 'blue' ? Math.PI : 0;
-    if (!this.localJeepClear(x, y, z, yaw, null)) { this.showMessage('🚙 Garage pad is blocked'); return; }
+    const yaw = team === 'blue' ? Math.PI : 0;
+    if (!this.localJeepClear(x, y, z, yaw, null)) return null;
     workshop.stock -= spec.cost;
-    this.localJeeps.push({
+    const jeep: JeepSnapshot = {
       id: `local_jeep_${++this.localJeepSeq}`,
-      kind: 'jeep', team: this.playerTeam,
-      position: { x, y, z }, yaw, speed: 0, hp: spec.maxHp, driverId: null, wreck: false,
-    });
+      kind: 'jeep', team, position: { x, y, z }, yaw, speed: 0, hp: spec.maxHp, driverId: null, wreck: false,
+    };
+    this.localJeeps.push(jeep);
     this.applyJeeps(this.localJeeps);
-    this.showMessage(`🚙 Jeep built · -${spec.cost} blocks · press F to board`);
+    return jeep;
   }
 
   /** The server's oriented-rectangle test, simplified for the client: the body
@@ -991,12 +1038,9 @@ export class Game {
     this.applyJeeps(this.localJeeps);
   }
 
-  /** Step out onto the first ring spot the body actually fits in, like the
-   *  server's safeJeepExit, so you never leave a jeep inside a wall. */
-  private exitLocalJeep(): void {
-    const driverId = this.localPlayerId ?? 'local-player';
-    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
-    if (!jeep) return;
+  /** First ring spot a body fits in, like the server's safeJeepExit, so nobody
+   *  is left standing inside a wall after leaving a jeep. */
+  private localJeepExitSpot(jeep: JeepSnapshot): Position | null {
     let spot: Position | null = null;
     for (const radius of [3.5, 4.5, 6]) {
       for (let i = 0; i < 8 && !spot; i++) {
@@ -1011,6 +1055,14 @@ export class Game {
       }
       if (spot) break;
     }
+    return spot;
+  }
+
+  private exitLocalJeep(): void {
+    const driverId = this.localPlayerId ?? 'local-player';
+    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
+    if (!jeep) return;
+    const spot = this.localJeepExitSpot(jeep);
     jeep.driverId = null;
     jeep.speed = 0;
     this.drivingJeepId = null;
@@ -1021,27 +1073,12 @@ export class Game {
     this.applyJeeps(this.localJeeps);
   }
 
-  /** Drive the local jeep with the server's handling numbers, so Beta corners and
-   *  accelerates the same offline as it does online. */
-  private updateLocalJeeps(dt: number): void {
-    if (this.localJeeps.length === 0) return;
-    const driverId = this.localPlayerId ?? 'local-player';
-    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
-    if (!jeep) return;
-    if (this.player.isDead || this.isSpectating) {
-      // Dying or spectating at the wheel leaves the jeep parked instead of
-      // pinning the respawned player back into it, like the server's force exit.
-      jeep.driverId = null;
-      jeep.speed = 0;
-      this.player.clearKeys();
-      this.applyJeeps(this.localJeeps);
-      return;
-    }
+  /** One physics step for a local jeep, shared by the player and the bots so
+   *  both handle with the server's numbers. */
+  private stepLocalJeep(jeep: JeepSnapshot, dt: number, throttle: number, steering: number, brake: boolean): boolean {
     const step = Math.min(dt, 0.05);
     const spec = vehicleSpec(jeep.kind);
-    const throttle = (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0);
-    const steering = (this.player.hasKey('KeyA') ? 1 : 0) - (this.player.hasKey('KeyD') ? 1 : 0);
-    const targetSpeed = this.jeepBrake ? 0 : throttle * (throttle < 0 ? spec.reverseSpeed : spec.topSpeed);
+    const targetSpeed = brake ? 0 : throttle * (throttle < 0 ? spec.reverseSpeed : spec.topSpeed);
     jeep.speed += Math.max(-spec.acceleration * step, Math.min(spec.acceleration * step, targetSpeed - jeep.speed));
     const turn = steering * Math.min(Math.abs(jeep.speed) / spec.fullTurnSpeed, 1) * (jeep.speed < 0 ? -1 : 1) * spec.turnRate * step;
     const yaw = jeep.yaw + turn;
@@ -1049,19 +1086,273 @@ export class Game {
     const z = jeep.position.z - Math.cos(yaw) * jeep.speed * step;
     const y = this.world.getGroundHeight(x, z);
     jeep.yaw = yaw;
-    if (this.localJeepClear(x, y, z, yaw, jeep.id)) {
-      jeep.position = { x, y, z };
-    } else {
+    if (!this.localJeepClear(x, y, z, yaw, jeep.id)) {
       // A wall or a drop stops the jeep instead of letting it slide through.
       jeep.speed = 0;
+      return false;
     }
-    this.player.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
-    this.player.velocity.set(0, 0, 0);
+    jeep.position = { x, y, z };
+    return true;
+  }
+
+  /** Everything the offline vehicles need each frame: the player's jeep, the
+   *  bots' errands, and the mesh sync. */
+  private updateLocalVehicles(dt: number): void {
+    this.localTime += dt;
+    const driverId = this.localPlayerId ?? 'local-player';
+    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === driverId);
+    if (jeep) {
+      if (this.player.isDead || this.isSpectating) {
+        // Dying or spectating at the wheel leaves the jeep parked instead of
+        // pinning the respawned player back into it, like the server's exit.
+        jeep.driverId = null;
+        jeep.speed = 0;
+        this.player.clearKeys();
+      } else {
+        const throttle = (this.player.hasKey('KeyW') ? 1 : 0) - (this.player.hasKey('KeyS') ? 1 : 0);
+        const steering = (this.player.hasKey('KeyA') ? 1 : 0) - (this.player.hasKey('KeyD') ? 1 : 0);
+        this.stepLocalJeep(jeep, dt, throttle, steering, this.jeepBrake);
+        this.player.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+        this.player.velocity.set(0, 0, 0);
+      }
+    }
     this.localJeepSync += dt;
     if (this.localJeepSync >= 0.1) {
       this.localJeepSync = 0;
+      this.assignBotJeepMissions();
       this.applyJeeps(this.localJeeps);
     }
+  }
+
+  /** Pick one bot per team to run a jeep errand. It is a demo of the vehicle
+   *  roadmap, so the errands repeat on a cooldown rather than once. */
+  private assignBotJeepMissions(): void {
+    if (!this.betaLabel || !this.workshops) return;
+    for (const team of ['blue', 'red'] as const) {
+      const drivers = [...this.botJeepMissions.keys()].filter(name => this.bots.find(bot => bot.name === name)?.team === team).length;
+      if (drivers >= BOT_JEEP_MAX_DRIVERS_PER_TEAM) continue;
+      if (this.localTime < (this.botJeepTeamReadyAt.get(team) ?? 0)) continue;
+      const workshop = this.workshops[team].position;
+      // A driverless jeep near the shop is fair game, unless the player is
+      // standing at it: their build should not be taken out from under them.
+      const waiting = this.localJeeps.find(jeep => jeep.team === team && !jeep.wreck && !jeep.driverId &&
+        Math.hypot(jeep.position.x - workshop.x, jeep.position.z - workshop.z) <= 30 &&
+        Math.hypot(jeep.position.x - this.player.position.x, jeep.position.z - this.player.position.z) > 12);
+      const spec = vehicleSpec('jeep');
+      const live = this.localJeeps.filter(jeep => jeep.team === team && !jeep.wreck).length;
+      if (!waiting && (this.workshops[team].stock < spec.cost || live >= spec.teamLimit)) continue;
+      const candidates = this.bots.filter(bot => bot.team === team && !bot.isDead && !bot.carryingFlag &&
+        !this.botJeepMissions.has(bot.name) && Math.hypot(bot.position.x - workshop.x, bot.position.z - workshop.z) < 140);
+      if (candidates.length === 0) continue;
+      candidates.sort((a, b) => Math.hypot(a.position.x - workshop.x, a.position.z - workshop.z) -
+        Math.hypot(b.position.x - workshop.x, b.position.z - workshop.z));
+      const bot = candidates[0];
+      this.botJeepMissions.set(bot.name, {
+        phase: waiting ? 'board' : 'workshop',
+        jeepId: waiting ? waiting.id : null,
+        startedAt: this.localTime, lastProgressAt: this.localTime,
+        lastPos: { x: bot.position.x, z: bot.position.z }, recoveries: 0, reverseUntil: 0,
+        detour: null, detourUntil: 0,
+        plannedSteering: 0, plannedThrottle: 1, nextPlanAt: 0,
+      });
+      this.updateBotNameTag(bot, '🚙 JEEP DETAIL', '#fbbf24');
+    }
+  }
+
+  /** March a bot toward a point, stepping over one voxel and sliding around a
+   *  wall. Returns false when both the direct and the slide line are blocked. */
+  private walkBotToward(bot: Bot, tx: number, tz: number, speed: number, dt: number): boolean {
+    const dx = tx - bot.position.x, dz = tz - bot.position.z;
+    const distance = Math.hypot(dx, dz);
+    if (distance < 0.05) return true;
+    const step = Math.min(distance, speed * dt);
+    let nx = bot.position.x + (dx / distance) * step;
+    let nz = bot.position.z + (dz / distance) * step;
+    let ground = this.world.getGroundHeight(nx, nz);
+    if (ground - bot.position.y > 1.2) {
+      const side = Math.sin(this.localTime + bot.laneOffset) > 0 ? 1 : -1;
+      nx = bot.position.x + (-dz / distance) * step * side;
+      nz = bot.position.z + (dx / distance) * step * side;
+      ground = this.world.getGroundHeight(nx, nz);
+      if (ground - bot.position.y > 1.2) return false;
+    }
+    bot.position.set(nx, ground, nz);
+    bot.mesh.position.copy(bot.position);
+    bot.mesh.rotation.y = Math.atan2(-dx, -dz);
+    return true;
+  }
+
+  /** Walk to the workshop, build, board, then drive at the enemy flag stand. */
+  private updateBotJeepMission(bot: Bot, mission: BotJeepMission, dt: number): void {
+    const spec = vehicleSpec('jeep');
+    const workshop = this.workshops?.[bot.team].position;
+    if (!workshop) { this.abandonBotJeepMission(bot); return; }
+
+    if (mission.phase !== 'drive') {
+      if (this.localTime - mission.startedAt > BOT_JEEP_APPROACH_SECONDS) { this.abandonBotJeepMission(bot); return; }
+      let jeep = mission.jeepId ? this.localJeeps.find(vehicle => vehicle.id === mission.jeepId) : undefined;
+      if (mission.phase === 'workshop') {
+        if (Math.hypot(bot.position.x - workshop.x, bot.position.z - workshop.z) > WORKSHOP_REACH - 1.5) {
+          this.walkBotToward(bot, workshop.x, workshop.z, 6.2, dt);
+          return;
+        }
+        jeep = this.spawnLocalJeep(bot.team) ?? undefined;
+        if (!jeep) { this.abandonBotJeepMission(bot); return; }
+        mission.jeepId = jeep.id;
+        mission.phase = 'board';
+      }
+      if (!jeep || jeep.wreck || jeep.driverId) { this.abandonBotJeepMission(bot); return; }
+      if (Math.hypot(bot.position.x - jeep.position.x, bot.position.z - jeep.position.z) > spec.enterReach - 0.4) {
+        this.walkBotToward(bot, jeep.position.x, jeep.position.z, 6.2, dt);
+        return;
+      }
+      // Board: the bot rides in the jeep, so its body mesh goes with it.
+      jeep.driverId = bot.name;
+      jeep.speed = 0;
+      bot.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+      bot.mesh.position.copy(bot.position);
+      bot.mesh.visible = false;
+      mission.phase = 'drive';
+      mission.lastPos = { x: jeep.position.x, z: jeep.position.z };
+      mission.lastProgressAt = this.localTime;
+      this.applyJeeps(this.localJeeps);
+      return;
+    }
+
+    const jeep = mission.jeepId ? this.localJeeps.find(vehicle => vehicle.id === mission.jeepId) : undefined;
+    if (!jeep || jeep.wreck || jeep.driverId !== bot.name) { this.abandonBotJeepMission(bot); return; }
+    const enemyFlag = bot.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    // Aim at a lane beside the flag, not the flag itself: head-on opposing
+    // errands used to meet on the centre line, block each other, and both give
+    // up half way across the map.
+    const lane = bot.team === 'blue' ? 35 : -35;
+    const target = mission.detour && this.localTime < mission.detourUntil
+      ? mission.detour
+      : { x: enemyFlag.x + lane, z: enemyFlag.z };
+    if (mission.detour && Math.hypot(target.x - jeep.position.x, target.z - jeep.position.z) < 5) mission.detour = null;
+    const flagDistance = Math.hypot(jeep.position.x - enemyFlag.x, jeep.position.z - enemyFlag.z);
+    if (flagDistance <= BOT_JEEP_ARRIVE_RADIUS || this.localTime - mission.startedAt > BOT_JEEP_DRIVE_SECONDS) {
+      this.exitBotJeep(bot, jeep);
+      return;
+    }
+    // No progress for two seconds means a wall, a trench or another jeep: back
+    // off, swing sideways, and hand the jeep back after a few failed tries.
+    if (this.localTime >= mission.reverseUntil && this.localTime - mission.lastProgressAt >= 2) {
+      const moved = Math.hypot(jeep.position.x - mission.lastPos.x, jeep.position.z - mission.lastPos.z);
+      mission.lastPos = { x: jeep.position.x, z: jeep.position.z };
+      mission.lastProgressAt = this.localTime;
+      if (moved < 1.5) {
+        mission.recoveries++;
+        if (mission.recoveries > 4) { this.exitBotJeep(bot, jeep); return; }
+        mission.reverseUntil = this.localTime + 1.4;
+        const side = mission.recoveries % 2 ? 1 : -1;
+        mission.detour = {
+          x: jeep.position.x + Math.cos(jeep.yaw) * side * 16,
+          z: jeep.position.z - Math.sin(jeep.yaw) * side * 16,
+        };
+        mission.detourUntil = this.localTime + 6;
+      }
+    }
+    if (this.localTime < mission.reverseUntil) {
+      this.stepLocalJeep(jeep, dt, -1, mission.recoveries % 2 ? 1 : -1, false);
+    } else {
+      if (this.localTime >= mission.nextPlanAt) {
+        const plan = this.planBotJeepDrive(jeep, target);
+        mission.plannedSteering = plan.steering;
+        mission.plannedThrottle = plan.throttle;
+        mission.nextPlanAt = this.localTime + 0.25;
+      }
+      this.stepLocalJeep(jeep, dt, mission.plannedThrottle, mission.plannedSteering, false);
+    }
+    bot.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+  }
+
+  /** Look ahead along a few steering arcs using the same clearance rules the jeep
+   *  drives with, and take the arc that ends up furthest toward the target. This
+   *  is what gets a bot around a trench, a wall or a parked jeep instead of
+   *  grinding into it until the errand is abandoned. */
+  private planBotJeepDrive(jeep: JeepSnapshot, target: { x: number; z: number }): { steering: number; throttle: number } {
+    const spec = vehicleSpec(jeep.kind);
+    const step = 0.05;
+    const initial = Math.hypot(target.x - jeep.position.x, target.z - jeep.position.z);
+    let bestScore = -Infinity;
+    let best = { steering: 0, throttle: 1 };
+    for (const steering of [0, -0.5, 0.5, -1, 1]) {
+      for (const throttle of [1, 0.45]) {
+        let x = jeep.position.x, y = jeep.position.y, z = jeep.position.z, yaw = jeep.yaw, speed = jeep.speed;
+        let travelled = 0, blocked = false;
+        for (let i = 0; i < 40; i++) {
+          const targetSpeed = throttle * spec.topSpeed;
+          speed += Math.max(-spec.acceleration * step, Math.min(spec.acceleration * step, targetSpeed - speed));
+          yaw += steering * Math.min(Math.abs(speed) / spec.fullTurnSpeed, 1) * spec.turnRate * step;
+          const nx = x - Math.sin(yaw) * speed * step;
+          const nz = z - Math.cos(yaw) * speed * step;
+          const ny = this.world.getGroundHeight(nx, nz);
+          if (!this.localJeepClear(nx, ny, nz, yaw, jeep.id)) { blocked = true; break; }
+          travelled += Math.hypot(nx - x, nz - z);
+          x = nx; y = ny; z = nz;
+        }
+        const progress = initial - Math.hypot(target.x - x, target.z - z);
+        const score = progress + travelled * 0.1 - (blocked ? 8 : 0) - Math.abs(steering) * 0.2;
+        if (score > bestScore) { bestScore = score; best = { steering, throttle }; }
+      }
+    }
+    return best;
+  }
+
+  /** Finished at the enemy base: drop the bot beside the jeep and release it. */
+  private exitBotJeep(bot: Bot, jeep: JeepSnapshot): void {
+    const spot = this.localJeepExitSpot(jeep);
+    if (!spot) return; // no room this frame; the errand ends next frame instead
+    jeep.driverId = null;
+    jeep.speed = 0;
+    bot.mesh.visible = true;
+    bot.position.set(spot.x, spot.y, spot.z);
+    bot.mesh.position.copy(bot.position);
+    this.botJeepMissions.delete(bot.name);
+    this.botJeepTeamReadyAt.set(bot.team, this.localTime + BOT_JEEP_COOLDOWN_SECONDS);
+    this.updateBotNameTag(bot, bot.role === 'defender' ? '🛡️ DEFENDING' : '🎯 PATROLLING', bot.team === 'blue' ? '#60a5fa' : '#f87171');
+    this.applyJeeps(this.localJeeps);
+  }
+
+  /** The errand failed (dead, stuck, jeep gone): park the jeep and let the AI
+   *  have the bot back, after a cooldown so it does not retry immediately. */
+  private abandonBotJeepMission(bot: Bot): void {
+    const mission = this.botJeepMissions.get(bot.name);
+    const jeep = mission?.jeepId ? this.localJeeps.find(vehicle => vehicle.id === mission.jeepId) : undefined;
+    if (jeep && jeep.driverId === bot.name) {
+      jeep.driverId = null;
+      jeep.speed = 0;
+      // A live driver was hidden while riding; put it back beside its jeep so
+      // the AI does not run an invisible bot for the rest of the round.
+      if (!bot.isDead) {
+        const spot = this.localJeepExitSpot(jeep);
+        if (spot) bot.position.set(spot.x, spot.y, spot.z);
+        else bot.position.set(jeep.position.x, jeep.position.y, jeep.position.z);
+        bot.mesh.position.copy(bot.position);
+        bot.mesh.visible = true;
+      }
+      this.applyJeeps(this.localJeeps);
+    }
+    this.botJeepMissions.delete(bot.name);
+    this.botJeepTeamReadyAt.set(bot.team, this.localTime + BOT_JEEP_COOLDOWN_SECONDS);
+  }
+
+  /** Incoming fire hits the vehicle while a bot is at the wheel, the same way
+   *  server jeeps soak damage for their driver. Returns the damage left over
+   *  for the bot itself (nothing while it is riding). */
+  private absorbJeepDamage(bot: Bot, damage: number): number {
+    const jeep = this.localJeeps.find(vehicle => vehicle.driverId === bot.name && !vehicle.wreck);
+    if (!jeep) return damage;
+    jeep.hp = Math.max(0, jeep.hp - damage);
+    if (jeep.hp <= 0) {
+      jeep.wreck = true;
+      jeep.speed = 0;
+      this.showMessage(`💥 ${bot.team === 'blue' ? 'Blue' : 'Red'} jeep destroyed by enemy fire!`);
+      this.abandonBotJeepMission(bot);
+    }
+    this.applyJeeps(this.localJeeps);
+    return 0;
   }
 
   /** E at the workshop offline: carry mined blocks into team stock, as online. */
@@ -3949,7 +4240,7 @@ export class Game {
     if (hitBot) {
       // Shared damage model + range falloff, so the offline bot match hits for
       // exactly what the server would deal for the same shot.
-      const damage = weaponDamage(weapon, hitBotHeadshot, closestTargetDist);
+      const damage = this.absorbJeepDamage(hitBot, weaponDamage(weapon, hitBotHeadshot, closestTargetDist));
       hitBot.hp -= damage;
       hitBot.lastDamageTime = Date.now();
       hitBot.flinchTimer = 0.22;
@@ -4573,7 +4864,7 @@ export class Game {
       this.player.velocity.set(0, 0, 0);
     } else this.player.update(dt);
     // Offline matches drive their own jeeps; a connected server stays the owner.
-    if (this.gameMode !== 'online') this.updateLocalJeeps(dt);
+    if (this.gameMode !== 'online') this.updateLocalVehicles(dt);
     for (const { state, mesh } of this.jeeps.values()) {
       mesh.position.lerp(new THREE.Vector3(state.position.x, state.position.y, state.position.z), Math.min(dt * 14, 1));
       const delta = Math.atan2(Math.sin(state.yaw - mesh.rotation.y), Math.cos(state.yaw - mesh.rotation.y));
@@ -5127,6 +5418,7 @@ export class Game {
 
       // Respawn handling
       if (bot.isDead) {
+        if (this.botJeepMissions.has(bot.name)) this.abandonBotJeepMission(bot);
         bot.respawnTimer -= dt;
         if (bot.respawnTimer <= 0) {
           bot.isDead = false;
@@ -5192,6 +5484,11 @@ export class Game {
         }
         continue;
       }
+
+      // A bot on a jeep errand skips the infantry AI entirely: it is walking to
+      // the workshop, boarding, or driving, which is the whole point of it.
+      const jeepMission = this.botJeepMissions.get(bot.name);
+      if (jeepMission) { this.updateBotJeepMission(bot, jeepMission, dt); continue; }
 
       const eFlag = enemyFlag(bot.team);
       const fFlag = friendlyFlag(bot.team);
@@ -6210,7 +6507,7 @@ export class Game {
         }
       } else if (target.bot) {
         const baseDmg = bot.weapon === 'rifle' ? 40 + Math.random() * 18 : 20 + Math.random() * 10;
-        const dmg = Math.round(baseDmg * headshotMult);
+        const dmg = this.absorbJeepDamage(target.bot, Math.round(baseDmg * headshotMult));
         target.bot.hp -= dmg;
         target.bot.lastDamageTime = Date.now();
 
