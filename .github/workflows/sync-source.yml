@@ -11,31 +11,27 @@ jobs:
       - name: Fetch and apply the pending changes
         run: |
           set -uo pipefail
-          SHA=7a06168f1aec83d46e807f99c706084415767935671ed88668981b6e9cc0a944
+          SHA=1233c1419369b9e8769b2fe072b15531353a38c219d20028d4ae93d9388e487a
           try_fetch() {
-            echo "::group::fetch $1"
+            echo "fetch $1"
             rm -f /tmp/p.b64
-            if curl -fsSL --retry 2 --max-time 60 -o /tmp/p.b64 "$1"; then
+            if curl -fsSL --retry 3 --retry-delay 2 --max-time 90 -o /tmp/p.b64 "$1"; then
               wc -c /tmp/p.b64
-              if echo "$SHA  /tmp/p.b64" | sha256sum -c -; then echo "::endgroup::"; return 0; fi
-            else
-              echo "curl exit $?"
+              if echo "$SHA  /tmp/p.b64" | sha256sum -c -; then return 0; fi
             fi
-            echo "::endgroup::"
             return 1
           }
-          if try_fetch https://files.catbox.moe/0wfii0.b64; then :
+          if try_fetch https://files.catbox.moe/tarjdm.b64; then :
           elif try_fetch https://tmpfiles.org/dl/w4ABbwOIJRtT/p0.b64; then :
           else
             echo "every patch host failed"
-            curl -sS -o /dev/null -D- --max-time 30 https://files.catbox.moe/0wfii0.b64 | head -20 || true
+            curl -sS -o /dev/null -D- --max-time 30 https://files.catbox.moe/tarjdm.b64 | head -20 || true
             exit 1
           fi
           base64 -d /tmp/p.b64 | xz -dc > /tmp/p.patch
           wc -l /tmp/p.patch
           if ! git apply --check -v /tmp/p.patch; then
             echo "patch did not apply"
-            head -40 /tmp/p.patch
             exit 1
           fi
           git apply /tmp/p.patch
