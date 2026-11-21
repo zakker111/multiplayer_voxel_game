@@ -27,8 +27,8 @@ import {
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
   EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE, emplacedShotDirection,
   CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
-  SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW,
-  type EmplacementSpec, type Footprint,
+  SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
+  type EmplacementSpec, type Footprint, type SpotContact,
   isWorkshopProtectedCell,
   type WeaponStats,
   type RoundPhase,
@@ -189,6 +189,17 @@ export interface RadioMessage {
   time: number;
 }
 
+/** One enemy the HUD marks because a friendly spotting post can see them. */
+export interface SpotMarker {
+  id: string;
+  team: Team;
+  /** Screen position in percent of the viewport. */
+  xPct: number;
+  yPct: number;
+  /** Ground distance from the player, in metres. */
+  distance: number;
+}
+
 export interface GameState {
   hp: number;
   maxHp: number;
@@ -275,6 +286,8 @@ export interface GameState {
   killfeed: KillfeedEntry[];
   /** Bearings of recent damage sources in degrees (0 = ahead, +90 = right). */
   damageIndicators: number[];
+  /** Enemies currently inside a friendly spotting post's radius. */
+  spotContacts: SpotMarker[];
   /** Round-trip latency in ms; 0 when offline or not measured yet. */
   pingMs: number;
   /** Spawn invulnerability is active right now. */
@@ -539,6 +552,9 @@ export class Game {
   private killfeedSeq: number = 0;
   /** Recent damage sources, kept in world space so the HUD arc tracks as you turn. */
   private damageSources: Array<{ x: number; z: number; until: number }> = [];
+  /** Latest server spot report (online play) and when it arrived. */
+  private spottedContacts: SpotContact[] = [];
+  private spotReportAt = 0;
   private pingMs: number = 0;
   private pingTimer: number = 0;
   private spawnProtected: boolean = false;
@@ -3824,6 +3840,16 @@ export class Game {
     });
     this.networkClient.onMessage('emplacementsUpdated', (msg: any) => {
       if (Array.isArray(msg.emplacements)) this.applyEmplacements(msg.emplacements as EmplacementSnapshot[]);
+    });
+    this.networkClient.onMessage('spotReport', (msg: any) => {
+      if (!Array.isArray(msg.contacts)) return;
+      this.spottedContacts = (msg.contacts as SpotContact[]).filter((contact) => contact
+        && typeof contact.id === 'string'
+        && (contact.team === 'red' || contact.team === 'blue')
+        && Number.isFinite(contact.position?.x)
+        && Number.isFinite(contact.position?.y)
+        && Number.isFinite(contact.position?.z));
+      this.spotReportAt = performance.now();
     });
     this.networkClient.onMessage('emplacementDamaged', (msg: any) => {
       const m = msg as { emplacementId?: string; damage?: number; hp?: number; maxHp?: number };
@@ -7725,6 +7751,60 @@ export class Game {
     if (this.killfeed.length > 6) this.killfeed.shift();
   }
 
+  /** Enemies a friendly spotting post sees, computed locally for Bot Match
+   *  and Beta; online play uses the server's authoritative report instead. */
+  private localSpotContacts(): SpotContact[] {
+    const posts = this.localEmplacements.filter((e) =>
+      e.kind === 'spottingPost' && e.team === this.playerTeam && e.hp > 0);
+    if (posts.length === 0) return [];
+    const seen = (x: number, z: number) => posts.some((post) =>
+      Math.hypot(x - post.position.x, z - post.position.z) <= SPOTTING_POST_RADIUS);
+    const contacts: SpotContact[] = [];
+    for (const bot of this.bots) {
+      if (bot.isDead || bot.team === this.playerTeam) continue;
+      if (!seen(bot.position.x, bot.position.z)) continue;
+      contacts.push({ id: bot.name, team: bot.team, position: { x: bot.position.x, y: bot.position.y, z: bot.position.z } });
+    }
+    for (const [id, remote] of this.remotePlayers) {
+      if (remote.state.isDead || remote.state.team === this.playerTeam) continue;
+      const position = remote.mesh.position;
+      if (!seen(position.x, position.z)) continue;
+      contacts.push({ id, team: remote.state.team, position: { x: position.x, y: position.y, z: position.z } });
+    }
+    return contacts;
+  }
+
+  /** Project spotted enemies to HUD percentages, dropping anything behind the
+   *  camera or off screen. A report older than 1.5 s means the post is gone. */
+  private spotContactsForHud(): SpotMarker[] {
+    const contacts = this.gameMode === 'online'
+      ? (performance.now() - this.spotReportAt < 1500 ? this.spottedContacts : [])
+      : this.localSpotContacts();
+    if (contacts.length === 0) return [];
+    const camera = this.player.camera;
+    camera.updateMatrixWorld();
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const markers: SpotMarker[] = [];
+    for (const contact of contacts) {
+      const to = new THREE.Vector3(
+        contact.position.x - camera.position.x,
+        contact.position.y + 1.4 - camera.position.y,
+        contact.position.z - camera.position.z,
+      );
+      if (to.dot(forward) <= 0) continue;
+      const projected = new THREE.Vector3(contact.position.x, contact.position.y + 1.4, contact.position.z).project(camera);
+      if (Math.abs(projected.x) > 1 || Math.abs(projected.y) > 1) continue;
+      markers.push({
+        id: contact.id,
+        team: contact.team,
+        xPct: (projected.x * 0.5 + 0.5) * 100,
+        yPct: (-projected.y * 0.5 + 0.5) * 100,
+        distance: Math.round(Math.hypot(contact.position.x - this.player.position.x, contact.position.z - this.player.position.z)),
+      });
+    }
+    return markers;
+  }
+
   private emitState(): void {
     if (this.onStateChange) {
       const weapon = this.weapons[this.equipment];
@@ -7857,6 +7937,7 @@ export class Game {
         roundWinner: this.roundWinner,
         killfeed: this.killfeed,
         damageIndicators,
+        spotContacts: this.spotContactsForHud(),
         pingMs: this.pingMs,
         spawnProtected: this.spawnProtected,
         audioMuted: this.sounds.isMuted(),

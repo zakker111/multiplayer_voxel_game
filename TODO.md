@@ -99,7 +99,7 @@ These are starting choices for playtesting, not final balance numbers.
 - [x] **Cannon** — direct-fire anti-vehicle gun. 90 blocks, 350 HP, 1 per team, narrow arc, 10 shells, slow reload, small splash. Needs the projectile work below.
 - [x] **Mortar** — indirect fire. 80 blocks, 250 HP, 1 per team, 25–120 m range, 6 shells, arcing shell with a visible impact warning and a reload the enemy can hear.
 - [x] **Supply crate** — 20 blocks, 150 HP, 3 per team, forward stockpile teammates can deposit into and draw from, so a squad does not shuttle to base every trip.
-- [ ] **Spotting post** — 40 blocks, 200 HP, 1 per team, a tower whose radius marks enemies on the owning team's HUD. Counts as a structure, not a seat.
+- [x] **Spotting post** — 40 blocks, 200 HP, 1 per team, a tower whose radius marks enemies on the owning team's HUD. Counts as a structure, not a seat.
 
 **Shared work**
 

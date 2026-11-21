@@ -59,10 +59,10 @@ import {
   JeepSnapshot,
   WORLD_HALF, vehicleSpec, emplacementSpec, BENCH_REACH, benchPosition, EmplacementKind,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_USE_REACH,
-  SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW,
+  SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
   EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH, emplacedShotDirection,
   EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
-  type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots,
+  type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
 
@@ -202,6 +202,11 @@ export class ServerGame {
   private shells = new Map<string, ServerShell>();
   private shellSequence = 0;
   private emplacementSync = 0;
+  /** Throttles spotting reports to 4Hz; markers are HUD hints, not physics. */
+  private spotSync = 0;
+  /** Whether each team had a live spotting post on the last report, so the
+   *  frame that clears stale markers is sent exactly once. */
+  private spotHadPost = { red: false, blue: false };
   private jeepSync = 0;
   private botJeepTasks = new Map<string, BotJeepTask>();
   private botJeepCooldown = new Map<string, number>();
@@ -225,6 +230,35 @@ export class ServerGame {
 
   private broadcastEmplacements(): void {
     this.broadcast({ type: 'emplacementsUpdated', emplacements: this.emplacementSnapshots() });
+  }
+
+  /** Enemy contacts for each team that owns a live spotting post. Only that
+   *  team receives the positions, so a tower spots for its own side and the
+   *  other team never gets a free radar. When a team's last post goes down one
+   *  empty report clears its markers instead of leaving them on the HUD. */
+  private broadcastSpotReports(): void {
+    const posts: Record<'red' | 'blue', EmplacementSnapshot[]> = { red: [], blue: [] };
+    for (const emplacement of this.emplacements.values()) {
+      if (emplacement.kind === 'spottingPost' && emplacement.hp > 0) posts[emplacement.team].push(emplacement);
+    }
+    const hasPost = { red: posts.red.length > 0, blue: posts.blue.length > 0 };
+
+    for (const [id, player] of this.players) {
+      if (player instanceof ServerBot || player.isDead || player.isSpectating) continue;
+      if (!hasPost[player.team]) {
+        if (this.spotHadPost[player.team]) this.sendToPlayer(id, { type: 'spotReport', contacts: [] });
+        continue;
+      }
+      const contacts: SpotContact[] = [];
+      for (const other of this.players.values()) {
+        if (other.team === player.team || other.isDead || other.isSpectating) continue;
+        const seen = posts[player.team].some((post) =>
+          Math.hypot(other.position.x - post.position.x, other.position.z - post.position.z) <= SPOTTING_POST_RADIUS);
+        if (seen) contacts.push({ id: other.id, team: other.team, position: { ...other.position } });
+      }
+      this.sendToPlayer(id, { type: 'spotReport', contacts });
+    }
+    this.spotHadPost = hasPost;
   }
 
   private emplacementMessage(playerId: string, message: string): void {
@@ -3135,6 +3169,13 @@ export class ServerGame {
         this.emplacementSync = 0;
         if ([...this.emplacements.values()].some(e => e.gunnerId)) this.broadcastEmplacements();
       }
+    }
+    // Spotting posts are HUD hints: four reports a second are enough to track
+    // a running enemy, and cheap enough to send only to the owning team.
+    this.spotSync += dt;
+    if (this.spotSync >= 0.25) {
+      this.spotSync = 0;
+      this.broadcastSpotReports();
     }
 
     // Clear stale shooting flags once the 100ms window has elapsed.

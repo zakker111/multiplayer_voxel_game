@@ -177,6 +177,7 @@ export type ServerMessage =
   | { type: 'workshopsUpdated'; workshops: Workshops }
   | { type: 'jeepsUpdated'; jeeps: JeepSnapshot[] }
   | { type: 'emplacementsUpdated'; emplacements: EmplacementSnapshot[] }
+  | { type: 'spotReport'; contacts: SpotContact[] }
   | { type: 'emplacementDamaged'; emplacementId: string; damage: number; hp: number; maxHp: number }
   | { type: 'emplacementPreview'; ok: boolean; reason?: string; position?: Position; yaw?: number }
   | { type: 'emplacementMessage'; message: string }
@@ -360,12 +361,21 @@ export interface EmplacementSnapshot {
   gunnerId: string | null;
 }
 
+/** One enemy a friendly spotting post currently sees, for the team HUD. */
+export interface SpotContact {
+  id: string;
+  team: 'red' | 'blue';
+  position: Position;
+}
+
 /** Kinds a player can man with F: the three armed builds. */
 export const MANNED_EMPLACEMENTS: EmplacementKind[] = ['mgNest', 'cannon', 'mortar'];
 /** How close a player must stand to climb into a nest. */
 export const EMPLACEMENT_MOUNT_REACH = 3.5;
 /** How close a team must stand to fill or draw from a supply crate. */
 export const EMPLACEMENT_USE_REACH = 4;
+/** How far a live spotting post marks enemies for its owning team. */
+export const SPOTTING_POST_RADIUS = 45;
 /** Mined blocks a forward supply crate can hold before it is full. */
 export const SUPPLY_CRATE_CAPACITY = 60;
 /** Blocks one draw hands to a teammate's build inventory. */

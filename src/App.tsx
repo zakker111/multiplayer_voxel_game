@@ -50,6 +50,7 @@ function App() {
     roundWinner: null,
     killfeed: [],
     damageIndicators: [],
+    spotContacts: [],
     pingMs: 0,
     spawnProtected: false,
     audioMuted: false,
@@ -860,6 +861,28 @@ function App() {
                     className="w-16 h-1.5 rounded-full bg-red-500 shadow-[0_0_14px_3px_rgba(239,68,68,0.55)]"
                     style={{ transform: `rotate(${deg}deg) translateY(-130px)` }}
                   />
+                </div>
+              ))}
+
+              {/* Spotting post contacts: enemies inside a friendly post's radius */}
+              {gameState.spotContacts && gameState.spotContacts.map((contact) => (
+                <div
+                  key={contact.id}
+                  className="absolute z-10 pointer-events-none -translate-x-1/2 -translate-y-1/2"
+                  style={{ left: `${contact.xPct}%`, top: `${contact.yPct}%` }}
+                >
+                  <div className="flex flex-col items-center">
+                    <span
+                      className={contact.team === 'red'
+                        ? 'text-red-400 text-xl leading-none drop-shadow-[0_0_6px_rgba(239,68,68,0.8)]'
+                        : 'text-blue-300 text-xl leading-none drop-shadow-[0_0_6px_rgba(96,165,250,0.8)]'}
+                    >
+                      ◈
+                    </span>
+                    <span className="mt-0.5 text-[10px] font-bold text-white bg-black/60 px-1 rounded">
+                      {contact.distance}m
+                    </span>
+                  </div>
                 </div>
               ))}
 
