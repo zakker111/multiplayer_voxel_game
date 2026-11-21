@@ -1,0 +1,43 @@
+name: Sync verified Freebuff changes
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch, verify, and push
+        run: |
+          set -euo pipefail
+          test -f .github/freebuff-spotting.patch.gz.b64
+          base64 -d .github/freebuff-spotting.patch.gz.b64 | gunzip > /tmp/freebuff-spotting.patch
+          git apply --check /tmp/freebuff-spotting.patch
+          git apply /tmp/freebuff-spotting.patch
+          rm .github/freebuff-spotting.patch.gz.b64
+          rm .github/workflows/sync-freebuff.yml
+          npm ci --include=dev
+          npm run lint
+          npm test
+          npm run build
+          git config user.name "zakker111"
+          git config user.email "2182664+zakker111@users.noreply.github.com"
+          git add -A
+          git commit -F - <<'MSG'
+          Show spotting-post coverage in the blueprint bench
+
+          Fold the team's spotting-post distance and bearing into the bench footer, and
+          stack the workshop above the health bar so narrow screens no longer overlap.
+          Add focused coverage tests for distance, bearing and team selection.
+
+          Generated with Codebuff 🤖
+          Co-Authored-By: Codebuff <noreply@codebuff.com>
+          MSG
+          git push origin HEAD:main
