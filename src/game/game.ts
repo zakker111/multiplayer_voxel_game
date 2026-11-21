@@ -1481,12 +1481,23 @@ export class Game {
     const speed = isMortar ? 42 : 85;
     const launchPitch = isMortar ? Math.max(pitch, Math.PI / 4) : pitch;
     const cosPitch = Math.cos(launchPitch);
-    const muzzle = isMortar ? 1.0 : 1.6;
-    const position = new THREE.Vector3(
-      emplacement.position.x + forward.x * muzzle,
-      emplacement.position.y + 1.2,
-      emplacement.position.z + forward.z * muzzle,
-    );
+    // Leave from the barrel the player can see. The marker sits on the aiming
+    // pivot, so it already carries the build's yaw; the fixed offset is only
+    // the fallback for a build whose model is already gone.
+    const gunMesh = this.emplacementMeshes.get(emplacement.id);
+    const muzzleMarker = gunMesh?.getObjectByName('emplacementMuzzle');
+    let position: THREE.Vector3;
+    if (gunMesh && muzzleMarker) {
+      gunMesh.updateMatrixWorld(true);
+      position = muzzleMarker.getWorldPosition(new THREE.Vector3());
+    } else {
+      const fallback = isMortar ? 1.0 : 1.6;
+      position = new THREE.Vector3(
+        emplacement.position.x + forward.x * fallback,
+        emplacement.position.y + 1.2,
+        emplacement.position.z + forward.z * fallback,
+      );
+    }
     const velocity = new THREE.Vector3(
       forward.x * speed * cosPitch,
       Math.sin(launchPitch) * speed,
@@ -1508,6 +1519,7 @@ export class Game {
       firedAt: this.localTime,
     });
     this.sounds.collapse();
+    this.createMuzzleFlash(position, velocity.clone().normalize());
   }
 
   /** Step the shells offline and burst them on ground, a body or a build. */
@@ -4009,15 +4021,15 @@ export class Game {
     const remote = this.remotePlayers.get(playerId);
     let muzzlePos = o;
     let receiverPos = o;
-    if (weaponType === 'mgNest') {
-      // The gun is the nest, not the gunner's rifle: fire the flash out of the
-      // barrel marker of the build standing at the reported origin.
-      const nest = [...this.emplacedSnapshots.values()].find((build) => build.kind === 'mgNest'
-        && Math.hypot(build.position.x - origin.x, build.position.z - origin.z) < 3.5
-        && Math.abs(build.position.y - origin.y) < 3.5);
-      const nestMesh = nest ? this.emplacementMeshes.get(nest.id) : undefined;
-      if (nestMesh) nestMesh.updateMatrixWorld(true);
-      const marker = nestMesh?.getObjectByName('emplacementMuzzle');
+    if (weaponType === 'mgNest' || weaponType === 'cannon' || weaponType === 'mortar') {
+      // The gun is the build, not the gunner's rifle: fire the flash out of the
+      // barrel marker of the emplacement standing at the reported origin.
+      const build = [...this.emplacedSnapshots.values()].find((candidate) => candidate.kind === weaponType
+        && Math.hypot(candidate.position.x - origin.x, candidate.position.z - origin.z) < 3.5
+        && Math.abs(candidate.position.y - origin.y) < 3.5);
+      const buildMesh = build ? this.emplacementMeshes.get(build.id) : undefined;
+      if (buildMesh) buildMesh.updateMatrixWorld(true);
+      const marker = buildMesh?.getObjectByName('emplacementMuzzle');
       muzzlePos = marker ? marker.getWorldPosition(new THREE.Vector3()) : o.clone().addScaledVector(d, 1.0);
     } else if (remote) {
       remote.mesh.updateMatrixWorld(true);
@@ -4034,7 +4046,10 @@ export class Game {
     }
 
     this.createMuzzleFlash(muzzlePos, d);
-    this.createBulletTracer(muzzlePos, d, maxDist, speed);
+    // A shell's flight is drawn from where the server spawned it; only the
+    // flash moves to the barrel.
+    const tracerStart = weaponType === 'cannon' || weaponType === 'mortar' ? o : muzzlePos;
+    this.createBulletTracer(tracerStart, d, maxDist, speed);
     // A belt-fed nest throws brass too, but its receiver is inside the model.
     if (weaponType !== 'mgNest') this.createBulletShell(receiverPos, d, true);
     if (weaponType === 'smg') {
