@@ -1,6 +1,19 @@
 // Headless Beta battle simulation: full matches on the real authoritative server.
 //
-//   node scripts/beta-simulate.mjs [minutes=30] [roundMinutes=30] [runs=3] [botsPerTeam=10]
+//   node scripts/beta-simulate.mjs [minutes=30] [roundMinutes=30] [runs=3] [botsPerTeam=10] [seed]
+//
+// Reproducing a report: a run takes its own seed (`baseSeed + runIndex - 1`, so
+// run 1 uses the base seed itself) and installs
+// it as Math.random plus a virtual clock, so the same arguments reproduce the
+// same report exactly — same pickups, same deaths, same jeeps. Without a seed
+// the banner prints the random one it picked; pass it back as the last argument:
+//
+//   node scripts/beta-simulate.mjs 30 30 3 10 12345
+//
+// The virtual clock matters as much as the RNG: reloads and other cooldowns read
+// Date.now, and a fast headless run would otherwise spend most of a match
+// "reloading" in wall-clock seconds. Advancing it with simulated ticks keeps the
+// timers on match time and removes wall-clock jitter between runs.
 //
 // Beta is the online server path, so this drives the same ServerGame tick loop
 // the live server runs: bots, workshops, blueprint hardware, jeeps, logistics
@@ -47,8 +60,12 @@ const MINUTES = positiveInt(process.argv[2], 30, 'minutes');
 const ROUND_MINUTES = positiveInt(process.argv[3], 30, 'roundMinutes');
 const RUNS = positiveInt(process.argv[4], 3, 'runs');
 const BOTS_PER_TEAM = positiveInt(process.argv[5], 10, 'botsPerTeam');
+const BASE_SEED = nonNegativeInt(process.argv[6], Math.floor(Math.random() * 2 ** 31), 'seed');
 
 const TICK_DT = 1 / 20;
+// A fixed epoch for the virtual clock: reproducibility must not depend on the
+// date the harness happens to run.
+const VIRTUAL_EPOCH_MS = Date.UTC(2026, 0, 1);
 const SAMPLES_PER_SECOND = Math.round(1 / TICK_DT);
 // Two extra ticks let a round whose clock expires exactly on the final simulated
 // frame run its end-of-round transition, so the last round is not lost.
@@ -59,6 +76,27 @@ const ROUND_SECONDS = ROUND_MINUTES * 60;
 const MOBILE_STATES = new Set(['ADVANCE', 'FLANK', 'GRABFLAG', 'RETURN', 'ESCORT']);
 const STALL_MOVE_METRES = 1.2;
 const JEEP_EXPOSURE_RANGE = 60;
+
+function nonNegativeInt(raw, fallback, name) {
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    console.error(`[beta-simulate] ${name} must be a non-negative integer (got ${raw})`);
+    process.exit(1);
+  }
+  return value;
+}
+
+/** Small, fast, seedable PRNG (mulberry32) so a run can be reproduced exactly. */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function random() {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 function positiveInt(raw, fallback, name) {
   if (raw === undefined) return fallback;
@@ -76,6 +114,14 @@ const total = (record) => Object.values(record).reduce((a, b) => a + b, 0);
 const flagFor = (team) => (team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS);
 
 function runMatch(index) {
+  const seed = (BASE_SEED + index - 1) >>> 0;
+  const realRandom = Math.random;
+  const realNow = Date.now;
+  let virtualMs = VIRTUAL_EPOCH_MS;
+  Math.random = mulberry32(seed);
+  Date.now = () => virtualMs;
+  const advanceClock = () => { virtualMs += TICK_DT * 1000; };
+
   const game = new ServerGame();
   game.roundSeconds = ROUND_SECONDS;
   game.roundPhase = 'live';
@@ -170,6 +216,7 @@ function runMatch(index) {
   };
 
   for (let tick = 1; tick <= TICKS; tick++) {
+    advanceClock();
     game.update(TICK_DT);
     const t = tick * TICK_DT;
     const phase = game.roundPhase;
@@ -474,6 +521,7 @@ function runMatch(index) {
 
   const result = {
     index,
+    seed,
     minutes: MINUTES,
     bots: bots.length,
     roundRecords,
@@ -548,6 +596,10 @@ function runMatch(index) {
   };
 
   verifyMatch(result, capturesScored);
+  // Restore the real clocks before the report is printed: nothing after this
+  // point is simulated, and a lingering Date.now would confuse the logger.
+  Math.random = realRandom;
+  Date.now = realNow;
   return result;
 }
 
@@ -583,7 +635,7 @@ function printMatch(result) {
   const caps = result.totalCaptures.blue + result.totalCaptures.red;
 
   console.log('');
-  console.log(`══════════ RUN ${result.index} — ${result.minutes} min, ${result.bots / 2}v${result.bots / 2}, ${ROUND_MINUTES}-min rounds ══════════`);
+  console.log(`══════════ RUN ${result.index} — ${result.minutes} min, ${result.bots / 2}v${result.bots / 2}, ${ROUND_MINUTES}-min rounds, seed ${result.seed} ══════════`);
   console.log(`Rounds finished: ${result.roundRecords.length}` +
     (result.incompleteRound ? ' (+1 in progress at the final tick)' : '') +
     ` | Blue ${result.roundsWins.blue} - Red ${result.roundsWins.red}${result.roundsWins.draw ? ` - Draw ${result.roundsWins.draw}` : ''}`);
@@ -730,11 +782,14 @@ function printSummary(results) {
   }
   console.log(`Blueprint mix: ${Object.entries(kinds).map(([kind, n]) => `${kind}×${n}`).join(', ') || 'none'}` +
     ` | mean objective drought ${avg(results.map((r) => r.maxObjectiveDrought)).toFixed(0)}s`);
+  console.log(`Seeds: ${results.map((r) => r.seed).join(', ')} | reproduce with the base seed printed in the banner`);
   console.log('');
 }
 
 console.log('=== BETA BATTLE SIMULATION ===');
 console.log(`${RUNS} matches × ${MINUTES} min, ${ROUND_MINUTES}-min rounds, ${BOTS_PER_TEAM}v${BOTS_PER_TEAM} server bots, 20 Hz.`);
+console.log(`Base seed ${BASE_SEED} (run i uses base + i - 1). Reproduce exactly with:`);
+console.log(`  node scripts/beta-simulate.mjs ${MINUTES} ${ROUND_MINUTES} ${RUNS} ${BOTS_PER_TEAM} ${BASE_SEED}`);
 
 const results = [];
 for (let index = 1; index <= RUNS; index++) {

@@ -252,6 +252,37 @@ test('a bot steers around a blocked footprint instead of walking into it', () =>
   assert.ok(bot.position.x > 3, 'it still made progress toward the far side');
 });
 
+test('a flag carrier never walls off its own run home', () => {
+  // Regression: a carrier wedged in front of a crate screened itself in, one
+  // 2-high column every 1.6s toward the chaser, and held the flag for 623s.
+  const world = new ServerWorld();
+  const ctx = {
+    world,
+    serverTime: 100,
+    targets: [],
+    friendlyDroppedFlagPos: null,
+    canSee: () => false,
+    fireWeapon: () => {},
+    buildBlock: () => {},
+  };
+  const bot = new ServerBot('carrier-cover-test', { x: 0, y: GROUND_LEVEL, z: 100 }, 'red', 'Carrier');
+  bot.carryingFlag = true;
+  bot.botBlocks = 30;
+  let columns = 0;
+  bot.tryBuildColumnAt = () => { columns++; };
+
+  // The chaser is between the carrier and its own stand (red base is z=160):
+  // a column here would land across the run home, so nothing may be built.
+  ctx.serverTime = 100;
+  bot.buildPanicCover({ x: 0, y: GROUND_LEVEL, z: 150 }, ctx, 100, 1.6, 2);
+  assert.equal(columns, 0, 'no cover between the carrier and home');
+
+  // A chaser behind the carrier is what screening is for.
+  ctx.serverTime = 102;
+  bot.buildPanicCover({ x: 0, y: GROUND_LEVEL, z: 40 }, ctx, 102, 1.6, 2);
+  assert.equal(columns, 1, 'cover behind the carrier still goes up');
+});
+
 test('a bot treats an enemy nest as a visible target in the shared context', () => {
   const game = new ServerGame();
   const [spot] = findSpots(game, 1);

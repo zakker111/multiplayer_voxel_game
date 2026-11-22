@@ -396,16 +396,18 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 233 regression tests (voxel rules, bots, rounds,
+npm test            # node --test tests/ — 234 regression tests (voxel rules, bots, rounds,
                     # workshop/jeep/logistics, spawn shield/regen, feedback, integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):
                     # WS join/input/respawn, malformed frames, HTTP token auth, SSE init
 npm run measure:bots -- 30   # headless bot-only round: captures, pickups, deaths,
                     #   structure starts (structuresStarted)/completions, blocks, recoveries
-node scripts/beta-simulate.mjs 30 30 3   # full Beta battle sims (minutes, round minutes, runs, bots/team):
-                    #   round results, per-kind hardware, jeeps, stalls, droughts; it throws
-                    #   if its own counters disagree, so a silent miscount cannot ship
+node scripts/beta-simulate.mjs 30 30 3 10 12345   # full Beta battle sims (minutes, round minutes,
+                    #   runs, bots/team, seed): round results, per-kind hardware, jeeps, stalls,
+                    #   droughts. Same seed + same args reproduce a report exactly (run i uses
+                    #   seed + i - 1); it throws if its own counters disagree, so a silent
+                    #   miscount cannot ship
 npm run dev         # tsx server.ts with Vite middleware (PORT, default 3000)
 npm run build       # vite bundle + dist/server.cjs + dist/admin.cjs (esbuild)
 npm start           # production server (reads process.env.PORT)

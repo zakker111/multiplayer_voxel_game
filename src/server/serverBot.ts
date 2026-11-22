@@ -272,6 +272,8 @@ export class ServerBot extends ServerPlayer {
   // for a moment instead of pressing into the obstacle.
   private detourUntil: number = -1;
   private detourDir: number = 1;
+  /** Last second in which a movement sample showed no progress (pacing, not travel). */
+  private lastStuckAt: number = -100;
 
   // Personality weights (per bot, slightly randomized)
   private aggroBias: number;
@@ -1577,6 +1579,7 @@ export class ServerBot extends ServerPlayer {
       if (moved > 0.6) this.recoveryAttempts = 0;
       return;
     }
+    this.lastStuckAt = t;
     this.stuckStrikes++;
     if (this.stuckStrikes >= 2) this.recoverFromStuck(ctx, t);
   }
@@ -1592,26 +1595,51 @@ export class ServerBot extends ServerPlayer {
     this.lastRecoveryAt = t;
     this.recoveryAttempts++;
 
-    const fwd = this.forwardDir();
-    const aheadX = this.position.x + fwd.x * 1.4;
-    const aheadZ = this.position.z + fwd.z * 1.4;
+    // A carrier's "ahead" is home, not whichever way it happens to be facing
+    // while shooting back at the chaser: digging at the chaser never opens the
+    // wall that trapped it. Without the flag, the facing is the right direction.
+    const home = this.team === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
+    let fwd = this.forwardDir();
+    if (this.carryingFlag) {
+      const hx = (this.returnWaypoint?.x ?? home.x) - this.position.x;
+      const hz = (this.returnWaypoint?.z ?? home.z) - this.position.z;
+      const hlen = Math.hypot(hx, hz) || 1;
+      fwd = { x: hx / hlen, y: 0, z: hz / hlen };
+    }
     const bodyY = Math.round(this.position.y + 1);
 
     // 1. Clear the obstruction if the server allows digging and we haven't
-    //    already spent this recovery cycle's attempts on blocks.
-    if (ctx.digBlock && this.recoveryAttempts <= 3) {
-      for (const y of [bodyY, bodyY - 1]) {
-        const gx = Math.round(aheadX);
-        const gz = Math.round(aheadZ);
-        if (ctx.world.isSolid(gx, y, gz)) {
-          ctx.digBlock(this, { x: gx, y, z: gz });
-          this.detourDir *= -1; // try the other side once the block is gone
-          return;
+    //    already spent this recovery cycle's attempts on blocks. A carrier
+    //    checks wider and further: its own panic cover lands 2.4m out, which a
+    //    1.4m probe never sees, so it used to grind against a wall it built.
+    if (ctx.digBlock && (this.carryingFlag || this.recoveryAttempts <= 3)) {
+      const probes = this.carryingFlag
+        ? [[1.5, 0], [2.6, 0], [1.8, -1], [1.8, 1], [2.8, -1], [2.8, 1]]
+        : [[1.4, 0]];
+      for (const [ahead, side] of probes) {
+        const gx = Math.round(this.position.x + fwd.x * ahead - fwd.z * side);
+        const gz = Math.round(this.position.z + fwd.z * ahead + fwd.x * side);
+        for (const y of [bodyY, bodyY - 1]) {
+          if (ctx.world.isSolid(gx, y, gz)) {
+            ctx.digBlock(this, { x: gx, y, z: gz });
+            this.detourDir *= -1; // try the other side once the block is gone
+            return;
+          }
         }
       }
     }
 
-    // 2. Reposition: a new waypoint off to the side forces a fresh path.
+    // 2. A carrier cannot hand control to ADVANCE (carrying the flag forces
+    //    RETURN again next tick), so give it a committed side lane instead and
+    //    keep it in RETURN. Re-rolling every jink kept picking the blocked lane.
+    if (this.carryingFlag) {
+      this.detourDir *= -1;
+      this.returnWaypoint = { x: home.x + 26 * this.detourDir, y: GROUND_LEVEL, z: home.z };
+      this.nextJinkAt = t + 2.5;
+      return;
+    }
+
+    // 3. Reposition: a new waypoint off to the side forces a fresh path.
     const side = this.detourDir;
     const wx = this.position.x + -fwd.z * side * 10 + fwd.x * 4;
     const wz = this.position.z + fwd.x * side * 10 + fwd.z * 4;
@@ -1776,7 +1804,13 @@ export class ServerBot extends ServerPlayer {
     ];
 
     const lookAhead = 1.4;
+    const now = ctx.serverTime;
+    // Only a bot that is actually pacing should commit to a detour side. A bot
+    // that is travelling may zig-zag freely; forcing commitment there would
+    // change its line around every wall, not just break a deadlock.
+    const pacing = now - this.lastStuckAt < 1.5;
     let chosen: [number, number] | null = null;
+    let chosenSide = 0; // -1/+1 while the step is sideways rather than progress
     for (const [px, pz] of probes) {
       const tx = this.position.x + px * lookAhead;
       const tz = this.position.z + pz * lookAhead;
@@ -1784,6 +1818,16 @@ export class ServerBot extends ServerPlayer {
       if (ctx.blockedBy?.(tx, tz)) continue; // structures are not steppable
       if (!ctx.world.isSolid(Math.round(tx), Math.round(ty + 0.8), Math.round(tz)) &&
           !ctx.world.isSolid(Math.round(tx), Math.round(ty + 1.6), Math.round(tz))) {
+        // A pure sideways step is a detour, not progress. Commit to one side
+        // for a moment: without the hold, the next tick's mirror probe wins,
+        // the two steps cancel out and the bot paces in front of a crate or
+        // emplacement forever (measured: a flag carrier held for 623s).
+        const along = px * nx + pz * nz;
+        if (along < 0.25) {
+          const side = px * -nz + pz * nx > 0 ? 1 : -1;
+          if (pacing && now < this.detourUntil && side !== this.detourDir) continue;
+          chosenSide = side;
+        }
         chosen = [px, pz];
         break;
       }
@@ -1791,12 +1835,15 @@ export class ServerBot extends ServerPlayer {
     if (!chosen) {
       // Fully blocked (wall / trench line). Pressing straight into it just pins
       // the bot against the block, so slide along it and look for a gap.
-      const now = ctx.serverTime;
       if (now >= this.detourUntil) {
         this.detourDir = Math.random() < 0.5 ? -1 : 1;
-        this.detourUntil = now + 0.8;
       }
       chosen = [-nz * this.detourDir, nx * this.detourDir];
+      chosenSide = this.detourDir;
+    }
+    if (chosenSide !== 0 && pacing) {
+      this.detourDir = chosenSide;
+      this.detourUntil = now + 0.8;
     }
 
     this.velocity.x = chosen[0] * speed;
@@ -1898,6 +1945,19 @@ export class ServerBot extends ServerPlayer {
     // column would box us in and the bot would grind against its own cover for
     // minutes — measured as a carrier stuck 178s in RETURN. Sides and rear are
     // the directions that need screening.
+    if (this.carryingFlag) {
+      // A wedged carrier must dig or re-route, never add more geometry: while it
+      // jitters between two blocked steps its velocity still looks like movement
+      // and the heading guard passes, so it walled off its own run home one
+      // 2-high column every 1.6s (measured: 6 columns and a 96s carry).
+      if (this.recoveryAttempts > 0 || this.stuckStrikes > 0) return;
+      const base = this.team === 'blue' ? BLUE_FLAG_POS : RED_FLAG_POS;
+      const hx = base.x - this.position.x;
+      const hz = base.z - this.position.z;
+      const hlen = Math.hypot(hx, hz) || 1;
+      const homeward = (dx / len) * (hx / hlen) + (dz / len) * (hz / hlen);
+      if (homeward > 0.2) return; // the column would land between us and home
+    }
     const speed = Math.hypot(this.velocity.x, this.velocity.z);
     if (speed > 0.5) {
       const heading = (this.velocity.x * (dx / len) + this.velocity.z * (dz / len)) / speed;
