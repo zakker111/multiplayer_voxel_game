@@ -5,7 +5,7 @@
 // aim is the round that lands — the mortar used to launch at a fixed 45° with a
 // fixed speed, which put every shot in the same ~90 m band no matter where the
 // gunner looked.
-import type { Position } from './types';
+import type { Footprint, Position } from './types';
 
 /** Muzzle speed of a cannon round. Flat and fast: direct fire. */
 export const CANNON_SHELL_SPEED = 85;
@@ -126,4 +126,40 @@ export function shellArc(
     }
   }
   return { points, impact: { ...point } };
+}
+
+/** Radius of an infantry body a shell bursts on, measured at torso height. */
+export const SHELL_BODY_RADIUS = 0.7;
+
+/**
+ * Something a shell can burst on that is not terrain. The server projectile,
+ * the offline projectile and the preview ring all test the same list with the
+ * same geometry, so the ring is where the round actually stops.
+ */
+export type ShellObstacle =
+  | { kind: 'body'; team: 'red' | 'blue'; position: Position }
+  | { kind: 'footprint'; team: 'red' | 'blue'; position: Position; footprint: Footprint };
+
+/** True when a shell sample lands on this enemy body, vehicle or build. */
+export function shellHitsObstacle(point: Position, team: 'red' | 'blue', obstacle: ShellObstacle): boolean {
+  if (obstacle.team === team) return false;
+  if (obstacle.kind === 'body') {
+    return Math.hypot(
+      point.x - obstacle.position.x,
+      point.y - (obstacle.position.y + 1),
+      point.z - obstacle.position.z,
+    ) < SHELL_BODY_RADIUS;
+  }
+  const footprint = obstacle.footprint;
+  // A box's height is its vertical half-window (the same rule the server has
+  // always used for jeeps), and its horizontal reach is the circumscribed
+  // circle, so a shell cannot slip past a corner.
+  if (Math.abs(obstacle.position.y - point.y) >= footprint.height) return false;
+  return Math.hypot(point.x - obstacle.position.x, point.z - obstacle.position.z) <
+    Math.hypot(footprint.halfWidth, footprint.halfLength);
+}
+
+/** True when a shell sample lands on any enemy body, vehicle or build. */
+export function shellStopsAt(point: Position, team: 'red' | 'blue', obstacles: readonly ShellObstacle[]): boolean {
+  return obstacles.some((obstacle) => shellHitsObstacle(point, team, obstacle));
 }

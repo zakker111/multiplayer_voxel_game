@@ -65,7 +65,7 @@ import {
   type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
-import { MORTAR_SHELL_SPEED, ballisticVelocity } from '../shared/ballistics';
+import { MORTAR_SHELL_SPEED, ballisticVelocity, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -730,6 +730,9 @@ export class ServerGame {
     if (this.shells.size === 0) return;
     const step = Math.min(dt, 0.05);
     for (const shell of [...this.shells.values()]) {
+      // Bodies and hardware do not move inside a tick; one list serves both
+      // substeps and matches the geometry the client draws its ring with.
+      const obstacles = this.shellObstacles();
       // Two integration substeps keep a fast cannon round from tunnelling
       // through a one-voxel wall.
       for (let i = 0; i < 2; i++) {
@@ -740,7 +743,7 @@ export class ServerGame {
           y: shell.position.y + shell.velocity.y * half,
           z: shell.position.z + shell.velocity.z * half,
         };
-        const impact = this.shellImpactAt(shell, next);
+        const impact = this.shellImpactAt(shell, next, obstacles);
         if (impact) {
           this.explodeShell(shell, impact);
           break;
@@ -756,21 +759,32 @@ export class ServerGame {
   }
 
   /** Where a shell would stop, or null when the path is clear. */
-  private shellImpactAt(shell: ServerShell, next: Position): Position | null {
+  private shellImpactAt(shell: ServerShell, next: Position, obstacles: readonly ShellObstacle[]): Position | null {
     if (Math.abs(next.x) >= WORLD_HALF || Math.abs(next.z) >= WORLD_HALF) return next;
     if (this.world.isSolid(Math.round(next.x), Math.round(next.y), Math.round(next.z))) return shell.position;
-    for (const [id, player] of this.players) {
-      if (id === shell.ownerId || player.isDead || player.isSpectating) continue;
-      if (player.team === shell.team) continue;
-      if (Math.hypot(player.position.x - next.x, player.position.y + 1 - next.y, player.position.z - next.z) < 0.7) return next;
+    if (shellStopsAt(next, shell.team, obstacles)) return next;
+    return null;
+  }
+
+  /** Every body, vehicle and build a shell could burst on. The same records
+   *  feed the client's preview ring through the shared `shellStopsAt` test, so
+   *  the marker can never promise a burst the projectile does not deliver. */
+  private shellObstacles(): ShellObstacle[] {
+    const obstacles: ShellObstacle[] = [];
+    for (const player of this.players.values()) {
+      if (player.isDead || player.isSpectating) continue;
+      obstacles.push({ kind: 'body', team: player.team, position: player.position });
     }
     for (const jeep of this.jeeps.values()) {
-      if (jeep.wreck || jeep.team === shell.team) continue;
-      const spec = vehicleSpec(jeep.kind);
-      if (Math.abs(jeep.position.y - next.y) < spec.height &&
-        Math.hypot(jeep.position.x - next.x, jeep.position.z - next.z) < Math.hypot(spec.halfWidth, spec.halfLength)) return next;
+      if (jeep.wreck) continue;
+      obstacles.push({ kind: 'footprint', team: jeep.team, position: jeep.position, footprint: vehicleSpec(jeep.kind) });
     }
-    return null;
+    for (const emplacement of this.emplacements.values()) {
+      const spec = emplacementSpec(emplacement.kind);
+      if (!spec) continue;
+      obstacles.push({ kind: 'footprint', team: emplacement.team, position: emplacement.position, footprint: spec });
+    }
+    return obstacles;
   }
 
   /** Blast: enemies only, falling off with distance. Terrain and rounds are

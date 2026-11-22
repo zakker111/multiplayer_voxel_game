@@ -36,7 +36,10 @@ import {
   type RoundSnapshot,
   type RoundWinner,
 } from '../shared/types';
-import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc } from '../shared/ballistics';
+import {
+  CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc,
+  shellStopsAt, shellHitsObstacle, type ShellObstacle,
+} from '../shared/ballistics';
 
 /** How long a killfeed row stays on screen. */
 const KILLFEED_SECONDS = 8;
@@ -1880,26 +1883,17 @@ export class Game {
       shell.mesh.position.copy(shell.position);
 
       const ground = this.world.getGroundHeight(shell.position.x, shell.position.z);
-      let hitBot: Bot | null = null;
-      let botDistance = 1.2;
-      for (const bot of this.bots) {
-        if (bot.isDead || bot.team === shell.team) continue;
-        const distance = Math.hypot(
-          bot.position.x - shell.position.x,
-          bot.position.y + 1 - shell.position.y,
-          bot.position.z - shell.position.z,
-        );
-        if (distance < botDistance) { botDistance = distance; hitBot = bot; }
-      }
-      const hitBuild = this.localEmplacements.find(e => e.team !== shell.team &&
-        Math.hypot(e.position.x - shell.position.x, e.position.y + 0.8 - shell.position.y, e.position.z - shell.position.z) < 1.3);
-      // A shell stops on an enemy jeep's body, like the server's projectile: a
-      // direct hit is the difference between "scratched" and "wrecked".
-      const hitJeep = this.localJeeps.find(jeep => !jeep.wreck && jeep.team !== shell.team &&
-        Math.abs(shell.position.y - jeep.position.y) < 2.2 &&
-        Math.hypot(jeep.position.x - shell.position.x, jeep.position.z - shell.position.z) < Math.hypot(1.3, 2));
+      // The same shared stop rule the preview ring and the server use, so an
+      // offline round bursts exactly where the marker promised.
+      const obstacles = this.shellObstacles();
+      const stopped = shellStopsAt(shell.position, shell.team, obstacles);
+      const hitBuild = this.localEmplacements.find((e) => {
+        const spec = emplacementSpec(e.kind);
+        return !!spec && shellHitsObstacle(shell.position, shell.team,
+          { kind: 'footprint', team: e.team, position: e.position, footprint: spec });
+      });
       const stale = this.localTime - shell.firedAt > 8;
-      if (shell.position.y > ground && !hitBot && !hitBuild && !hitJeep && !stale) continue;
+      if (shell.position.y > ground && !stopped && !stale) continue;
 
       const impact = shell.position.clone();
       impact.y = Math.max(ground, impact.y);
@@ -4856,33 +4850,34 @@ export class Game {
     return { x, y: this.world.getGroundHeight(x, z), z };
   }
 
-  /** Bodies and hardware a shell stops on, mirrored from the authoritative
-   *  projectile so the preview ring is where the round actually bursts. */
-  private shellPreviewBlocked(point: Position, team: Team): boolean {
-    const near = (x: number, y: number, z: number, radius: number) =>
-      Math.hypot(point.x - x, point.y - y, point.z - z) < radius;
-
+  /** Bodies and hardware a shell stops on, in the exact shape the shared
+   *  `shellStopsAt` test expects. Both the preview ring and the offline
+   *  projectile use this list, so a jeep in the way stops the round at the
+   *  marker instead of a metre short of it (or a metre past). */
+  private shellObstacles(): ShellObstacle[] {
+    const obstacles: ShellObstacle[] = [];
     for (const { state } of this.jeeps.values()) {
-      if (state.wreck || state.team === team) continue;
-      if (near(state.position.x, state.position.y + 1, state.position.z, 2.2)) return true;
+      if (state.wreck) continue;
+      obstacles.push({ kind: 'footprint', team: state.team, position: state.position, footprint: vehicleSpec(state.kind) });
     }
     for (const jeep of this.localJeeps) {
-      if (jeep.wreck || jeep.team === team) continue;
-      if (near(jeep.position.x, jeep.position.y + 1, jeep.position.z, 2.2)) return true;
+      if (jeep.wreck) continue;
+      obstacles.push({ kind: 'footprint', team: jeep.team, position: jeep.position, footprint: vehicleSpec(jeep.kind) });
     }
     for (const bot of this.bots) {
-      if (bot.isDead || bot.team === team) continue;
-      if (near(bot.position.x, bot.position.y + 1, bot.position.z, 1.0)) return true;
+      if (bot.isDead) continue;
+      obstacles.push({ kind: 'body', team: bot.team, position: bot.position });
     }
     for (const remote of this.remotePlayers.values()) {
-      if (remote.state.isDead || remote.state.team === team) continue;
-      if (near(remote.mesh.position.x, remote.mesh.position.y + 1, remote.mesh.position.z, 0.9)) return true;
+      if (remote.state.isDead) continue;
+      obstacles.push({ kind: 'body', team: remote.state.team, position: remote.mesh.position });
     }
     for (const emplacement of this.emplacedSnapshots.values()) {
-      if (emplacement.team === team) continue;
-      if (near(emplacement.position.x, emplacement.position.y + 0.8, emplacement.position.z, 1.4)) return true;
+      const spec = emplacementSpec(emplacement.kind);
+      if (!spec) continue;
+      obstacles.push({ kind: 'footprint', team: emplacement.team, position: emplacement.position, footprint: spec });
     }
-    return false;
+    return obstacles;
   }
 
   /** Draw (or refresh) the manned cannon/mortar arc and landing ring. */
@@ -4916,6 +4911,7 @@ export class Game {
 
     // Same integration and gravity the server steps shells with, so this line
     // ends exactly where the round will land.
+    const obstacles = this.shellObstacles();
     const arc = shellArc(origin, velocity, {
       gravity: EMPLACEMENT_SHELL_GRAVITY,
       // Small steps so a shell cannot tunnel through a 2m-wide body between
@@ -4924,14 +4920,16 @@ export class Game {
       maxTime: 10,
       groundAt: (x, z) => this.world.getGroundHeight(x, z),
       solidAt: (point) => this.world.isSolid(Math.round(point.x), Math.round(point.y), Math.round(point.z)),
-      stopAt: (point) => this.shellPreviewBlocked(point, mounted.team),
+      stopAt: (point) => shellStopsAt(point, mounted.team, obstacles),
     });
 
     if (!this.shellPreviewLine) {
       const geometry = new THREE.BufferGeometry();
       this.shellPreviewLine = new THREE.Line(
         geometry,
-        new THREE.LineBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.65, depthWrite: false }),
+        // Amber reads against both the grass and the pale sky; the old sky
+        // blue disappeared into the horizon at the exact range it was aimed at.
+        new THREE.LineBasicMaterial({ color: 0xffc247, transparent: true, opacity: 0.85, depthWrite: false }),
       );
       this.shellPreviewLine.frustumCulled = false;
       this.scene.add(this.shellPreviewLine);
@@ -4941,6 +4939,8 @@ export class Game {
     const lineGeometry = this.shellPreviewLine.geometry as THREE.BufferGeometry;
     lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     lineGeometry.computeBoundingSphere();
+    // A mortar hides the line on dismount; the next cannon must bring it back.
+    this.shellPreviewLine.visible = true;
 
     const radius = isMortar ? MORTAR_BLAST_RADIUS : CANNON_BLAST_RADIUS;
     if (!this.shellPreviewMarker || this.shellPreviewRadius !== radius) {
@@ -4949,13 +4949,15 @@ export class Game {
         this.shellPreviewMarker.geometry.dispose();
         (this.shellPreviewMarker.material as THREE.Material).dispose();
       }
-      const material = new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false });
+      const material = new THREE.MeshBasicMaterial({ color: 0xffc247, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false });
       this.shellPreviewMarker = new THREE.Mesh(new THREE.RingGeometry(radius * 0.25, radius, 32), material);
       this.shellPreviewMarker.rotation.x = -Math.PI / 2;
       this.scene.add(this.shellPreviewMarker);
       this.shellPreviewRadius = radius;
     }
-    this.shellPreviewMarker.position.set(arc.impact.x, arc.impact.y + 0.07, arc.impact.z);
+    // Lift the ring clear of the turf: at ground height it z-fought the grass
+    // and read as no marker at all from the gunner's seat.
+    this.shellPreviewMarker.position.set(arc.impact.x, arc.impact.y + 0.22, arc.impact.z);
     this.shellPreviewMarker.visible = true;
   }
 
@@ -6371,6 +6373,10 @@ export class Game {
     // A manned cannon/mortar draws its arc and landing ring every frame, so the
     // marker follows the crosshair while the gunner aims.
     this.updateShellPreview();
+    // Your own build is drawn from inside its barrel (the mortar's tube sits
+    // right against the seat camera), so hide it in first person and let the
+    // arc and landing ring stay in view.
+    for (const [id, mesh] of this.emplacementMeshes) mesh.visible = id !== this.mountedEmplacementId;
     this.world.update();
 
     // Continuous fire for SMG and tools while holding the LEFT mouse button.
@@ -6644,9 +6650,11 @@ export class Game {
       }
     }
 
-    // Manage visibility of first-person equipment and third-person player avatar in spectator mode
+    // Manage visibility of first-person equipment and third-person player avatar in spectator mode.
+    // Manning a gun replaces the rifle with that gun's controls, so the hand
+    // weapon goes away entirely.
     if (this.weaponContainer) {
-      this.weaponContainer.visible = !this.isSpectating;
+      this.weaponContainer.visible = !this.isSpectating && !this.mountedEmplacementId;
     }
     if (this.highlightMesh && this.isSpectating) {
       this.highlightMesh.visible = false;

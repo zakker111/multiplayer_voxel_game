@@ -9,8 +9,9 @@ const { ServerGame } = require('../dist/tests/serverGame.cjs');
 const {
   emplacementSpec, EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE,
   MORTAR_BLAST_RADIUS, MANNED_EMPLACEMENTS, EMPLACEMENT_MG_SPREAD, emplacedShotDirection,
-  WEAPONS,
+  WEAPONS, vehicleSpec,
 } = require('../dist/tests/sharedTypes.cjs');
+const { shellArc, shellStopsAt, CANNON_SHELL_SPEED } = require('../dist/tests/ballistics.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 
 const SAMPLES = [[0, 0], [-1, -1], [-1, 1], [1, -1], [1, 1], [-2, 0], [2, 0], [0, -2], [0, 2]];
@@ -485,4 +486,94 @@ test('a round reset takes the shells with it', () => {
 
   assert.equal(game.shells.size, 0, 'no shells outlive the round');
   assert.equal(game.emplacements.size, 0);
+});
+
+test('the cannon preview ring bursts on the jeep it draws the arc through', () => {
+  const game = new ServerGame();
+
+  // A cannon round is flat, so the lane has to be level far enough for the
+  // shell to reach a jeep: find one by flying the preview itself, not by
+  // trusting a torso-height ray.
+  const previewFrom = (spot, yaw) => {
+    const forward = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+    const origin = { x: spot.x + forward.x * 1.6, y: spot.y + 1.2, z: spot.z + forward.z * 1.6 };
+    const velocity = { x: forward.x * CANNON_SHELL_SPEED, y: 0, z: forward.z * CANNON_SHELL_SPEED };
+    return shellArc(origin, velocity, {
+      gravity: EMPLACEMENT_SHELL_GRAVITY,
+      step: 0.025,
+      maxTime: 3,
+      groundAt: (x, z) => game.world.getGroundHeight(x, z),
+      solidAt: (point) => game.world.isSolid(Math.round(point.x), Math.round(point.y), Math.round(point.z)),
+    });
+  };
+  let lane = null;
+  for (const spot of findSpots(game, 60)) {
+    for (let i = 0; i < 16 && !lane; i++) {
+      const yaw = (i / 16) * Math.PI * 2;
+      const arc = previewFrom(spot, yaw);
+      const reach = Math.hypot(arc.impact.x - spot.x, arc.impact.z - spot.z);
+      if (reach > 18) lane = { spot, yaw };
+    }
+    if (lane) break;
+  }
+  assert.ok(lane, 'the map has a level lane long enough for a cannon round');
+
+  // Cannon on the lane, aimed down it, with a red jeep parked on the firing line.
+  const frames = [];
+  const gunner = join(game, 'blue', frames);
+  game.workshopStock.blue = 400;
+  game.handleMessage(gunner.id, { type: 'craftBlueprint', kind: 'cannon', slot: 0 });
+  game.handleMessage(gunner.id, {
+    type: 'placeEmplacement',
+    kind: 'cannon',
+    position: { x: lane.spot.x, y: lane.spot.y, z: lane.spot.z },
+    yaw: lane.yaw,
+    slot: 0,
+  });
+  const gun = [...game.emplacements.values()][0];
+  assert.ok(gun, 'the cannon was placed');
+  gunner.player.position = { ...gun.position };
+  gunner.player.rotation.pitch = 0;
+  game.handleMessage(gunner.id, { type: 'mountEmplacement', emplacementId: gun.id });
+  assert.equal(gun.gunnerId, gunner.id, 'the cannon is manned');
+
+  const red = join(game, 'red');
+  game.workshopStock.red = 200;
+  const workshop = game.getWorkshops().red.position;
+  red.player.position = { x: workshop.x, y: workshop.y, z: workshop.z };
+  game.handleMessage(red.id, { type: 'buildJeep' });
+  const jeep = [...game.jeeps.values()][0];
+  assert.ok(jeep, 'the jeep was built');
+  const forward = { x: -Math.sin(gun.yaw), z: -Math.cos(gun.yaw) };
+  jeep.position = { x: gun.position.x + forward.x * 12, y: gun.position.y, z: gun.position.z + forward.z * 12 };
+
+  // Exactly what `updateShellPreview` draws for a cannon: muzzle 1.6 m ahead
+  // and 1.2 m up, flat look, shared speed, gravity and stop rule.
+  const origin = {
+    x: gun.position.x + forward.x * 1.6,
+    y: gun.position.y + 1.2,
+    z: gun.position.z + forward.z * 1.6,
+  };
+  const velocity = { x: forward.x * CANNON_SHELL_SPEED, y: 0, z: forward.z * CANNON_SHELL_SPEED };
+  const obstacles = [
+    { kind: 'footprint', team: 'red', position: jeep.position, footprint: vehicleSpec('jeep') },
+  ];
+  const preview = shellArc(origin, velocity, {
+    gravity: EMPLACEMENT_SHELL_GRAVITY,
+    step: 0.025,
+    maxTime: 10,
+    groundAt: (x, z) => game.world.getGroundHeight(x, z),
+    solidAt: (point) => game.world.isSolid(Math.round(point.x), Math.round(point.y), Math.round(point.z)),
+    stopAt: (point) => shellStopsAt(point, 'blue', obstacles),
+  });
+  const ringToJeep = Math.hypot(preview.impact.x - jeep.position.x, preview.impact.z - jeep.position.z);
+  assert.ok(ringToJeep < Math.hypot(1.3, 2) + 0.01, `the marker stops on the jeep (${ringToJeep.toFixed(2)}m)`);
+
+  gunner.frames.length = 0;
+  game.handleMessage(gunner.id, { type: 'fireEmplacement' });
+  run(game, 2);
+  const impact = gunner.frames.find((frame) => frame.type === 'shellImpact');
+  assert.ok(impact, 'the round came down');
+  const miss = Math.hypot(impact.position.x - preview.impact.x, impact.position.z - preview.impact.z);
+  assert.ok(miss < 0.05, `the live round burst ${miss.toFixed(3)}m from the preview ring`);
 });
