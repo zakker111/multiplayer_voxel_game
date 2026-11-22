@@ -187,6 +187,15 @@ assault/support firebases (panic cover remains universal), so the squad still
 fights while the engineers prepare cover. Standalone/test bots fall back to a
 deterministic id hash when no engineer flag is supplied.
 
+Bots build the whole hardware catalogue, not just the MG nest. `BotContext`
+carries `availableEmplacements` — the kinds the team can still pay for and is
+under its team limit for — and `tryGunBuild()` picks from it: a nest for the
+firing line, a cannon or mortar for the heavy punch, a spotting post for eyes or
+a supply crate as a forward store, preferring a kind the team has none of yet.
+Every armed build is crew-able: cannon and mortar shells go through the same
+seat/aim/fire path a human uses, so bots gun them. `ServerBot.emplacedByKind`
+records what each engineer actually placed (diagnostics only).
+
 ### States
 - **`ENGAGE`** — strafe & shoot visible enemies (LOS raycast checks, aim error, combat reaction throttle). Kites while reloading (`breakContact()`) and drops panic cover below 60% HP under fire.
 - **`FLANK`** — swing wide around the enemy line before pushing in.
@@ -196,8 +205,11 @@ deterministic id hash when no engineer flag is supplied.
 - **`RETURN`** — carry the flag home: jinks every `CARRIER_JINK_SECONDS` toward a
   waypoint scored by terrain cover from the nearest threat, and walls off
   pursuers up to 80m away.
-- **`ESCORT`** — any teammate within 120m of our carrier screens it: follows ~4.5m
-  behind, fires out to 55m and builds cover between carrier and chaser.
+- **`ESCORT`** — any teammate within 120m of our carrier screens it: stands
+  between carrier and chase (5m out on the enemy side), fires out to 75m and
+  walls pursuers off at 60m. The old trail point sat *behind* the carrier, which
+  is the one place a chaser never is. Carriers jink and screen on a ~1.7s beat,
+  fire back to 45m on the move, and never drop cover in their own lane.
 - **`DEFEND`** — support holds its post, faces the approach, and chases a carrier
   heading for our flag; an engineer builds the post's main structure and annex.
 - **`BUILD`** — bastion + ramp near the enemy base (respects `canBuild()` + entity clearance).
@@ -235,6 +247,14 @@ rate-limited to one action per 2.5s and capped at four attempts:
 - **Flag-carrier priority**: bots hunt the enemy carrier and defend their own.
 - **Escorts**: a pickup flips nearby teammates into `ESCORT` (this is what turned
   pickups into captures — solo carriers died in the first seconds of the run).
+  Escorts now *interpose* between carrier and chase and answer fire to rifle
+  range instead of trailing behind the carrier.
+- **Dropped-flag continuation**: a dead carrier leaves the enemy flag on the
+  ground. Any bot within 110m re-tasks to `GRABFLAG` on the drop point (a 45m
+  reactive override), so a failed steal is contested instead of lying idle
+  until it returns itself — that idle window was most of a long objective
+  drought. The carrier-priority target score also eased from 0.5 to 0.65 so a
+  bot does not ignore the rifleman 10m away to chase a carrier 70m out.
 - **Kiting**: weapon-aware spacing (rifle holds ~34m, SMG closes to ~9m), break
   contact while reloading, and panic cover when caught in the open.
 - **Humanisation**: switching to a new target costs a randomised 0.25–0.55s
@@ -368,7 +388,7 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 228 regression tests (voxel rules, bots, rounds,
+npm test            # node --test tests/ — 232 regression tests (voxel rules, bots, rounds,
                     # workshop/jeep/logistics, spawn shield/regen, feedback, integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):

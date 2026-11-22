@@ -5,7 +5,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 ![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
-![Tests](https://img.shields.io/badge/tests-228%2F228%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-232%2F232%20passing-brightgreen.svg)
 
 ---
 
@@ -69,7 +69,7 @@ npm run dev
 
 # Full verification pipeline (used by CI)
 npm run lint      # tsc --noEmit
-npm test          # node --test tests/  (228 regression tests)
+npm test          # node --test tests/  (232 regression tests)
 npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)
@@ -131,7 +131,7 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
 
 ## 🧪 Testing & Playtesting
 
-- **Automated**: `npm test` runs 228 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
+- **Automated**: `npm test` runs 232 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
 - **Bot simulation**: `npm run measure:bots -- 30` runs a headless 30-minute bot-only round against the real server. It reports pickups, captures, deaths, structure starts and completions, blocks placed and stuck recoveries. Latest 30-minute run: 1 capture, 12 pickups, 450 deaths, 585 blocks placed, 17 completed structures (5 trench, 10 L-trench, 2 bunker, 0 firing-port) and 84 recoveries; starts and completions matched at 17. Across recent runs: 0–12 captures, 12–63 pickups, 519–1422 blocks placed, 6–18 completed structures, with all four kinds appearing across runs.
 - **Manual playtest checklist**:
   1. Open the site → Multiplayer → join Blue. Verify one blue bot disappears (log: `human joined blue — retiring bot …`).
