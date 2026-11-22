@@ -403,6 +403,9 @@ npm run smoke       # live check against an already-running server (SMOKE_PORT, 
                     # WS join/input/respawn, malformed frames, HTTP token auth, SSE init
 npm run measure:bots -- 30   # headless bot-only round: captures, pickups, deaths,
                     #   structure starts (structuresStarted)/completions, blocks, recoveries
+node scripts/beta-simulate.mjs 30 30 3   # full Beta battle sims (minutes, round minutes, runs, bots/team):
+                    #   round results, per-kind hardware, jeeps, stalls, droughts; it throws
+                    #   if its own counters disagree, so a silent miscount cannot ship
 npm run dev         # tsx server.ts with Vite middleware (PORT, default 3000)
 npm run build       # vite bundle + dist/server.cjs + dist/admin.cjs (esbuild)
 npm start           # production server (reads process.env.PORT)
