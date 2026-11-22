@@ -95,6 +95,12 @@ function runMatch(index) {
     driverTicks: 0,
     distance: 0,
     pos: new Map(),
+    // Exposure while a bot is driving: one sample a second, counting enemies
+    // within rifle range of the vehicle. This is the number a route change is
+    // supposed to move, independent of who happens to get shot.
+    samples: 0,
+    exposed: 0,
+    threatSum: 0,
   };
   const deadState = new Map();
   const carriers = new Set();
@@ -265,6 +271,16 @@ function runMatch(index) {
       if (!driver?.isBotFlag) continue;
       driving.add(vehicle.id);
       jeep.driverTicks++;
+      if (tick % 20 === 0) {
+        let nearby = 0;
+        for (const other of game.players.values()) {
+          if (other.isDead || other.isSpectating || other.team === vehicle.team) continue;
+          if (Math.hypot(other.position.x - vehicle.position.x, other.position.z - vehicle.position.z) < 60) nearby++;
+        }
+        jeep.samples++;
+        jeep.threatSum += nearby;
+        if (nearby > 0) jeep.exposed++;
+      }
       const last = jeep.pos.get(vehicle.id);
       if (last) jeep.distance += Math.hypot(vehicle.position.x - last.x, vehicle.position.z - last.z);
       jeep.pos.set(vehicle.id, { ...vehicle.position });
@@ -435,6 +451,9 @@ function runMatch(index) {
       builtByTeam: jeep.builtByTeam,
       driverSeconds: Number((jeep.driverTicks / 20).toFixed(1)),
       distance: Number(jeep.distance.toFixed(1)),
+      exposureSamples: jeep.samples,
+      exposurePct: jeep.samples > 0 ? Math.round((jeep.exposed / jeep.samples) * 100) : 0,
+      meanThreats: jeep.samples > 0 ? Number((jeep.threatSum / jeep.samples).toFixed(2)) : 0,
     },
     empl: {
       builtByKind: empl.builtByKind,
@@ -529,6 +548,8 @@ function printMatch(result) {
   console.log(`  driven ${jeep.driverSeconds}s / ${jeep.distance}m` +
     ` | damaged exits ${jeep.damagedExits} | stuck recoveries ${jeep.recoveries} | abandoned ${jeep.abandoned}` +
     ` | human yields ${jeep.humanYields}`);
+  console.log(`  exposure while driving: ${jeep.exposurePct}% of seconds had an enemy within 60m` +
+    ` (mean ${jeep.meanThreats} nearby) | arrival rate ${pct(jeep.arrived, jeep.built)}`);
 
   console.log('  ── stuck / stagnation ──');
   console.log(`  bot stuck recoveries ${result.recoveries} | movement stalls ≥10s ${stats.stalls} (${result.stallBots} bots)` +
@@ -584,8 +605,12 @@ function printSummary(results) {
   console.log(`Carrier deaths: ${results.reduce((n, r) => n + r.carrierDeaths, 0)}` +
     ` | bots reaching the enemy stand zone: ${results.reduce((n, r) => n + r.closeToFlag, 0)} (bot-runs)`);
   console.log(`Bots: ${totals.empl} emplacements built, ${totals.gunShots} rounds fired, ` +
-    `${totals.jeepsBuilt} jeeps built and ${totals.jeepsArrived} arrived, ` +
+    `${totals.jeepsBuilt} jeeps built and ${totals.jeepsArrived} arrived` +
+    ` (${pct(totals.jeepsArrived, totals.jeepsBuilt)} arrival), ` +
     `${totals.recoveries} stuck recoveries, ${totals.stalls} movement stalls ≥10s.`);
+  console.log(`Jeep exposure: ${results.reduce((n, r) => n + r.jeep.damagedExits, 0)} damaged exits, ` +
+    `${results.reduce((n, r) => n + r.jeep.abandoned, 0)} abandoned, ` +
+    `mean exposure ${(results.reduce((n, r) => n + r.jeep.exposurePct, 0) / results.length).toFixed(0)}% of driving seconds in rifle range`);
   const conversion = totals.pickups > 0 ? Math.round((totals.captures / totals.pickups) * 100) : 0;
   const carrierDeaths = results.reduce((n, r) => n + r.carrierDeaths, 0);
   console.log(`Conversion: ${totals.captures}/${totals.pickups} pickups scored (${conversion}%)` +

@@ -67,6 +67,22 @@ test('each team can drive across real terrain and exit near the enemy objective'
   }
 });
 
+test('a bot jeep takes its flank lane and stages before the final leg', () => {
+  const { game, bot } = fixture();
+  const task = { lane: 0.8, staged: false };
+  const jeep = { position: { x: 0, y: RED_FLAG_POS.y ?? 10, z: 0 } };
+  const stage = game.botJeepRouteTarget(bot, jeep, task);
+  assert.ok(Math.abs(stage.x) > 40, `the lane is off the centre line (x=${stage.x})`);
+  assert.ok(stage.z > 0 && stage.z < RED_FLAG_POS.z, 'the flank ends short of the enemy stand');
+  assert.equal(task.staged, false, 'the staging point is not reached yet');
+
+  jeep.position = { x: stage.x, y: stage.y, z: stage.z };
+  const final = game.botJeepRouteTarget(bot, jeep, task);
+  assert.equal(task.staged, true, 'reaching the staging point commits to the final leg');
+  assert.ok(final.z > stage.z, 'the final leg heads for the stand');
+  assert.ok(Math.abs(final.x) < Math.abs(stage.x), 'the final leg converges on the flag');
+});
+
 test('nearby humans have priority and may take a stopped bot jeep at the garage', () => {
   const { game, id, bot } = fixture();
   const humanId = game.addPlayer(conn());

@@ -196,6 +196,14 @@ Every armed build is crew-able: cannon and mortar shells go through the same
 seat/aim/fire path a human uses, so bots gun them. `ServerBot.emplacedByKind`
 records what each engineer actually placed (diagnostics only).
 
+Bot jeeps take their own flank lane (`BotJeepTask.lane`, stable from the bot id)
+to a staging point ~115m short of the enemy stand and only then run in, instead
+of driving the garage-to-stand straight line across midfield. The arrival radius
+is still 75m and stuck recovery keeps its reverse/detour phases. Measured over
+3×30-minute bot-only matches: arrival 63% → 81%, damaged exits 6 → 3 (16 jeeps
+built each arm; exposure at 43% of driving seconds inside 60m of an enemy is
+unchanged, so treat the arrival gain as modest evidence, not proof).
+
 ### States
 - **`ENGAGE`** — strafe & shoot visible enemies (LOS raycast checks, aim error, combat reaction throttle). Kites while reloading (`breakContact()`) and drops panic cover below 60% HP under fire.
 - **`FLANK`** — swing wide around the enemy line before pushing in.
@@ -388,7 +396,7 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 232 regression tests (voxel rules, bots, rounds,
+npm test            # node --test tests/ — 233 regression tests (voxel rules, bots, rounds,
                     # workshop/jeep/logistics, spawn shield/regen, feedback, integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):

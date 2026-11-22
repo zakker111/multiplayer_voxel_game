@@ -87,11 +87,24 @@ type BotJeepTask = {
   nextSteeringAt: number;
   plannedSteering: number;
   plannedThrottle: number;
+  /** Lateral lane (-1..1): the bot's own approach corridor. */
+  lane: number;
+  /** True once the flank run has reached its staging point near the stand. */
+  staged: boolean;
 };
 
 const BOT_JEEP_MAX_DRIVERS_PER_TEAM = 1;
 const BOT_JEEP_HUMAN_PRIORITY_RADIUS = 24;
 const BOT_JEEP_COOLDOWN = 25;
+// A bot jeep takes its own flank lane instead of driving down the centre line.
+// The straight garage-to-stand run crossed the middle of the map, which is
+// exactly where both teams fight: half the driving seconds were spent with an
+// enemy inside rifle range and only 63% of jeeps arrived. The flank ends at a
+// staging point short of the stand, then the final leg goes in.
+const BOT_JEEP_LANE_WIDTH = 85;
+const BOT_JEEP_STAGE_DISTANCE = 115;
+const BOT_JEEP_STAGE_REACH = 24;
+const BOT_JEEP_FINAL_LANE = 20;
 const BOT_LOGISTICS_PER_TEAM = 1;
 const BOT_LOGISTICS_CAPACITY = 12;
 // Watermark the logistics bots keep the workshop stocked to. It has to cover
@@ -1944,9 +1957,13 @@ export class ServerGame {
       candidates.sort((a, b) => Math.hypot(a.position.x - target.x, a.position.z - target.z) - Math.hypot(b.position.x - target.x, b.position.z - target.z));
       const bot = candidates[0];
       if (!bot) continue;
+      // Stable per-bot lane (no RNG draw, same as the bot role split).
+      let laneHash = 0;
+      for (const ch of bot.id) laneHash = (laneHash * 31 + ch.charCodeAt(0)) >>> 0;
       this.botJeepTasks.set(bot.id, { phase: 'approach', jeepId: available?.id ?? null, startedAt: this.world.serverTime,
         lastProgressAt: this.world.serverTime, lastPosition: { ...bot.position }, recoveries: 0, recoveryUntil: 0, detour: null,
-        nextSteeringAt: 0, plannedSteering: 0, plannedThrottle: 1 });
+        nextSteeringAt: 0, plannedSteering: 0, plannedThrottle: 1,
+        lane: (laneHash % 101) / 50 - 1, staged: false });
     }
   }
 
@@ -2073,7 +2090,7 @@ export class ServerGame {
     if (task.phase === 'detour' && (now >= task.recoveryUntil || (task.detour && Math.hypot(task.detour.x - jeep.position.x, task.detour.z - jeep.position.z) < 4))) {
       task.phase = 'drive'; task.detour = null;
     }
-    const target = task.detour ?? enemyFlag;
+    const target = task.detour ?? this.botJeepRouteTarget(bot, jeep, task);
     if (now >= task.nextSteeringAt) {
       const plan = this.planBotJeepSteering(jeep, target);
       task.plannedSteering = plan.steering; task.plannedThrottle = plan.throttle;
@@ -2083,6 +2100,30 @@ export class ServerGame {
     jeep.throttle = task.plannedThrottle;
     jeep.brake = false; jeep.lastInput = now;
     return true;
+  }
+
+  /**
+   * Where a bot jeep steers next: its own flank lane to a staging point short
+   * of the stand, then the final leg in. `task.detour` (stuck recovery) still
+   * overrides this for a moment.
+   */
+  private botJeepRouteTarget(bot: ServerBot, jeep: ServerJeep, task: BotJeepTask): Position {
+    const enemyFlag = bot.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    // Along z, home is behind our own base: blue runs south to north.
+    const homeward = bot.team === 'blue' ? -1 : 1;
+    const stage: Position = {
+      x: enemyFlag.x + task.lane * BOT_JEEP_LANE_WIDTH,
+      y: jeep.position.y,
+      z: enemyFlag.z + homeward * BOT_JEEP_STAGE_DISTANCE,
+    };
+    if (
+      !task.staged &&
+      Math.hypot(jeep.position.x - stage.x, jeep.position.z - stage.z) < BOT_JEEP_STAGE_REACH
+    ) {
+      task.staged = true;
+    }
+    if (!task.staged) return stage;
+    return { x: enemyFlag.x + task.lane * BOT_JEEP_FINAL_LANE, y: jeep.position.y, z: enemyFlag.z };
   }
 
   private assignBotLogisticsTasks(): void {
