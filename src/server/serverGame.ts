@@ -62,10 +62,10 @@ import {
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
   EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH, emplacedShotDirection,
   EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
-  type VehicleSpec, type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
+  type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
-import { MORTAR_SHELL_SPEED, ballisticVelocity, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
+import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -568,7 +568,7 @@ export class ServerGame {
       }
       this.emplacementFireAt.set(emplacement.id, now);
       emplacement.ammo -= 1;
-      this.fireShell(emplacement, player, emplacement.yaw, pitch, spec, aim);
+      this.fireShell(emplacement, player, emplacement.yaw, pitch, aim);
       return;
     }
 
@@ -686,12 +686,11 @@ export class ServerGame {
     player: ServerPlayer,
     yaw: number,
     pitch: number,
-    spec: EmplacementSpec,
     aim: Position | null = null,
   ): void {
     const forward = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
     const isMortar = emplacement.kind === 'mortar';
-    const speed = isMortar ? MORTAR_SHELL_SPEED : 85;
+    const speed = isMortar ? MORTAR_SHELL_SPEED : CANNON_SHELL_SPEED;
     const launchPitch = isMortar ? Math.max(pitch, Math.PI / 4) : pitch;
     const cosPitch = Math.cos(launchPitch);
     // Start clear of the barrel so the shell cannot explode on its own nest.
@@ -722,7 +721,6 @@ export class ServerGame {
     // Muzzle flash and report reuse the shot event every client already draws.
     this.broadcast({ type: 'playerShot', playerId: player.id, origin: position, direction: { ...velocity }, weapon: emplacement.kind });
     this.broadcast({ type: 'shellFired', id, kind: emplacement.kind, position: { ...position }, velocity: { ...velocity } });
-    void spec;
   }
 
   /** Advance every shell and resolve what it ran into. */
@@ -761,7 +759,10 @@ export class ServerGame {
   /** Where a shell would stop, or null when the path is clear. */
   private shellImpactAt(shell: ServerShell, next: Position, obstacles: readonly ShellObstacle[]): Position | null {
     if (Math.abs(next.x) >= WORLD_HALF || Math.abs(next.z) >= WORLD_HALF) return next;
-    if (this.world.isSolid(Math.round(next.x), Math.round(next.y), Math.round(next.z))) return shell.position;
+    // Burst on the sample that entered the solid, exactly like the preview's
+    // `solidAt` does. Returning the previous (in-air) sample put the crater and
+    // the splash up to 2m short of the ring the gunner aimed with.
+    if (this.world.isSolid(Math.round(next.x), Math.round(next.y), Math.round(next.z))) return next;
     if (shellStopsAt(next, shell.team, obstacles)) return next;
     return null;
   }

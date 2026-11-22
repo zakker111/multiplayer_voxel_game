@@ -33,7 +33,6 @@ import {
   GROUND_LEVEL,
   WORLD_SIZE,
   CHUNK_SIZE,
-  VOXEL_BUILT,
   EMPLACEMENT_MOUNT_REACH,
 } from '../shared/types';
 
@@ -181,7 +180,6 @@ export class ServerBot extends ServerPlayer {
   private lastShotAt: number = -10;
   private aimTargetId: string | null = null;
   private aimTargetAt: number = 0;
-  private lastBuildAt: number = -10;
   private lastCampCheck: number = -10;
   private lastDecisionAt: number = -10;
   private wanderUntil: number = 0;
@@ -357,7 +355,7 @@ export class ServerBot extends ServerPlayer {
    * Called every server tick instead of player.update(). Moves the bot,
    * aims, shoots, camps, flanks and builds through the provided context.
    */
-  botUpdate(dt: number, ctx: BotContext): void {
+  botUpdate(_dt: number, ctx: BotContext): void {
     if (this.isDead) return;
     this.updateReload();
     // Keep the gun fed wherever we are: a dry magazine mid-run should cost a
@@ -499,7 +497,7 @@ export class ServerBot extends ServerPlayer {
       // outguns a rifle and is a proper thing to fight over.
       this.transition('ENGAGE', t, 4);
     } else if (t >= this.stateUntil) {
-      this.chooseObjective(ctx, t, enemyFlag, homeBase);
+      this.chooseObjective(ctx, t, enemyFlag);
     }
 
     // --- Act out current state ---
@@ -514,7 +512,7 @@ export class ServerBot extends ServerPlayer {
         this.doCamp(nearest, nearestDist, ctx, t);
         break;
       case 'ADVANCE':
-        this.doAdvance(ctx, t, enemyFlag);
+        this.doAdvance(ctx, enemyFlag);
         break;
       case 'GRABFLAG':
         this.doGrabFlag(ctx, enemyFlag, nearest, nearestDist, t);
@@ -638,7 +636,7 @@ export class ServerBot extends ServerPlayer {
     }
   }
 
-  private chooseObjective(ctx: BotContext, t: number, enemyFlag: { x: number; z: number }, homeBase: { x: number; z: number }): void {
+  private chooseObjective(ctx: BotContext, t: number, enemyFlag: { x: number; z: number }): void {
     // Support role: hold the defensive ring instead of joining the attack.
     // (Returning our own dropped flag is still handled first.)
     const supportDefend = this.role === 'support';
@@ -825,7 +823,7 @@ export class ServerBot extends ServerPlayer {
     }
   }
 
-  private doAdvance(ctx: BotContext, t: number, enemyFlag: { x: number; z: number }): void {
+  private doAdvance(ctx: BotContext, enemyFlag: { x: number; z: number }): void {
     if (!this.waypoint || ctx.serverTime >= this.wanderUntil) {
       // Head somewhere between midfield and the enemy flag with jitter
       const jitterX = (Math.random() - 0.5) * 40;
@@ -1076,7 +1074,6 @@ export class ServerBot extends ServerPlayer {
     const aim = { x: enemy.position.x, y: enemy.position.y + 1.0, z: enemy.position.z };
     const dx = aim.x - origin.x;
     const dz = aim.z - origin.z;
-    const flat = Math.hypot(dx, dz) || 1;
     const distance = Math.hypot(dx, aim.y - origin.y, dz);
     const yaw = Math.atan2(-dx, -dz);
     guns.aim(this, aim);
@@ -1861,13 +1858,6 @@ export class ServerBot extends ServerPlayer {
     return this.botBlocks;
   }
   private botBlocks: number = 12;
-
-  private tryBuildColumn(ctx: BotContext, x: number, z: number, height: number): void {
-    const gx = Math.round(x);
-    const gz = Math.round(z);
-    const gy = ctx.world.getGroundHeight(gx, gz);
-    this.tryBuildColumnAt(ctx, gx, gy, gz, height);
-  }
 
   private tryBuildColumnAt(ctx: BotContext, gx: number, gy: number, gz: number, height: number): void {
     for (let i = 0; i < height; i++) {

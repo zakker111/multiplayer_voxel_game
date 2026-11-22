@@ -5,7 +5,7 @@ import { vehicleClear, vehicleExitSpot, vehicleGround, type ClearanceBodies } fr
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
 import { spotPostCoverage, type SpotPostCoverage } from '../shared/spotting';
-import { PlayerState, PlayerInput, Position, PlayerStats, Workshops, JeepSnapshot, WorkshopSnapshot } from '../shared/types';
+import { PlayerState, Position, PlayerStats, Workshops, JeepSnapshot, WorkshopSnapshot } from '../shared/types';
 // Local copies previously drifted from the server (shared/types) values;
 // now sourced from the shared module so client and server agree on spawns/flags.
 import {
@@ -164,23 +164,9 @@ export interface ScoreboardData {
 }
 
 // Game Constants
-const VERSION = "1.4.0"; // Spectator fix, Bot AI overhaul, Footsteps, Spawn dist
-const FPS = 60;
-const DT = 1 / FPS;
-const GRAVITY = 30;
-const JUMP_FORCE = 12;
-const MOVE_SPEED = 6;
-const SPRINT_MULTI = 1.6;
-const CROUCH_MULTI = 0.4;
-const REACH = 5;
-const MOUSE_SENS = 0.002;
-const FOV = 75;
-const SKY_COLOR = 0x87CEEB;
-const FOG_COLOR = 0x87CEEB;
-const RENDER_DISTANCE = 60;
-// CHUNK_SIZE is imported from ./world (shared with server constants) — the
-// old local copy here risked drifting out of sync when the map was resized.
-const TEXTURE_SCALE = 16;
+/** Fixed integration step for shells: the preview arc and the offline rounds
+ *  share it, so a live round bursts where the marker was drawn. */
+const SHELL_STEP = 0.025;
 
 export type EquipmentType = 'rifle' | 'smg' | 'spade' | 'pickaxe';
 type Team = 'red' | 'blue';
@@ -769,7 +755,6 @@ export class Game {
 
   constructor(canvas: HTMLCanvasElement, mode: GameMode = 'multiplayer', team: Team = 'blue', serverUrl?: string, playerName?: string) {
     try {
-      console.log('Game constructor started', { mode, team, serverUrl, playerName });
     this.canvas = canvas;
     this.clock = new THREE.Clock();
     this.sounds = new SoundManager();
@@ -812,14 +797,11 @@ export class Game {
     sun.shadow.camera.bottom = -50;
     this.scene.add(sun);
 
-    console.log('Creating world...');
     this.world = new VoxelWorld();
     this.scene.add(this.world.mesh);
-    console.log('World created and added to scene');
 
     this.addTeamZoneMarkers();
 
-    console.log('Creating player...');
     this.player = new Player(this.world);
     this.player.team = team;
     const spawnPos = this.getSafeSpawnPos(team);
@@ -831,7 +813,6 @@ export class Game {
     // the client's local countdown fires onRespawn() right after the server's
     // playerRespawned message, respawning twice ("die immediately" bug).
     this.player.serverAuthoritativeRespawn = this.gameMode === 'online';
-    console.log('Player created');
 
     const hlGeo = new THREE.BoxGeometry(VOXEL_SIZE + 0.02, VOXEL_SIZE + 0.02, VOXEL_SIZE + 0.02);
     const hlMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.6 });
@@ -1876,6 +1857,15 @@ export class Game {
   /** Step the shells offline and burst them on ground, a body or a build. */
   private updateLocalShells(dt: number): void {
     if (this.localShells.length === 0) return;
+    // Fixed sub-steps, like the preview arc: stepping a live round by the frame
+    // `dt` (up to 0.05s) let a cannon shell jump 4.2m at a time and burst a
+    // step past the ring it was aimed with.
+    const steps = Math.max(1, Math.ceil(dt / SHELL_STEP));
+    for (let s = 0; s < steps; s++) this.stepLocalShells(dt / steps);
+  }
+
+  /** One fixed-size integration step for every offline round in the air. */
+  private stepLocalShells(dt: number): void {
     for (let i = this.localShells.length - 1; i >= 0; i--) {
       const shell = this.localShells[i];
       shell.velocity.y -= EMPLACEMENT_SHELL_GRAVITY * dt;
@@ -3100,7 +3090,7 @@ export class Game {
       botMesh.add(backpackFlagGroup);
 
       const botName = `${team === 'blue' ? 'Blue' : 'Red'} Bot ${i + 1}`;
-      const { sprite: nameTag, canvas: nameTagCanvas, texture: nameTagTexture } = this.createBotNameTag(team, botName);
+      const { sprite: nameTag, canvas: nameTagCanvas, texture: nameTagTexture } = this.createBotNameTag();
       nameTag.position.y = 2.65;
       botMesh.add(nameTag);
 
@@ -3479,7 +3469,7 @@ export class Game {
     }
   }
 
-  private createBotNameTag(team: Team, name: string): { sprite: THREE.Sprite; canvas: HTMLCanvasElement; texture: THREE.CanvasTexture } {
+  private createBotNameTag(): { sprite: THREE.Sprite; canvas: HTMLCanvasElement; texture: THREE.CanvasTexture } {
     const canvas = document.createElement('canvas');
     canvas.width = 256;
     canvas.height = 128;
@@ -4255,11 +4245,6 @@ export class Game {
       }
     });
 
-    this.networkClient.onMessage('spectatorToggled', (msg: any) => {
-      // Track remote player spectator state (for future use)
-      console.log(`Player ${msg.playerId} ${msg.isSpectating ? 'entered' : 'exited'} spectator mode`);
-    });
-
     this.networkClient.onMessage('footstep', (msg: any) => {
       // Play footstep sound for other players using SoundManager
       const pan = Math.sin(Math.atan2(msg.position?.x || 0, msg.position?.z || 0) - this.player.yaw);
@@ -4915,8 +4900,8 @@ export class Game {
     const arc = shellArc(origin, velocity, {
       gravity: EMPLACEMENT_SHELL_GRAVITY,
       // Small steps so a shell cannot tunnel through a 2m-wide body between
-      // samples: a cannon round covers 2.1m per 0.025s step at 85 m/s.
-      step: 0.025,
+      // samples: a cannon round covers 2.1m per step at 85 m/s.
+      step: SHELL_STEP,
       maxTime: 10,
       groundAt: (x, z) => this.world.getGroundHeight(x, z),
       solidAt: (point) => this.world.isSolid(Math.round(point.x), Math.round(point.y), Math.round(point.z)),
@@ -5875,7 +5860,7 @@ export class Game {
   }
 
   // 3D Voxel Collision check for bot movement cylinder
-  private checkBotVoxelCollision(x: number, y: number, z: number, radius = 0.38, height = 1.85): boolean {
+  private checkBotVoxelCollision(x: number, y: number, z: number, radius = 0.38): boolean {
     const yChecks = [
       y + 0.45, // Shin/lower body - strictly above the floor voxel
       y + 1.05, // Torso
@@ -6701,7 +6686,7 @@ export class Game {
         }
       }
 
-      for (const [id, remote] of this.remotePlayers) {
+      for (const remote of this.remotePlayers.values()) {
         if (remote.state.isDead || remote.state.team === this.playerTeam) continue;
         const targetPos = remote.mesh.position;
         const dx = targetPos.x - eyePos.x;
@@ -7074,7 +7059,6 @@ export class Game {
       const enemyTarget = this.findNearestEnemy(bot);
       const distToEnemy = enemyTarget ? bot.position.distanceTo(enemyTarget.pos) : Infinity;
       const wasRecentlyHit = Date.now() - bot.lastDamageTime < 3200;
-      const isUnderAttack = wasRecentlyHit || (enemyTarget && distToEnemy < 40);
 
       // Contextual radio callouts on enemy visual contact
       if (enemyTarget && distToEnemy < 38 && Date.now() - (bot.lastRadioCallTime || 0) > 11000) {
@@ -7927,7 +7911,6 @@ export class Game {
     const targetHeight = target.isPlayer ? 1.1 : 1.15;
     const centerTargetPos = target.pos.clone().add(new THREE.Vector3(0, targetHeight, 0));
     const toTarget = centerTargetPos.clone().sub(muzzlePos);
-    const dist = toTarget.length();
     const idealDir = toTarget.clone().normalize();
 
     // Human shot deviation calculation:

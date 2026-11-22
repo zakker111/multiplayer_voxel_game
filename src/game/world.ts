@@ -40,7 +40,6 @@ export class VoxelWorld {
   private static sharedMaterial: THREE.MeshLambertMaterial | null = null;
 
   constructor() {
-    console.log('VoxelWorld constructor started');
     this.mesh = new THREE.Group();
     
     if (!VoxelWorld.sharedGeometry) {
@@ -53,9 +52,7 @@ export class VoxelWorld {
     
     this.initializeChunks();
     this.generateTerrain();
-    console.log('Terrain generated');
     this.rebuildAllChunks();
-    console.log('All chunks rebuilt');
   }
 
   private key(x: number, y: number, z: number): string {
@@ -196,7 +193,7 @@ export class VoxelWorld {
     return GROUND_LEVEL + 0.5;
   }
 
-  canDig(x: number, y: number, z: number): boolean {
+  canDig(_x: number, y: number, _z: number): boolean {
     return y >= GROUND_LEVEL - MAX_DIG_DOWN;
   }
 

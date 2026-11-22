@@ -1,18 +1,18 @@
-import { ClientMessage, ServerMessage, PlayerState, PlayerInput, Position } from '../shared/types';
+import { ClientMessage, ServerMessage, PlayerInput, Position } from '../shared/types';
 
 export class NetworkClient {
   private ws: WebSocket | null = null;
   private sse: EventSource | null = null;
   private channel: BroadcastChannel | null = null;
   private messageHandlers: Map<string, (message: any) => void> = new Map();
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
   private reconnectDelay = 2000;
   /** Pending retry after a fallback stream is dropped by a proxy. */
   private reconnectTimer: number | null = null;
   private serverUrl: string;
   private onConnectCallback: (() => void) | null = null;
   private onDisconnectCallback: (() => void) | null = null;
+  /** Set once per lost session, so the game hears "disconnected" exactly once. */
+  private disconnectNotified = false;
   
   public localPeerId: string;
   public assignedPlayerId: string | null = null;
@@ -60,7 +60,6 @@ export class NetworkClient {
         this.channel.onmessage = (event) => {
           this.handleBroadcastMessage(event.data);
         };
-        console.log('📡 Local multi-tab peer synchronization active');
       } catch (err) {
         console.warn('BroadcastChannel not available:', err);
       }
@@ -239,7 +238,7 @@ export class NetworkClient {
           this.transport = transportType;
           if (transportType === 'websocket') this.wsConnected = true;
           if (transportType === 'sse') this.sseConnected = true;
-          this.reconnectAttempts = 0;
+          this.disconnectNotified = false;
           if (this.onConnectCallback) {
             this.onConnectCallback();
           }
@@ -254,9 +253,10 @@ export class NetworkClient {
 
       // 1. Try WebSocket primary connection
       try {
-        console.log('Connecting to WebSocket server:', this.serverUrl);
         // A retry must not leave the previous socket dangling.
         if (this.ws) {
+          // Detach the handler: closing it on purpose is not a lost session.
+          this.ws.onclose = null;
           try { this.ws.close(); } catch { /* already closed */ }
           this.ws = null;
         }
@@ -274,7 +274,6 @@ export class NetworkClient {
           if (this.wsConnected || this.sseConnected) return;
           // Still open: the 8s init timeout below is what decides a silent socket.
           if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
-          console.log('WebSocket connection taking long, initiating HTTP SSE fallback...');
           this.connectSSE(finishConnect);
         }, 10000);
 
@@ -294,7 +293,6 @@ export class NetworkClient {
 
         this.ws.onopen = () => {
           clearTimeout(wsTimeout);
-          console.log('WebSocket socket open — waiting for the init frame');
           initTimeout = setTimeout(() => failSilentSocket('delivered no init within 8s'), 8000);
         };
 
@@ -311,8 +309,9 @@ export class NetworkClient {
         };
 
         this.ws.onclose = () => {
-          console.log('WebSocket disconnected');
+          const hadSession = this.wsConnected;
           this.wsConnected = false;
+          if (hadSession) this.notifyDisconnect();
           if (!this.sseConnected) {
             this.connectSSE(finishConnect);
           }
@@ -346,12 +345,11 @@ export class NetworkClient {
 
     try {
       const sseUrl = `${this.httpBaseUrl()}/api/game/events`;
-      console.log(`Connecting to HTTP Server-Sent Events (SSE) stream at ${sseUrl}...`);
       this.sse = new EventSource(sseUrl);
 
       this.sse.onopen = () => {
-        console.log('✅ Connected via HTTP Server-Sent Events (SSE)');
         this.sseConnected = true;
+        this.disconnectNotified = false;
         this.transport = 'sse';
         if (onSuccess) onSuccess('sse');
         else if (this.onConnectCallback) this.onConnectCallback();
@@ -373,9 +371,11 @@ export class NetworkClient {
       this.sse.onerror = () => {
         console.warn('SSE stream status update');
         if (!this.sse || this.sse.readyState !== EventSource.CLOSED) return;
+        const hadSession = this.sseConnected;
         try { this.sse.close(); } catch { /* already closed */ }
         this.sse = null;
         this.sseConnected = false;
+        if (hadSession) this.notifyDisconnect();
         if (this.transport === 'sse') this.transport = 'connecting';
         if (this.reconnectTimer === null) {
           this.reconnectTimer = window.setTimeout(() => {
@@ -505,6 +505,13 @@ export class NetworkClient {
 
   onDisconnect(callback: () => void): void {
     this.onDisconnectCallback = callback;
+  }
+
+  /** Tell the game that a live session ended, once, before any reconnect. */
+  private notifyDisconnect(): void {
+    if (this.disconnectNotified) return;
+    this.disconnectNotified = true;
+    this.onDisconnectCallback?.();
   }
 
   disconnect(): void {

@@ -187,7 +187,7 @@ export class ServerWorld {
     return GROUND_LEVEL;
   }
 
-  canDig(x: number, y: number, z: number): boolean {
+  canDig(_x: number, y: number, _z: number): boolean {
     return y >= GROUND_LEVEL - MAX_DIG_DOWN;
   }
 

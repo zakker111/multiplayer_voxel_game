@@ -124,7 +124,6 @@ function App() {
     if (!canvasRef.current || gameRef.current || !gameMode) return;
     
     const canvas = canvasRef.current;
-    console.log('Creating game with mode:', gameMode, 'team:', selectedTeam, 'server:', serverUrl, 'player:', playerName);
     
     // Ensure canvas has dimensions
     if (canvas.width === 0 || canvas.height === 0) {
@@ -141,7 +140,6 @@ function App() {
       
       game.start();
       gameRef.current = game;
-      console.log('Game created and started with mode:', gameMode, 'team:', selectedTeam);
       
       // Auto-start when game is created
       game.requestPointerLock(canvasRef.current);
@@ -149,7 +147,6 @@ function App() {
     }, 100);
     
     return () => { 
-      console.log('Cleaning up game');
       if (gameRef.current) {
         gameRef.current.destroy(); 
         gameRef.current = null;

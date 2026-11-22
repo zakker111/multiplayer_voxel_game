@@ -3,17 +3,10 @@ import {
   Position,
   Rotation,
   PlayerInput,
-  PLAYER_SPEED,
-  SPRINT_MULTIPLIER,
-  CROUCH_MULTIPLIER,
   JUMP_FORCE,
-  GRAVITY,
   PLAYER_MAX_SPEED,
   PLAYER_MOVE_BURST_SECONDS,
   PLAYER_MAX_FALL_SPEED,
-  PLAYER_HEIGHT,
-  CROUCH_HEIGHT,
-  PLAYER_RADIUS,
   WORLD_SIZE,
   GROUND_LEVEL,
   WEAPONS,
@@ -174,7 +167,7 @@ export class ServerPlayer {
     return !this.isDead && !this.isSpectating;
   }
 
-  update(dt: number, world: ServerWorld): void {
+  update(_dt: number, world: ServerWorld): void {
     if (this.isDead) return;
 
     // Skip physics and movement for spectators
@@ -247,27 +240,6 @@ export class ServerPlayer {
     const pitch = 0.9 + Math.random() * 0.2; // 0.9 to 1.1
     
     return { volume, pitch };
-  }
-
-  private checkCollision(x: number, y: number, z: number, height: number, world: ServerWorld): boolean {
-    const radius = PLAYER_RADIUS;
-    
-    // Check multiple points around the player
-    for (let dy = 0; dy < height; dy += 0.5) {
-      for (let dx = -radius; dx <= radius; dx += radius) {
-        for (let dz = -radius; dz <= radius; dz += radius) {
-          const checkX = Math.floor(x + dx);
-          const checkY = Math.floor(y + dy);
-          const checkZ = Math.floor(z + dz);
-          
-          if (world.isSolid(checkX, checkY, checkZ)) {
-            return true;
-          }
-        }
-      }
-    }
-    
-    return false;
   }
 
   takeDamage(amount: number): void {

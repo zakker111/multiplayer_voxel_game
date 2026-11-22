@@ -254,8 +254,6 @@ export class Player {
   // Push player out of solid voxels if stuck
   private pushOutOfSolids(pos: THREE.Vector3): THREE.Vector3 {
     const result = pos.clone();
-    const r = this.radius;
-    const h = this.currentHeight;
 
     // Check if player is currently inside a solid
     if (!this.checkCollisionAt(result)) {

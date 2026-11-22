@@ -68,3 +68,57 @@ test('a reconnect re-sends join with the new session token', () => {
 
   client.disconnect();
 });
+
+/**
+ * The game shows "Disconnected from server. Reconnecting..." and resets its
+ * join flag from the disconnect callback. When the handler was never invoked,
+ * a dropped session looked like a healthy one forever.
+ */
+test('a dropped session notifies the game once, and a healthy one stays quiet', () => {
+  const notices = [];
+
+  class FakeEventSource {
+    constructor() {
+      this.readyState = 1; // OPEN
+      FakeEventSource.instance = this;
+    }
+    close() { this.readyState = FakeEventSource.CLOSED; }
+  }
+  FakeEventSource.CLOSED = 2;
+
+  class DeadWebSocket {
+    constructor() {
+      throw new Error('simulated: no WebSocket server');
+    }
+  }
+
+  globalThis.window = {
+    location: { protocol: 'http:', host: 'localhost:3000' },
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  };
+  globalThis.WebSocket = DeadWebSocket;
+  globalThis.EventSource = FakeEventSource;
+  globalThis.fetch = () => Promise.resolve({ ok: true });
+
+  const client = new NetworkClient('ws://127.0.0.1:9', 'blue', 'Tester');
+  client.onDisconnect(() => notices.push('disconnected'));
+  client.connect();
+
+  const stream = FakeEventSource.instance;
+  stream.onopen();
+  assert.equal(client.isConnected(), true);
+  assert.equal(notices.length, 0, 'a healthy stream never reports a disconnect');
+
+  // The proxy caps the response and the stream is gone: the session with it.
+  stream.readyState = FakeEventSource.CLOSED;
+  stream.onerror();
+  assert.equal(notices.length, 1, 'the game hears about the dropped session');
+  assert.equal(client.isConnected(), false);
+
+  // A second error from the dead stream must not queue the message again.
+  stream.onerror();
+  assert.equal(notices.length, 1, 'the loss is reported exactly once');
+
+  client.disconnect();
+});
