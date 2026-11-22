@@ -103,6 +103,13 @@ export interface BotContext {
   serverTime: number;
   targets: BotTargetInfo[]; // all living players (humans + other bots)
   friendlyDroppedFlagPos: Position | null; // dropped flag of MY team to return
+  /** Enemy flag lying on the ground: the one we are attacking, dropped by a
+   *  carrier who died. Filled per bot by the server each tick. */
+  enemyFlagDropPos?: Position | null;
+  /** Optional: hardware this team can still pay for and legally place. The AI
+   *  picks from this list, so a squad fields the whole blueprint catalogue
+   *  (guns, eyes, forward store) instead of stacking one kind. */
+  availableEmplacements?: (bot: ServerBot) => Array<{ kind: string; standing: number }>;
   canSee: (from: Position, to: Position) => boolean; // LOS check (terrain raycast)
   fireWeapon: (bot: ServerBot, target: BotTargetInfo, aimDir: Position, eyeY: number) => void;
   /** Fire the bot's weapon at an emplacement (used when the target is a build). */
@@ -159,8 +166,17 @@ const OBJECTIVE_RETREAT_HP = 0.15;
 // zero pickups in a 10-minute 10v10 bot-only match).
 const ASSAULT_IGNORE_RANGE = 9;
 // A carrier re-rolls its escape lane this often, and may drop cover this often.
-const CARRIER_JINK_SECONDS = 2.2;
+// A straight line is a death sentence: chasers hold the same sight line and
+// rifle fire lands at 60m+. Jinking and screening on the same short beat is
+// what turns a steal into a capture.
+const CARRIER_JINK_SECONDS = 1.7;
+const CARRIER_SCREEN_COOLDOWN = 1.6;
 const PANIC_COVER_COOLDOWN = 3;
+// Escort screen: an escort belongs between the carrier and the chase. The
+// chase comes from the enemy base, so the screen sits on that side, fires out
+// to rifle range and walls the pursuer off much earlier than before.
+const ESCORT_ENGAGE_RANGE = 75;
+const ESCORT_COVER_RANGE = 60;
 
 // Difficulty knobs (env-overridable so Render can tune without code changes)
 const BOT_MAX_HP = Number(process.env.SERVER_BOT_HP ?? 130); // beefier than players (100)
@@ -239,6 +255,8 @@ export class ServerBot extends ServerPlayer {
   };
   /** Guns this bot has emplaced for its team (telemetry + one-per-life gate). */
   gunsBuilt = 0;
+  /** Which blueprint kinds this bot actually placed (diagnostics only). */
+  emplacedByKind: Record<string, number> = {};
   private lastGunAt = -Infinity;
   structuresStarted: Record<StructureKind, number> = {
     trench: 0,
@@ -386,7 +404,11 @@ export class ServerBot extends ServerPlayer {
       // distance discount so bots "hunt back" toward whoever hurt them.
       let score = d;
       if (revengeActive && cand.id === this.lastAttackerId) score *= 0.45;
-      if (cand.carryingFlag) score *= 0.5;
+      // A carrier is still the priority target, but not to the point of
+      // ignoring the rifleman 10m away: the old 0.5 discount made every enemy
+      // within sight tunnel onto the carrier and abandon the fight in front of
+      // it (carriers died ~7s after pickup).
+      if (cand.carryingFlag) score *= 0.65;
       if (score < nearestDist) {
         nearestDist = score;
         nearest = cand;
@@ -459,6 +481,14 @@ export class ServerBot extends ServerPlayer {
       // and flipped the carrier back into GRABFLAG waypoint churn.
       if (this.botState !== 'RETURN') this.transition('RETURN', t, 60);
     } else if (
+      this.botState !== 'RETREAT' &&
+      this.botState !== 'ESCORT' &&
+      this.nearbyEnemyDrop(ctx, 45)
+    ) {
+      // The enemy flag is on the ground next to us: pick it up before it goes
+      // home. Anything else (a duel, a wander) just delays the objective.
+      if (this.botState !== 'GRABFLAG') this.transition('GRABFLAG', t, 20);
+    } else if (
       this.escortCarrierPos &&
       this.botState !== 'RETREAT' &&
       this.botState !== 'ESCORT' &&
@@ -515,7 +545,8 @@ export class ServerBot extends ServerPlayer {
         this.doAdvance(ctx, enemyFlag);
         break;
       case 'GRABFLAG':
-        this.doGrabFlag(ctx, enemyFlag, nearest, nearestDist, t);
+        // A dropped enemy flag is the same objective, just lying on the ground.
+        this.doGrabFlag(ctx, this.nearbyEnemyDrop(ctx, 110) ?? enemyFlag, nearest, nearestDist, t);
         break;
       case 'RETURN':
         this.doReturn(ctx, homeBase, nearest, nearestDist, t);
@@ -649,6 +680,15 @@ export class ServerBot extends ServerPlayer {
         this.transition('ADVANCE', t, 8);
         return;
       }
+    }
+
+    // Priority 1b: the enemy flag is on the ground (its carrier died). The
+    // next touch continues the steal, so runners converge on it instead of
+    // letting it lie there until it returns itself — that idle window is what
+    // turned a lost carrier into minutes with no objective activity at all.
+    if (this.nearbyEnemyDrop(ctx, 110)) {
+      this.transition('GRABFLAG', t, 20);
+      return;
     }
 
     const distToEnemyFlag = Math.hypot(enemyFlag.x - this.position.x, enemyFlag.z - this.position.z);
@@ -894,8 +934,13 @@ export class ServerBot extends ServerPlayer {
       // Evaluate a few escape lanes and prefer one the nearest threat cannot
       // see. Carriers were dying in the open to rifle fire from 60m+; walls
       // only help once the shooter is close, so terrain cover is the real kite.
-      const candidates = [0, -12, 12, -26, 26];
-      const threat = enemy?.position ?? null;
+      // A wider ladder of lanes: a chaser holds the line it last saw, so a
+      // 40m sidestep through terrain cover beats a 12m shuffle.
+      const candidates = [0, -12, 12, -26, 26, -40, 40];
+      // With nothing in sight, route as though the enemy base is watching:
+      // defenders hold the line in front of their own stand.
+      const stand = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+      const threat: Position = enemy?.position ?? { x: stand.x, y: GROUND_LEVEL, z: stand.z };
       let best: Position | null = null;
       let bestScore = -Infinity;
       for (const off of candidates) {
@@ -920,11 +965,13 @@ export class ServerBot extends ServerPlayer {
     this.moveTo(this.returnWaypoint, step, ctx, true);
 
     if (enemy) {
-      // Only fight what is literally in the face; duelling mid-run loses the flag.
-      if (dist < 16) this.aimAndShoot(enemy, ctx, t);
-      // Drop a wall between us and the shooter to break the chase. Long-range
-      // rifle fire kills carriers at 60m+, so cover is worth placing early.
-      if (dist < 80) this.buildPanicCover(enemy.position, ctx, t);
+      // Fire on the move out to rifle range: a carrier that never shoots back
+      // is a free kill for the chaser behind it. Feet keep moving either way.
+      if (dist < 45) this.aimAndShoot(enemy, ctx, t);
+      // Wall off the chaser early and often. One wall per 3s screened only the
+      // first few metres of a 320m run; at 1.6s the screen keeps pace with the
+      // carrier, and the pickup zone is exactly where the chase starts.
+      if (dist < 120) this.buildPanicCover(enemy.position, ctx, t, CARRIER_SCREEN_COOLDOWN, 2);
     }
   }
 
@@ -938,22 +985,35 @@ export class ServerBot extends ServerPlayer {
       this.transition('ADVANCE', t, 5);
       return;
     }
-    const dx = carrier.x - this.position.x;
-    const dz = carrier.z - this.position.z;
-    const len = Math.hypot(dx, dz) || 1;
-    // Sit behind the carrier on our own side (the carrier runs away from the
-    // enemy base, so "behind" is the side the enemy will chase from).
-    const wp: Position = { x: carrier.x - (dx / len) * 4.5, y: GROUND_LEVEL, z: carrier.z - (dz / len) * 4.5 };
+    // Stand between the carrier and the chase. The old trail point sat behind
+    // the carrier on our own side — the one place a chaser never is. Defenders
+    // come from their base, so the screen belongs on that side, five metres out.
+    const enemyBase = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
+    const threat: Position = enemy?.position ?? { x: enemyBase.x, y: GROUND_LEVEL, z: enemyBase.z };
+    const tx = threat.x - carrier.x;
+    const tz = threat.z - carrier.z;
+    const len = Math.hypot(tx, tz) || 1;
+    const fx = tx / len;
+    const fz = tz / len;
+    // A little lateral spread keeps two escorts from stacking into one target.
+    const side = this.laneSeed * 2.5;
+    const wp: Position = {
+      x: carrier.x + fx * 5 + fz * side,
+      y: GROUND_LEVEL,
+      z: carrier.z + fz * 5 - fx * side,
+    };
     const d = Math.hypot(wp.x - this.position.x, wp.z - this.position.z);
     if (d > 2) this.moveTo(wp, dtOf(ctx), ctx, true);
 
     if (enemy) {
-      if (dist < 55) this.aimAndShoot(enemy, ctx, t);
-      if (dist < 30) this.buildPanicCover(enemy.position, ctx, t);
+      // Rifle range, not 55m: the shot that kills the carrier often comes from
+      // further out than the escort used to answer.
+      if (dist < ESCORT_ENGAGE_RANGE) this.aimAndShoot(enemy, ctx, t);
+      if (dist < ESCORT_COVER_RANGE) this.buildPanicCover(enemy.position, ctx, t);
     }
 
     const carrierDist = Math.hypot(carrier.x - this.position.x, carrier.z - this.position.z);
-    if (carrierDist > 90) this.transition(this.role === 'assault' ? 'GRABFLAG' : 'ADVANCE', t, 5);
+    if (carrierDist > 110) this.transition(this.role === 'assault' ? 'GRABFLAG' : 'ADVANCE', t, 5);
   }
 
   /**
@@ -1057,9 +1117,14 @@ export class ServerBot extends ServerPlayer {
       return;
     }
 
-    if (enemy) this.gunIdleAt = t;
-    if (!enemy) {
-      // Nothing to shoot at for a long stretch: go back to holding the post.
+    // A target only counts if this gun can actually bear on it. A cannon has a
+    // 60° arc and a mortar a 25m dead zone, so a gunner handed an impossible
+    // target used to sit in the seat indefinitely without firing a round
+    // (measured: a cannon crewed 25 times, zero rounds fired).
+    const bears = enemy ? this.gunCanBear(seat, enemy, ctx) : false;
+    if (bears) this.gunIdleAt = t;
+    if (!enemy || !bears) {
+      // Nothing this gun can shoot at for a long stretch: go back to the post.
       if (t - this.gunIdleAt > GUN_IDLE_SECONDS) {
         guns.leave(this);
         this.gunCooldownUntil = t + 10;
@@ -1092,6 +1157,22 @@ export class ServerBot extends ServerPlayer {
     }
     if (t < this.aimTargetAt) return;
     guns.fire(this, aim);
+  }
+
+  /** Can this gun put a round on that target at all? Arc, range band and LOS
+   *  are exactly the checks the shot itself would face, so the AI never holds a
+   *  seat it cannot shoot from. */
+  private gunCanBear(seat: BotGunSeat, enemy: BotTargetInfo, ctx: BotContext): boolean {
+    const origin = { x: seat.position.x, y: seat.position.y + 1.15, z: seat.position.z };
+    const aim = { x: enemy.position.x, y: enemy.position.y + 1.0, z: enemy.position.z };
+    const dx = aim.x - origin.x;
+    const dz = aim.z - origin.z;
+    const distance = Math.hypot(dx, aim.y - origin.y, dz);
+    if (distance < seat.minRange || distance > seat.maxRange) return false;
+    const yaw = Math.atan2(-dx, -dz);
+    const offset = Math.atan2(Math.sin(yaw - seat.baseYaw), Math.cos(yaw - seat.baseYaw));
+    if (Math.abs(offset) > seat.arc / 2 + 1e-3) return false;
+    return ctx.canSee(origin, aim);
   }
 
   private doBuild(ctx: BotContext, enemyFlag: { x: number; z: number }, t: number): void {
@@ -1227,6 +1308,8 @@ export class ServerBot extends ServerPlayer {
   tryGunBuild(ctx: BotContext, center: { x: number; z: number }, t: number): boolean {
     if (!ctx.placeEmplacement || !this.engineer) return false;
     if (t - this.lastGunAt < GUN_BUILD_COOLDOWN) return false;
+    const kind = this.chooseEmplacementKind(ctx);
+    if (!kind) return false;
     this.lastGunAt = t;
 
     const enemyFlag = this.team === 'blue' ? RED_FLAG_POS : BLUE_FLAG_POS;
@@ -1247,13 +1330,54 @@ export class ServerBot extends ServerPlayer {
           y: this.position.y,
           z: Math.round(center.z + (fx * sin + fz * cos) * radius),
         };
-        if (ctx.placeEmplacement(this, 'mgNest', spot, yaw)) {
+        if (ctx.placeEmplacement(this, kind, spot, yaw)) {
           this.gunsBuilt++;
+          this.emplacedByKind[kind] = (this.emplacedByKind[kind] ?? 0) + 1;
           return true;
         }
       }
     }
     return false;
+  }
+
+  /**
+   * Which hardware to emplace at this firebase. Bots build the whole
+   * catalogue, not just nests: a nest for the firing line, a cannon or mortar
+   * for the heavy punch, a spotting post for eyes and a supply crate as a
+   * forward block store. Only what the team can still pay for and has room for
+   * is considered, and a kind the team has none of yet is preferred, so a
+   * squad actually fields every blueprint instead of stacking nests.
+   */
+  private chooseEmplacementKind(ctx: BotContext): string | null {
+    const options = ctx.availableEmplacements?.(this);
+    // No server feed (standalone bots / unit contexts): the classic nest.
+    if (!options) return 'mgNest';
+    if (options.length === 0) return null;
+    // Support engineers hold a fixed post, so they favour what keeps it alive;
+    // forward engineers pushing a firebase favour the heavy guns.
+    const weights: Record<string, number> = this.role === 'support'
+      ? { mgNest: 2.4, cannon: 1.2, mortar: 1.1, spottingPost: 1.1, supplyCrate: 0.9 }
+      : { mgNest: 1.2, cannon: 1.5, mortar: 1.4, spottingPost: 0.7, supplyCrate: 0.8 };
+    let total = 0;
+    const scored = options.map((option) => {
+      const base = weights[option.kind] ?? 1;
+      const score = base * (option.standing === 0 ? 2 : 0.6);
+      total += score;
+      return { kind: option.kind, score };
+    });
+    let roll = Math.random() * total;
+    for (const entry of scored) {
+      roll -= entry.score;
+      if (roll <= 0) return entry.kind;
+    }
+    return scored[scored.length - 1].kind;
+  }
+
+  /** The enemy flag lying on the ground within `radius`, if any. */
+  private nearbyEnemyDrop(ctx: BotContext, radius: number): Position | null {
+    const drop = ctx.enemyFlagDropPos;
+    if (!drop) return null;
+    return Math.hypot(drop.x - this.position.x, drop.z - this.position.z) <= radius ? drop : null;
   }
 
   /** Random valid structure for this ground and block budget (null = none). */
@@ -1758,11 +1882,27 @@ export class ServerBot extends ServerPlayer {
    * Emergency combat engineering: drop a 2-high block between us and a shooter.
    * Throttled by PANIC_COVER_COOLDOWN and the per-life block budget.
    */
-  private buildPanicCover(enemyPos: Position, ctx: BotContext, t: number): void {
-    if (this.remainingBlocks < 3 || t - this.lastCoverBuildAt < PANIC_COVER_COOLDOWN) return;
+  private buildPanicCover(
+    enemyPos: Position,
+    ctx: BotContext,
+    t: number,
+    cooldown: number = PANIC_COVER_COOLDOWN,
+    minBlocks: number = 3,
+  ): void {
+    if (this.remainingBlocks < minBlocks || t - this.lastCoverBuildAt < cooldown) return;
     const dx = enemyPos.x - this.position.x;
     const dz = enemyPos.z - this.position.z;
     const len = Math.hypot(dx, dz) || 1;
+    // Never drop the wall in our own lane. With the threat roughly where we are
+    // heading (a carrier leaving the stand runs straight at the defenders), the
+    // column would box us in and the bot would grind against its own cover for
+    // minutes — measured as a carrier stuck 178s in RETURN. Sides and rear are
+    // the directions that need screening.
+    const speed = Math.hypot(this.velocity.x, this.velocity.z);
+    if (speed > 0.5) {
+      const heading = (this.velocity.x * (dx / len) + this.velocity.z * (dz / len)) / speed;
+      if (heading > 0.4) return;
+    }
     const gx = Math.round(this.position.x + (dx / len) * 2.4);
     const gz = Math.round(this.position.z + (dz / len) * 2.4);
     const gy = ctx.world.getGroundHeight(gx, gz);

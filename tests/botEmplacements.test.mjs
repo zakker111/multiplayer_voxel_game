@@ -155,7 +155,68 @@ test('the server-side context lets an engineer emplace for real', () => {
   assert.equal(placed, true, 'a flat spot near the engineer was accepted');
   const gun = [...game.emplacements.values()][0];
   assert.equal(gun.team, 'red');
-  assert.equal(gun.kind, 'mgNest');
-  assert.equal(game.workshopStock.red, 500 - emplacementSpec('mgNest').cost);
+  assert.ok(['mgNest', 'cannon', 'mortar', 'supplyCrate', 'spottingPost'].includes(gun.kind),
+    `the engineer built real hardware (${gun.kind})`);
+  assert.equal(game.workshopStock.red, 500 - emplacementSpec(gun.kind).cost,
+    'the chosen blueprint was charged at its own price');
   assert.ok(WEAPONS[bot.equipment], 'the engineer keeps its rifle after building');
+});
+
+test('an engineer builds the whole blueprint catalogue, not just nests', () => {
+  const kinds = ['mgNest', 'cannon', 'mortar', 'supplyCrate', 'spottingPost'];
+  const { bot, ctx, calls } = engineerWith({
+    availableEmplacements: () => kinds.map((kind) => ({ kind, standing: 0 })),
+  });
+  const seen = new Set();
+  for (let i = 0; i < 200; i++) {
+    calls.length = 0;
+    assert.equal(bot.tryGunBuild(ctx, { x: 0, z: 0 }, 100 + i * 20), true);
+    seen.add(calls[0].kind);
+  }
+  assert.deepEqual([...seen].sort(), [...kinds].sort(), 'every blueprint was chosen at least once');
+  assert.deepEqual(Object.keys(bot.emplacedByKind).sort(), [...kinds].sort(),
+    'diagnostics record what each engineer actually placed');
+});
+
+test('an engineer only builds what the team can pay for and has room for', () => {
+  const { bot, ctx, calls } = engineerWith({
+    availableEmplacements: () => [{ kind: 'mortar', standing: 0 }],
+  });
+  assert.equal(bot.tryGunBuild(ctx, { x: 0, z: 0 }, 100), true);
+  assert.equal(calls[0].kind, 'mortar');
+  assert.equal(bot.emplacedByKind.mortar, 1);
+
+  // Nothing affordable or under the cap: no build is attempted at all.
+  calls.length = 0;
+  ctx.availableEmplacements = () => [];
+  assert.equal(bot.tryGunBuild(ctx, { x: 0, z: 0 }, 200), false);
+  assert.equal(calls.length, 0, 'nothing was offered, so nothing was probed');
+  assert.equal(bot.gunsBuilt, 1);
+});
+
+test('the server offers every affordable blueprint and closes each team limit', () => {
+  const game = new ServerGame();
+  const bot = game.players.get(game.addBot('blue', 'Sapper'));
+  const spots = findSpots(game, 4);
+  game.workshopStock.blue = 5000;
+  const offered = game.botEmplacementOptions('blue').map((option) => option.kind);
+  assert.deepEqual([...offered].sort(),
+    ['cannon', 'mgNest', 'mortar', 'spottingPost', 'supplyCrate'].sort(),
+    'with stock, every blueprint is on the table');
+  assert.equal(game.botPlaceEmplacement(bot, 'mgNest', spots[0], 0), true);
+  assert.equal(game.botPlaceEmplacement(bot, 'mgNest', spots[1], 0), true);
+  const after = game.botEmplacementOptions('blue');
+  assert.ok(!after.some((option) => option.kind === 'mgNest'), 'a full nest cap is not offered');
+  assert.ok(after.some((option) => option.kind === 'cannon'), 'the other guns are still offered');
+});
+
+test('bots can crew the heavy guns, not only nests', () => {
+  const game = new ServerGame();
+  const bot = game.players.get(game.addBot('blue', 'Sapper'));
+  const [spot] = findSpots(game, 1);
+  game.workshopStock.blue = 500;
+  assert.equal(game.botPlaceEmplacement(bot, 'cannon', spot, 0), true);
+  bot.position = { x: spot.x + 2, y: spot.y, z: spot.z };
+  const seat = game.getBotContext().guns.freeNear(bot, 10);
+  assert.equal(seat?.kind, 'cannon', 'a cannon seat is offered to bots');
 });

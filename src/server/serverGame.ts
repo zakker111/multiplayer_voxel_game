@@ -57,7 +57,7 @@ import {
   isWorkshopProtectedCell,
   Workshops,
   JeepSnapshot,
-  WORLD_HALF, vehicleSpec, emplacementSpec, BENCH_REACH, benchPosition, EmplacementKind,
+  WORLD_HALF, vehicleSpec, emplacementSpec, EMPLACEMENTS, BENCH_REACH, benchPosition, EmplacementKind,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_USE_REACH,
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
   EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH, emplacedShotDirection,
@@ -369,6 +369,26 @@ export class ServerGame {
     this.emplacements.set(emplacement.id, emplacement);
     this.broadcastEmplacements();
     return emplacement;
+  }
+
+  /**
+   * Hardware a team can still pay for and place. The bot AI picks from this
+   * list so a squad fields the whole blueprint catalogue instead of stacking
+   * nests: cost and team limits stay server rules, merely read by the AI.
+   */
+  private botEmplacementOptions(team: 'red' | 'blue'): Array<{ kind: string; standing: number }> {
+    const options: Array<{ kind: string; standing: number }> = [];
+    for (const kind of Object.keys(EMPLACEMENTS) as EmplacementKind[]) {
+      const spec = EMPLACEMENTS[kind];
+      if (this.workshopStock[team] < spec.cost) continue;
+      let standing = 0;
+      for (const emplacement of this.emplacements.values()) {
+        if (emplacement.team === team && emplacement.kind === kind) standing++;
+      }
+      if (standing >= spec.teamLimit) continue;
+      options.push({ kind, standing });
+    }
+    return options;
   }
 
   /** Bots skip the bench but not the bill: a bot build pays the team stock
@@ -1335,10 +1355,10 @@ export class ServerGame {
 
   /** The gun hooks bots use. Mount, aim and fire all go through the same
    *  private seat methods humans use, so a bot can never do more than a player.
-   *  Only the hitscan nest is bot-crewed for now: cannon and mortar shells need
-   *  ballistic aiming, which is a separate problem from taking a seat. */
+   *  Every armed build is crew-able: the nest is hitscan while the cannon and
+   *  mortar lob shells, but the seat/aim/fire path is shared with humans. */
   private botGunContext(): BotGunContext {
-    const crewable = (emplacement: EmplacementSnapshot) => emplacement.kind === 'mgNest';
+    const crewable = (emplacement: EmplacementSnapshot) => MANNED_EMPLACEMENTS.includes(emplacement.kind);
     return {
       manned: (bot) => this.botGunSeat(this.gunnerEmplacement(bot.id)),
       freeNear: (bot, radius) => {
@@ -1413,6 +1433,8 @@ export class ServerGame {
       serverTime: this.world.serverTime,
       targets,
       friendlyDroppedFlagPos: null, // filled per-bot below via closure default
+      enemyFlagDropPos: null, // filled per-bot in updateBots
+      availableEmplacements: (bot) => this.botEmplacementOptions(bot.team),
       canSee: (from, to) => this.hasLineOfSight(from, to),
       fireWeapon: (bot, target, aimDir, eyeY) => {
         const origin = { x: bot.position.x, y: bot.position.y + eyeY, z: bot.position.z };
@@ -2187,12 +2209,16 @@ export class ServerGame {
         const ride = this.botRideTasks.get(id);
         if (ride && this.jeeps.get(ride.jeepId)?.passengerId !== id) this.botRideTasks.delete(id);
       }
-      // Per-bot view of dropped flags belonging to its own team
+      // Per-bot view of dropped flags: our own (to return) and theirs (to steal)
       const own = ctx.friendlyDroppedFlagPos;
       const drop = this.droppedFlags.find((f) => f.team === player.team);
       ctx.friendlyDroppedFlagPos = drop ? drop.position : own;
+      const enemyTeam = player.team === 'blue' ? 'red' : 'blue';
+      const enemyDrop = this.droppedFlags.find((f) => f.team === enemyTeam);
+      ctx.enemyFlagDropPos = enemyDrop ? enemyDrop.position : null;
       player.botUpdate(this.tickDt, ctx);
       ctx.friendlyDroppedFlagPos = null;
+      ctx.enemyFlagDropPos = null;
     }
   }
 
