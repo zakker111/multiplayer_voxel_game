@@ -15,6 +15,8 @@ export class NetworkClient {
   private disconnectNotified = false;
   /** True after an intentional teardown: its socket events are not failures. */
   private closedByUser = false;
+  /** Timers owned by an in-flight connect(); none may outlive a teardown. */
+  private connectTimers: ReturnType<typeof setTimeout>[] = [];
   
   public localPeerId: string;
   public assignedPlayerId: string | null = null;
@@ -232,6 +234,8 @@ export class NetworkClient {
 
   connect(): Promise<void> {
     this.closedByUser = false;
+    // A previous connect() must not act on the socket this one is opening.
+    this.clearConnectTimers();
     return new Promise((resolve) => {
       let settled = false;
 
@@ -280,6 +284,7 @@ export class NetworkClient {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
           this.connectSSE(finishConnect);
         }, 10000);
+        this.connectTimers.push(wsTimeout);
 
         // An accepted upgrade is not a working session: a proxy or a half-open
         // socket can complete the handshake and never deliver the `init` frame.
@@ -299,6 +304,7 @@ export class NetworkClient {
         this.ws.onopen = () => {
           clearTimeout(wsTimeout);
           initTimeout = setTimeout(() => failSilentSocket('delivered no init within 8s'), 8000);
+          this.connectTimers.push(initTimeout);
         };
 
         this.ws.onmessage = (event) => {
@@ -338,7 +344,8 @@ export class NetworkClient {
       }
 
       // If both fail, resolve with Multi-Tab mesh active
-      setTimeout(() => {
+      const broadcastFallback = setTimeout(() => {
+        if (this.closedByUser) return;
         if (!settled) {
           settled = true;
           this.transport = 'broadcast';
@@ -346,6 +353,7 @@ export class NetworkClient {
           resolve();
         }
       }, 3500);
+      this.connectTimers.push(broadcastFallback);
     });
   }
 
@@ -527,8 +535,15 @@ export class NetworkClient {
     this.onDisconnectCallback?.();
   }
 
+  /** Cancel the protocol timers a pending connect() left behind. */
+  private clearConnectTimers(): void {
+    for (const timer of this.connectTimers) clearTimeout(timer);
+    this.connectTimers = [];
+  }
+
   disconnect(): void {
     this.closedByUser = true;
+    this.clearConnectTimers();
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -542,13 +557,20 @@ export class NetworkClient {
       this.channel = null;
     }
     if (this.ws) {
+      // Detach every handler before closing: a late event must neither look
+      // like a lost session nor re-enter the join path.
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
       this.ws.onclose = null;
-      this.ws.close();
+      this.ws.onerror = null;
+      try { this.ws.close(); } catch { /* already closed */ }
       this.ws = null;
     }
     if (this.sse) {
+      this.sse.onopen = null;
+      this.sse.onmessage = null;
       this.sse.onerror = null;
-      this.sse.close();
+      try { this.sse.close(); } catch { /* already closed */ }
       this.sse = null;
     }
     this.wsConnected = false;

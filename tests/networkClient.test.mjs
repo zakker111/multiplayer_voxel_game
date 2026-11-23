@@ -183,3 +183,42 @@ test('an intentional disconnect stays silent and never revives a session', () =>
   client.connectSSE();
   assert.equal(fallbackStreams, 0, 'an ended session must not reopen over SSE');
 });
+
+/**
+ * When neither transport opens, connect() settles on the local mesh after
+ * 3.5s. Leaving before then must cancel that timer too, otherwise the game is
+ * told it connected after the player already quit.
+ */
+test('an intentional disconnect cancels the pending connect fallback', async () => {
+  let connected = 0;
+
+  class DeadWebSocket {
+    constructor() {
+      throw new Error('simulated: no WebSocket server');
+    }
+  }
+
+  class SilentEventSource {
+    constructor() { this.readyState = 0; } // CONNECTING — never opens
+    close() {}
+  }
+
+  globalThis.window = {
+    location: { protocol: 'http:', host: 'localhost:3000' },
+    setTimeout,
+    clearTimeout,
+  };
+  globalThis.WebSocket = DeadWebSocket;
+  globalThis.EventSource = SilentEventSource;
+  globalThis.fetch = () => Promise.resolve({ ok: true });
+
+  const client = new NetworkClient('ws://127.0.0.1:9', 'blue', 'Tester');
+  client.onConnect(() => connected++);
+  client.connect();
+  client.disconnect();
+
+  await new Promise((resolve) => setTimeout(resolve, 3700));
+  assert.equal(connected, 0, 'an ended session must not report a connection');
+  assert.equal(client.isConnected(), false);
+  assert.equal(client.transport, 'connecting');
+});
