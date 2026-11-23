@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
-  ballisticVelocity, ballisticRange, shellArc, blastBuildHits, MORTAR_SHELL_SPEED, CANNON_SHELL_SPEED,
+  ballisticVelocity, ballisticRange, shellArc, blastBuildHits, blastFalloff, MORTAR_SHELL_SPEED, CANNON_SHELL_SPEED,
 } = require('../dist/tests/ballistics.cjs');
 const { CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE } = require('../dist/tests/sharedTypes.cjs');
 
@@ -73,6 +73,13 @@ test('one blast damages a directly hit build exactly once at full power', () => 
   assert.equal(hits.filter((hit) => hit.build.id === 'far').length, 0, 'builds outside the radius are spared');
   const near = hits.find((hit) => hit.build.id === 'near');
   assert.ok(near && near.damage > 0 && near.damage < CANNON_BLAST_DAMAGE, 'splash falls off with distance');
+  assert.equal(near.damage, blastFalloff(CANNON_BLAST_DAMAGE, CANNON_BLAST_RADIUS, 3), 'the list uses the shared falloff');
+
+  // One falloff rule for both callers: full at the centre, a 1-point minimum
+  // anywhere inside the radius, and nothing outside it.
+  assert.equal(blastFalloff(CANNON_BLAST_DAMAGE, CANNON_BLAST_RADIUS, 0), CANNON_BLAST_DAMAGE);
+  assert.equal(blastFalloff(CANNON_BLAST_DAMAGE, CANNON_BLAST_RADIUS, CANNON_BLAST_RADIUS), 1);
+  assert.equal(blastFalloff(CANNON_BLAST_DAMAGE, CANNON_BLAST_RADIUS, CANNON_BLAST_RADIUS + 0.01), 0);
 });
 
 test('a shot lands earlier when the ground is raised', () => {

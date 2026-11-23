@@ -9,7 +9,7 @@ import {
   MORTAR_BLAST_DAMAGE, MORTAR_BLAST_RADIUS,
   type Position,
 } from '../shared/types';
-import { blastBuildHits, directBuildHit, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
+import { blastBuildHits, blastFalloff, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 /** Fixed integration step: a cannon round covers 2.1m per 0.025s. */
 export const SHELL_STEP = 0.025;
@@ -109,7 +109,7 @@ function stepOnce<T extends OfflineShell, B extends OfflineBotTarget, J extends 
  * Resolve one blast, returning its radius. Every victim is visited once; the
  * build the round struck directly is the full-power entry, never a second pass.
  */
-export function applyOfflineBlast<T extends OfflineShell, B extends OfflineBotTarget, J extends OfflineJeepTarget, E extends OfflineBuildTarget>(
+function applyOfflineBlast<T extends OfflineShell, B extends OfflineBotTarget, J extends OfflineJeepTarget, E extends OfflineBuildTarget>(
   shell: T,
   impact: Position,
   targets: OfflineBlastTargets<B, J, E>,
@@ -118,7 +118,8 @@ export function applyOfflineBlast<T extends OfflineShell, B extends OfflineBotTa
   const isMortar = shell.kind === 'mortar';
   const radius = isMortar ? MORTAR_BLAST_RADIUS : CANNON_BLAST_RADIUS;
   const power = isMortar ? MORTAR_BLAST_DAMAGE : CANNON_BLAST_DAMAGE;
-  const splash = (distance: number) => Math.max(power * 0.25, power * (1 - distance / radius));
+  // The same falloff and 1-point minimum the server applies.
+  const splash = (distance: number) => blastFalloff(power, radius, distance);
 
   for (const bot of targets.bots) {
     if (bot.isDead || bot.team === shell.team) continue;
@@ -142,9 +143,8 @@ export function applyOfflineBlast<T extends OfflineShell, B extends OfflineBotTa
     handlers.damageJeep(jeep, splash(distance));
   }
 
-  const direct = directBuildHit(shell.team, impact, targets.builds);
-  for (const { build, damage } of blastBuildHits(shell.team, impact, radius, power, targets.builds, direct?.id)) {
-    handlers.damageBuild(build, Math.max(power * 0.25, damage));
+  for (const { build, damage } of blastBuildHits(shell.team, impact, radius, power, targets.builds)) {
+    handlers.damageBuild(build, damage);
   }
 
   return radius;

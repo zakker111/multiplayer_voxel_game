@@ -65,7 +65,7 @@ import {
   type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
-import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, blastBuildHits, directBuildHit, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
+import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, blastBuildHits, blastFalloff, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -853,20 +853,18 @@ export class ServerGame {
       if (target.isDead || target.isSpectating || target.team === shell.team) continue;
       const distance = Math.hypot(target.position.x - position.x, target.position.y + 1 - position.y, target.position.z - position.z);
       if (distance > radius) continue;
-      const damage = Math.max(1, Math.round(maxDamage * (1 - distance / radius)));
-      this.applyDamage(id, damage, shell.ownerId, false);
+      this.applyDamage(id, blastFalloff(maxDamage, radius, distance), shell.ownerId, false);
     }
     for (const jeep of this.jeeps.values()) {
       if (jeep.wreck || jeep.team === shell.team) continue;
       const distance = Math.hypot(jeep.position.x - position.x, jeep.position.y + 1 - position.y, jeep.position.z - position.z);
       if (distance > radius) continue;
-      this.damageJeep(jeep, Math.max(1, Math.round(maxDamage * (1 - distance / radius))));
+      this.damageJeep(jeep, blastFalloff(maxDamage, radius, distance));
     }
-    // One list of builds, each hit once: a build the shell struck directly is
-    // the full-power entry, never a separate damage pass.
-    const direct = directBuildHit(shell.team, position, this.emplacements.values());
-    for (const { build, damage } of blastBuildHits(shell.team, position, radius, maxDamage, this.emplacements.values(), direct?.id)) {
-      this.damageEmplacement(build.id, Math.max(1, Math.round(damage)));
+    // One list of builds, each hit once and already at the shared falloff; a
+    // build the shell struck directly is the full-power entry.
+    for (const { build, damage } of blastBuildHits(shell.team, position, radius, maxDamage, this.emplacements.values())) {
+      this.damageEmplacement(build.id, damage);
     }
     // Terrain damage is the point of a shell: carve the voxels it lands on.
     const ground = Math.round(position.y);

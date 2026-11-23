@@ -173,38 +173,34 @@ export interface BlastBuildTarget {
 }
 
 /**
- * The enemy build a burst landed on, if any. Its footprint is the circumscribed
- * circle the projectile stops on, so the burst centre sits up to that radius
- * from the build's centre; a direct hit still counts as distance zero.
+ * Blast damage at a distance: linear falloff from the centre, rounded, with a
+ * minimum of 1 so anything inside the radius is hurt. Both the server and the
+ * offline blast call this, so their numbers cannot drift apart.
  */
-export function directBuildHit<T extends BlastBuildTarget & { kind: string }>(
-  team: 'red' | 'blue', point: Position, builds: Iterable<T>,
-): T | undefined {
-  for (const build of builds) {
-    if (build.team === team) continue;
-    const spec = emplacementSpec(build.kind);
-    if (!spec) continue;
-    if (shellHitsObstacle(point, team, { kind: 'footprint', team: build.team, position: build.position, footprint: spec })) {
-      return build;
-    }
-  }
-  return undefined;
+export function blastFalloff(power: number, radius: number, distance: number): number {
+  if (!(radius > 0) || distance > radius) return 0;
+  return Math.max(1, Math.round(power * (1 - distance / radius)));
 }
 
 /**
- * Enemy builds caught by one blast, each exactly once, with its linear falloff
- * damage (callers apply their own minimum). A build the round struck directly
- * is the full-power entry — `directBuildId` — so the projectile step must never
- * damage it a second time on top of this list.
+ * Enemy builds caught by one blast, each exactly once, already at the shared
+ * falloff and minimum. A build whose footprint contains the burst is a direct
+ * hit: the projectile stops on its circumscribed circle, so a burst centre can
+ * sit up to that radius from the build's centre, but it still counts as
+ * distance zero and full power. The projectile step must never damage a build
+ * on top of this list.
  */
 export function blastBuildHits<T extends BlastBuildTarget>(
   team: 'red' | 'blue', impact: Position, radius: number, power: number, builds: Iterable<T>,
-  directBuildId?: string,
 ): Array<{ build: T; damage: number }> {
   const hits: Array<{ build: T; damage: number }> = [];
   for (const build of builds) {
     if (build.team === team) continue;
-    const distance = build.id === directBuildId
+    const spec = build.kind ? emplacementSpec(build.kind) : undefined;
+    const direct = !!spec && shellHitsObstacle(impact, team, {
+      kind: 'footprint', team: build.team, position: build.position, footprint: spec,
+    });
+    const distance = direct
       ? 0
       : Math.hypot(
         build.position.x - impact.x,
@@ -212,7 +208,7 @@ export function blastBuildHits<T extends BlastBuildTarget>(
         build.position.z - impact.z,
       );
     if (distance > radius) continue;
-    hits.push({ build, damage: Math.max(0, power * (1 - distance / radius)) });
+    hits.push({ build, damage: blastFalloff(power, radius, distance) });
   }
   return hits;
 }
