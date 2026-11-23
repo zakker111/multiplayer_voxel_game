@@ -38,7 +38,7 @@ import {
 } from '../shared/types';
 import {
   CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc,
-  shellStopsAt, shellHitsObstacle, type ShellObstacle,
+  shellStopsAt, blastBuildHits, type ShellObstacle,
 } from '../shared/ballistics';
 
 /** How long a killfeed row stays on screen. */
@@ -1884,18 +1884,14 @@ export class Game {
       // offline round bursts exactly where the marker promised.
       const obstacles = this.shellObstacles();
       const stopped = shellStopsAt(shell.position, shell.team, obstacles);
-      const hitBuild = this.localEmplacements.find((e) => {
-        const spec = emplacementSpec(e.kind);
-        return !!spec && shellHitsObstacle(shell.position, shell.team,
-          { kind: 'footprint', team: e.team, position: e.position, footprint: spec });
-      });
       const stale = this.localTime - shell.firedAt > 8;
       if (shell.position.y > ground && !stopped && !stale) continue;
 
       const impact = shell.position.clone();
       impact.y = Math.max(ground, impact.y);
+      // The blast is the only damage path: a build the round struck directly
+      // is the distance-0 entry in its build list, not an extra direct hit.
       this.explodeLocalShell(shell.kind, shell.team, impact);
-      if (hitBuild) this.damageLocalEmplacement(hitBuild.id, shell.kind === 'mortar' ? MORTAR_BLAST_DAMAGE : CANNON_BLAST_DAMAGE);
       this.scene.remove(shell.mesh);
       shell.mesh.geometry.dispose();
       (shell.mesh.material as THREE.Material).dispose();
@@ -1927,17 +1923,10 @@ export class Game {
       if (distance > radius) continue;
       this.damageLocalJeep(jeep, Math.max(power * 0.25, power * (1 - distance / radius)));
     }
-    // Enemy builds inside the blast take the same falloff; the direct hit is
-    // only one of several structures a round can catch.
-    for (const emplacement of [...this.localEmplacements]) {
-      if (emplacement.team === team) continue;
-      const distance = Math.hypot(
-        emplacement.position.x - impact.x,
-        emplacement.position.y + 0.6 - impact.y,
-        emplacement.position.z - impact.z,
-      );
-      if (distance > radius) continue;
-      this.damageLocalEmplacement(emplacement.id, Math.max(power * 0.25, power * (1 - distance / radius)));
+    // Enemy builds inside the blast take the falloff from the shared hit list;
+    // the build the round struck directly is simply the distance-0 entry.
+    for (const { build, damage } of blastBuildHits(team, impact, radius, power, this.localEmplacements)) {
+      this.damageLocalEmplacement(build.id, Math.max(power * 0.25, damage));
     }
     // Slight terrain damage: the same ten-cell crater the server carves, so an
     // offline round dents the ground instead of only popping in the air.

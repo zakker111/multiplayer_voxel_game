@@ -65,7 +65,7 @@ import {
   type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
-import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
+import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, blastBuildHits, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -862,11 +862,10 @@ export class ServerGame {
       if (distance > radius) continue;
       this.damageJeep(jeep, Math.max(1, Math.round(maxDamage * (1 - distance / radius))));
     }
-    for (const emplacement of [...this.emplacements.values()]) {
-      if (emplacement.team === shell.team) continue;
-      const distance = Math.hypot(emplacement.position.x - position.x, emplacement.position.y + 0.6 - position.y, emplacement.position.z - position.z);
-      if (distance > radius) continue;
-      this.damageEmplacement(emplacement.id, Math.max(1, Math.round(maxDamage * (1 - distance / radius))));
+    // One list of builds, each hit once: a build the shell struck directly is
+    // the distance-0 entry, never a separate damage pass.
+    for (const { build, damage } of blastBuildHits(shell.team, position, radius, maxDamage, this.emplacements.values())) {
+      this.damageEmplacement(build.id, Math.max(1, Math.round(damage)));
     }
     // Terrain damage is the point of a shell: carve the voxels it lands on.
     const ground = Math.round(position.y);

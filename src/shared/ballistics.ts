@@ -163,3 +163,32 @@ export function shellHitsObstacle(point: Position, team: 'red' | 'blue', obstacl
 export function shellStopsAt(point: Position, team: 'red' | 'blue', obstacles: readonly ShellObstacle[]): boolean {
   return obstacles.some((obstacle) => shellHitsObstacle(point, team, obstacle));
 }
+
+export interface BlastBuildTarget {
+  id: string;
+  team: 'red' | 'blue';
+  position: Position;
+}
+
+/**
+ * Enemy builds caught by one blast, each exactly once, with its linear falloff
+ * damage (callers apply their own minimum). A build the round struck directly
+ * is just the distance-0 entry: the projectile step must never damage it a
+ * second time on top of this list.
+ */
+export function blastBuildHits<T extends BlastBuildTarget>(
+  team: 'red' | 'blue', impact: Position, radius: number, power: number, builds: Iterable<T>,
+): Array<{ build: T; damage: number }> {
+  const hits: Array<{ build: T; damage: number }> = [];
+  for (const build of builds) {
+    if (build.team === team) continue;
+    const distance = Math.hypot(
+      build.position.x - impact.x,
+      build.position.y + 0.6 - impact.y,
+      build.position.z - impact.z,
+    );
+    if (distance > radius) continue;
+    hits.push({ build, damage: Math.max(0, power * (1 - distance / radius)) });
+  }
+  return hits;
+}
