@@ -1537,10 +1537,13 @@ export class ServerGame {
     });
     this.broadcast({ type: 'playerUpdated', playerId: botId, state: bot.getState() });
 
-    // When the target is a build, shoot the build instead of sampling a player body.
-    if (targetId.startsWith('emplace-')) {
-      const emplacement = this.emplacements.get(targetId);
-      if (!emplacement || emplacement.team === bot.team) return;
+    // When the target is a build, shoot the build instead of sampling a player
+    // body. Ids come from `createEmplacement` (`emp_<n>`), so look the target
+    // up rather than guessing its prefix: a mismatched prefix silently turned
+    // every bot round aimed at a nest into a no-op.
+    const emplacement = this.emplacements.get(targetId);
+    if (emplacement) {
+      if (emplacement.team === bot.team) return;
       const aimPoint = { x: emplacement.position.x, y: emplacement.position.y + 0.8, z: emplacement.position.z };
       if (!this.hasLineOfSight(origin, aimPoint)) {
         const hit = this.world.raycast(origin, direction, 350);

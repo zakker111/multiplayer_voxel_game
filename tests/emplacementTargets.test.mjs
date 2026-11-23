@@ -402,6 +402,78 @@ test('a bot engages a manned enemy nest instead of ignoring it', () => {
   assert.equal(bot.stateName, 'ENGAGE', 'the bot entered ENGAGE to fight the nest');
 });
 
+test('a bot round damages an enemy build and never its own', () => {
+  // Regression: botShoot looked for an 'emplace-' id prefix while the server
+  // issues 'emp_<n>', so every bot round aimed at a build was silently dropped.
+  const game = new ServerGame();
+  const [spot] = findSpots(game, 1);
+  const { emplacement: nest } = build(game, 'blue', 'mgNest', spot);
+
+  const redId = game.addBot('red', 'Red-Shooter');
+  const redBot = game.players.get(redId);
+  const blueId = game.addBot('blue', 'Blue-Shooter');
+  const blueBot = game.players.get(blueId);
+  redBot.position = { x: spot.x, y: spot.y, z: spot.z + 6 };
+  blueBot.position = { x: spot.x, y: spot.y, z: spot.z + 5 };
+  redBot.equipment = 'rifle';
+  blueBot.equipment = 'rifle';
+
+  const ctx = game.getBotContext();
+  const target = ctx.targets.find((t) => t.id === nest.id);
+  assert.ok(target?.emplacement, 'the build is in the shared target list');
+
+  const shotFrom = (bot) => {
+    const origin = { x: bot.position.x, y: bot.position.y + 1.6, z: bot.position.z };
+    const point = { x: nest.position.x, y: nest.position.y + 0.8, z: nest.position.z };
+    const dx = point.x - origin.x, dy = point.y - origin.y, dz = point.z - origin.z;
+    const len = Math.hypot(dx, dy, dz);
+    return { x: dx / len, y: dy / len, z: dz / len };
+  };
+
+  const startingHp = nest.hp;
+  for (let i = 0; i < 3; i++) ctx.fireWeapon(redBot, target, shotFrom(redBot), 1.6);
+  assert.ok(nest.hp < startingHp, `a bot round damages the enemy nest (${startingHp} -> ${nest.hp})`);
+
+  const afterEnemyFire = nest.hp;
+  for (let i = 0; i < 3; i++) ctx.fireWeapon(blueBot, target, shotFrom(blueBot), 1.6);
+  assert.equal(nest.hp, afterEnemyFire, 'a bot never damages its own team\'s build');
+});
+
+test('a bot engaging a build holds a standoff instead of closing into it', () => {
+  const bot = new ServerBot('standoff', { x: 0, y: GROUND_LEVEL, z: 0 }, 'blue', 'Sapper');
+  bot.equipment = 'rifle';
+  bot.currentAmmo = 30;
+  bot.magazineSize = 30;
+  const nestPos = { x: 20, y: GROUND_LEVEL, z: 0 };
+  const ctx = {
+    world: new ServerWorld(),
+    serverTime: 0,
+    targets: [],
+    friendlyDroppedFlagPos: null,
+    canSee: () => true,
+    fireWeapon: () => {},
+    buildBlock: () => {},
+    blockedBy: (x, z) => Math.abs(x - nestPos.x) < 1.6 && Math.abs(z - nestPos.z) < 1.6,
+  };
+  const target = {
+    id: 'red-nest',
+    position: nestPos,
+    team: 'red',
+    isDead: false,
+    carryingFlag: false,
+    emplacement: { id: 'red-nest', kind: 'mgNest', manned: true },
+  };
+  let closest = Infinity;
+  for (let tick = 0; tick < 120; tick++) {
+    ctx.serverTime = tick * 0.05;
+    const dist = Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z);
+    bot.doEngage(target, dist, ctx, ctx.serverTime);
+    closest = Math.min(closest, Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z));
+  }
+  assert.ok(closest <= 13, `the bot closes in to fight the nest (closest ${closest.toFixed(1)}m)`);
+  assert.ok(closest >= 10.5, `but stops outside the muzzle (closest ${closest.toFixed(1)}m)`);
+});
+
 test('a bot routes around an emplacement instead of walking into it', () => {
   const world = new ServerWorld();
   const nestX = 10;

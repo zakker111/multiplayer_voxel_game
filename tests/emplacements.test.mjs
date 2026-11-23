@@ -241,6 +241,30 @@ test('the per-team limit stops the build after its allowance', () => {
   assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest', 'the refused build kept its blueprint');
 });
 
+test('a bot build pays the team once and a refusal costs nothing', () => {
+  const { game } = setup();
+  const bot = game.players.get(game.addBot('blue', 'Blue-Engineer'));
+  const ctx = game.getBotContext();
+  const spec = emplacementSpec('mgNest');
+  const spots = findSpots(game, spec.teamLimit + 1);
+  assert.ok(spots.length > spec.teamLimit, 'needs one more flat spot than the limit');
+  game.workshopStock.blue = 400;
+
+  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[0], 0), true, 'a bot build is accepted');
+  assert.equal(game.workshopStock.blue, 400 - spec.cost, 'the team paid exactly one build');
+
+  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[0], 0), false, 'the same pad is refused');
+  assert.equal(game.workshopStock.blue, 400 - spec.cost, 'a refused bot build costs nothing');
+
+  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[1], 0), true, 'a second pad is accepted');
+  assert.equal(game.emplacements.size, spec.teamLimit, 'bot builds obey the team limit');
+  assert.equal(game.workshopStock.blue, 400 - spec.cost * spec.teamLimit, 'one charge per accepted build');
+
+  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[spec.teamLimit], 0), false,
+    'a bot cannot exceed the team limit');
+  assert.equal(game.workshopStock.blue, 400 - spec.cost * spec.teamLimit, 'the limit refusal is free');
+});
+
 test('junk kinds and off-ground positions are ignored', () => {
   const { game, id } = setup();
   const [spot] = findSpots(game, 1);

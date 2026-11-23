@@ -107,10 +107,10 @@ These are starting choices for playtesting, not final balance numbers.
 - [x] Server-side placement: ground/clearance/bounds checks, enemy-base ring, per-team limits and cost charged only on success (`placeEmplacement`), with tests. The ghost preview and the server validity reply ship with it.
 - [x] Projectiles for cannon and mortar: server-stepped shells with travel time, collision against terrain, players and vehicles, and blast damage reusing `damageVoxel`.
 - [x] Manning: `F` on an emplacement with the same occupancy and safe-exit rules as a jeep seat.
-- [ ] Bot awareness: emplacements are obstacles for pathing and valid targets for `ENGAGE`; a manned nest must not be walked into.
+- [x] Bot awareness: emplacements are obstacles for pathing and valid targets for `ENGAGE`; a manned nest must not be walked into.
 - [x] Blueprint HUD and ghost meshes per kind, with the validity tint driven by the server reply.
 - [x] Round reset clears emplacements and refunds nothing, matching vehicles.
-- [ ] Automated coverage: placement validation (charged exactly once, rejected placements free), per-team limits, arc/ammo/range, round cleanup, and a `PHASE=emplacements` probe pass over the real protocol.
+- [x] Automated coverage: placement validation (charged exactly once, rejected placements free), per-team limits, arc/ammo/range, round cleanup, and a `PHASE=emplacements` probe pass over the real protocol.
 
 **Done when:** A player picks one of three blueprint slots, places each emplacement kind with the ghost, is charged exactly once, sees it survive, fire or supply as designed, watches it be destroyed, and finds it gone after a round reset — while a bot match still plays the objective and a nest or crate cannot camp a spawn.
 
@@ -160,4 +160,4 @@ Complete **Phase 4**: three blueprint slots, five emplacement kinds and the ghos
 ## Known issues (November 2026 verification)
 
 - **Bot-only matches can stall before the first flag pickup.** In a paired 20-seed sweep of full 30-minute 10v10 matches, 9 seeds produced zero captures and 2 seeds produced no pickups at all. The same pattern occurs on the pre-blueprint-AI baseline, so this is a break-through/balance problem, not a metric bug. Reproduce with `node scripts/beta-simulate.mjs 30 30 1 10 101`; fix before tuning vehicles against bot matches.
-- **Verification snapshot:** `npm run lint`, `npm run build`, `npm test` (247/247) and `npm run smoke` (against `dist/server.cjs`) all pass on `main`.
+- **Verification snapshot:** `npm run lint`, `npm run build`, `npm test` (251/251) and `npm run smoke` (against `dist/server.cjs`) all pass on `main`.

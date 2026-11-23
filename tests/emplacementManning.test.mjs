@@ -174,6 +174,28 @@ test('the nest fires server-side rounds, spends ammo and damages an enemy', () =
   assert.equal(nest.ammo, startAmmo - 1, 'the fire rate limits the next round');
 });
 
+test('a round never reaches past the gun range', () => {
+  const game = new ServerGame();
+  const frames = [];
+  const blue = join(game, 'blue', frames);
+  const [spot] = findSpots(game, 1);
+  const nest = nestAt(game, blue.id, blue.player, spot, 0);
+  blue.player.position = { ...nest.position };
+  mount(game, blue.id, nest);
+
+  const spec = emplacementSpec('mgNest');
+  const red = join(game, 'red');
+  red.player.position = { x: nest.position.x, y: nest.position.y, z: nest.position.z - (spec.maxRange + 25) };
+  game.spawnProtectedUntil.delete(red.id);
+  const startHp = red.player.hp;
+  const startAmmo = nest.ammo;
+
+  game.handleMessage(blue.id, { type: 'fireEmplacement' });
+
+  assert.equal(nest.ammo, startAmmo - 1, 'the round left the belt');
+  assert.equal(red.player.hp, startHp, 'a target past the gun range is never hit');
+});
+
 test('an empty belt refuses to fire', () => {
   const game = new ServerGame();
   const frames = [];

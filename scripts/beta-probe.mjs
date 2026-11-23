@@ -14,6 +14,15 @@
 // PHASE=structures: craft, place, man and fire a cannon, watch the shell reach
 //              another client, then wreck the gun with rifle fire. Needs a
 //              botless server with MOVE_VALIDATION=off (it teleports).
+// PHASE=emplacements: the Phase 4 build rules over the real protocol — a
+//              refused ghost, the charge landing once at the bench (not at
+//              placement), a refused second placement, the arc clamp, a fired
+//              round spending ammo and hitting an enemy, and the per-team limit.
+//              Needs a botless server with MOVE_VALIDATION=off (it teleports)
+//              and a freshly started server: round resets clear emplacements,
+//              so a dirty map fails the scan. Round cleanup itself is covered
+//              by tests/emplacements.test.mjs (a reset clears builds and
+//              carried blueprints without a refund).
 // PHASE=support: craft and place a supply crate, fill it with mined blocks and
 //              draw them back out. Needs a botless server with
 //              MOVE_VALIDATION=off (it teleports).
@@ -120,7 +129,7 @@ try {
     typeof A.token === 'string' && typeof A.playerId === 'string');
   const bots = init.players.filter((p) => p.id.startsWith('bot_'));
   // Phase 2 deliberately runs the server botless so jeeps/CTF are deterministic.
-  const botless = PHASE === 'all' || PHASE === 'structures' || PHASE === 'support';
+  const botless = PHASE === 'all' || PHASE === 'structures' || PHASE === 'support' || PHASE === 'emplacements';
   const expectedBots = botless ? 0 : 20;
   // Bots refill on a timer, so a server that recently had a human can be one
   // bot short of the target for a few seconds.
@@ -542,6 +551,227 @@ try {
       check('rifle fire damages and eventually wrecks an enemy emplacement', damaged || gone,
         gone ? 'destroyed' : damaged ? 'damaged but standing' : 'no damage seen');
       check('a wrecked cannon leaves the map', gone, gone ? '' : `hp ${startHp} -> ${R.last('emplacementsUpdated')?.emplacements?.find((e) => e.id === gun.id)?.hp}`);
+    }
+  }
+
+  // ---------- Phase 4 hardware rules over the wire ----------
+  if (PHASE === 'emplacements') {
+    const shop = init.workshops.blue.position;
+    const bench = { x: shop.x - 3, y: shop.y, z: shop.z + 5 };
+    const cost = (kind) => ({ mgNest: 70, supplyCrate: 20 }[kind]);
+    // Stock arrives through coalesced broadcasts, so keep one number and refresh
+    // it only after the action being checked. Reading whatever broadcast happened
+    // to arrive last reported a mining deposit as the craft charge.
+    let stock = init.workshops.blue.stock;
+    const syncStock = async (ms = 250) => {
+      await sleep(ms);
+      const m = A.last('workshopsUpdated');
+      if (m?.workshops?.blue) stock = m.workshops.blue.stock;
+      return stock;
+    };
+    const since = (mark, type) => A.messages.slice(mark).filter((m) => m.type === type);
+
+    // Fund the run: one nest (70) plus the three crates and a refused fourth
+    // (80) need 150 in the team stockpile, so mine and deposit first.
+    const seams = [];
+    for (const r of [8, 12, 16, 20, 24, 28]) {
+      for (const [ox, oz] of [[0, r], [r, 0], [0, -r], [-r, 0], [r, r], [-r, r], [r, -r], [-r, -r]]) seams.push([ox, oz]);
+    }
+    for (let seam = 0; seam < seams.length && stock < 150; seam++) {
+      const [ox, oz] = seams[seam];
+      await A.place({ x: shop.x + ox + 0.5, y: shop.y, z: shop.z + oz + 0.5 }, 'pickaxe');
+      await sleep(180);
+      for (const dy of [1, 2, 3, 4, 5, 6, 7, 8]) {
+        await A.send({
+          type: 'useTool', tool: 'pickaxe',
+          target: { x: Math.floor(shop.x + ox), y: Math.floor(shop.y) - dy, z: Math.floor(shop.z + oz) },
+        });
+        await sleep(480);
+      }
+      await A.place(shop, 'rifle');
+      await sleep(180);
+      await A.send({ type: 'depositWorkshop', team: 'blue' });
+      const upd = await A.waitFor('workshopsUpdated', 2000, (m) => m.workshops.blue.stock > stock);
+      if (upd) stock = upd.workshops.blue.stock;
+      await syncStock(120);
+    }
+    check('the workshop can fund the hardware probes', stock >= 150, `stock=${stock}`);
+
+    await A.place(bench);
+    await sleep(150);
+
+    /** Scan the mid-map band for pads the server accepts for `kind`. */
+    const findPads = async (kind, used, count = 1) => {
+      const found = [];
+      let scans = 0;
+      let reason = '';
+      for (let z = -36; z <= 36 && found.length < count; z += 4) {
+        for (let x = -68; x <= 68 && found.length < count; x += 4) {
+          if (Math.abs(x) < 16 || scans >= 400) continue;
+          if (used.some((u) => Math.hypot(u.x - x, u.z - z) < 6)) continue;
+          if (found.some((f) => Math.hypot(f.x - x, f.z - z) < 6)) continue;
+          scans++;
+          A.messages.length = 0;
+          await A.send({ type: 'previewEmplacement', kind, position: { x, y: shop.y, z }, yaw: 0, slot: 0 });
+          await sleep(105);
+          const verdict = A.last('emplacementPreview');
+          if (verdict?.ok) found.push(verdict.position);
+          else if (verdict) reason = verdict.reason ?? reason;
+        }
+      }
+      if (found.length < count) {
+        throw new Error(`only ${found.length}/${count} ${kind} pads after ${scans} previews (${reason || 'silent'})`);
+      }
+      return found;
+    };
+
+    const craft = async (kind) => {
+      A.messages.length = 0;
+      await A.send({ type: 'craftBlueprint', kind, slot: 0 });
+      return A.waitFor('blueprintsUpdated', 2000, (m) => m.blueprints?.[0] === kind);
+    };
+    const placeKind = async (kind, pad) => {
+      A.messages.length = 0;
+      await A.send({ type: 'placeEmplacement', kind, position: pad, yaw: 0, slot: 0 });
+      return A.waitFor('emplacementsUpdated', 2000,
+        (m) => (m.emplacements ?? []).some((e) => e.kind === kind && Math.hypot(e.position.x - pad.x, e.position.z - pad.z) < 0.6));
+    };
+
+    // A ghost over the enemy base is refused before anything is charged.
+    const stockBeforeGhost = await syncStock();
+    A.messages.length = 0;
+    await A.send({ type: 'previewEmplacement', kind: 'mgNest', position: { x: 0, y: shop.y, z: 160 }, yaw: 0, slot: 0 });
+    await sleep(150);
+    const ghost = A.last('emplacementPreview');
+    check('the ghost refuses the enemy base',
+      ghost?.ok === false && /enemy base/i.test(ghost?.reason ?? ''), `reason=${ghost?.reason}`);
+    check('a refused ghost charges nothing', (await syncStock(120)) === stockBeforeGhost, `stock=${stock}`);
+
+    // The bench is the only charge point: craft once, place for free.
+    const stockBeforeCraft = await syncStock();
+    const craftedNest = await craft('mgNest');
+    check('crafting a nest fills its blueprint slot', !!craftedNest,
+      craftedNest ? '' : A.last('emplacementMessage')?.message ?? `saw ${A.types()}`);
+    const stockAfterCraft = await syncStock();
+    check('the bench charges exactly the build cost once',
+      stockAfterCraft === stockBeforeCraft - cost('mgNest'), `${stockBeforeCraft} -> ${stockAfterCraft}`);
+
+    const pads = [];
+    const [nestPad, spareNestPad] = await findPads('mgNest', pads, 2);
+    pads.push(nestPad);
+    const placedNest = await placeKind('mgNest', nestPad);
+    const nest = placedNest?.emplacements?.find((e) => e.kind === 'mgNest') ?? null;
+    check('a crafted nest places on a pad the ghost approved', !!nest,
+      nest ? `at ${nest.position.x},${nest.position.z} hp=${nest.hp} ammo=${nest.ammo}` : 'no emplacementsUpdated');
+    check('placement does not charge the stockpile a second time',
+      (await syncStock(150)) === stockAfterCraft, `stock=${stock}`);
+
+    if (nest) {
+      // The slot is empty now, so a second, otherwise valid pad is refused.
+      const stockBeforeRepeat = await syncStock(120);
+      const mark = A.messages.length;
+      const nestsBefore = (A.last('emplacementsUpdated')?.emplacements ?? []).filter((e) => e.kind === 'mgNest').length;
+      await A.send({ type: 'placeEmplacement', kind: 'mgNest', position: spareNestPad, yaw: 0, slot: 0 });
+      await sleep(300);
+      const repeat = since(mark, 'emplacementMessage').pop();
+      check('placing without a blueprint is refused',
+        !!repeat && /blueprint/i.test(repeat.message), `reason=${repeat?.message}`);
+      check('the refused placement charges nothing', (await syncStock(120)) === stockBeforeRepeat, `stock=${stock}`);
+      const nestsAfter = (since(mark, 'emplacementsUpdated').pop()?.emplacements
+        ?? A.last('emplacementsUpdated')?.emplacements ?? []).filter((e) => e.kind === 'mgNest').length;
+      check('the refused placement builds nothing', nestsAfter === nestsBefore && nestsBefore === 1, `nests=${nestsAfter}`);
+
+      // Manning, the arc clamp, and a round that spends ammo and hurts an enemy.
+      await A.place({ x: nest.position.x + 1.5, y: nest.position.y, z: nest.position.z }, 'rifle');
+      await sleep(150);
+      A.messages.length = 0;
+      await A.send({ type: 'mountEmplacement', emplacementId: nest.id });
+      const mounted = await A.waitFor('emplacementMounted', 2000, (m) => m.emplacementId === nest.id);
+      check('the nest can be manned over the wire', !!mounted, mounted ? '' : `saw ${A.types()}`);
+
+      const R = new Client('R');
+      await R.connect();
+      const initR = await R.waitFor('init', 6000);
+      R.token = initR?.sessionToken;
+      R.playerId = initR?.playerId;
+      await R.send({ type: 'join', team: 'red', name: 'Probe_Target' });
+      await R.waitFor('joined', 4000);
+      // In front of the nest (yaw 0 faces -z), clear of spawn protection.
+      await R.place({ x: nest.position.x, y: nest.position.y, z: nest.position.z - 6 }, 'rifle');
+      await sleep(3500);
+
+      A.messages.length = 0;
+      await A.send({ type: 'playerInput', input: { moveX: 0, moveZ: 0, jump: false, crouch: false, sprint: false, yaw: Math.PI, pitch: 0 } });
+      await sleep(250);
+      const aimed = (A.last('emplacementsUpdated')?.emplacements ?? []).find((e) => e.id === nest.id);
+      check('the arc clamps the gun to its placement facing',
+        !!aimed && Math.abs(aimed.yaw) <= Math.PI / 2 + 1e-6 && Math.abs(aimed.yaw) > 1.4,
+        aimed ? `yaw=${aimed.yaw.toFixed(2)}` : 'no emplacementsUpdated');
+
+      // Aim back down the lane so the target is in front of the barrel.
+      await A.send({ type: 'playerInput', input: { moveX: 0, moveZ: 0, jump: false, crouch: false, sprint: false, yaw: 0, pitch: 0 } });
+      await sleep(150);
+      R.messages.length = 0;
+      A.messages.length = 0;
+      await A.send({ type: 'fireEmplacement' });
+      await sleep(400);
+      const firedNest = (A.last('emplacementsUpdated')?.emplacements ?? []).find((e) => e.id === nest.id);
+      check('firing spends one round from the belt',
+        !!firedNest && firedNest.ammo === nest.ammo - 1, `ammo=${firedNest?.ammo}`);
+      check('the round reaches the enemy in the lane',
+        A.messages.some((m) => m.type === 'hitConfirmed'), `saw ${A.types()}`);
+      R.close();
+      await A.send({ type: 'dismountEmplacement' });
+      await sleep(250);
+    }
+
+    // Per-team limit: three crates place, the fourth is refused and free.
+    const placedCrates = [];
+    for (let i = 0; i < 3; i++) {
+      await A.place(bench);
+      await sleep(120);
+      const crafted = await craft('supplyCrate');
+      if (!crafted) break;
+      const [pad] = await findPads('supplyCrate', pads, 1);
+      pads.push(pad);
+      const placed = await placeKind('supplyCrate', pad);
+      const crate = placed?.emplacements?.find((e) => e.kind === 'supplyCrate'
+        && Math.hypot(e.position.x - pad.x, e.position.z - pad.z) < 0.6);
+      if (!crate) break;
+      placedCrates.push(crate);
+      await syncStock(120);
+    }
+    check('the team can field its supply crates', placedCrates.length === 3, `${placedCrates.length}/3 placed`);
+
+    if (placedCrates.length === 3) {
+      await A.place(bench);
+      await sleep(120);
+      const fourth = await craft('supplyCrate');
+      check('a fourth crate can still be crafted', !!fourth);
+      // The limit refuses the ghost too, so scan for a pad whose only complaint
+      // is the limit: the spot checks run first, so this proves the ground is
+      // otherwise buildable and the limit is what stops it.
+      let pad = null;
+      for (let z = -32; z <= 32 && !pad; z += 6) {
+        for (let x = -64; x <= 64 && !pad; x += 6) {
+          if (Math.abs(x) < 16) continue;
+          A.messages.length = 0;
+          await A.send({ type: 'previewEmplacement', kind: 'supplyCrate', position: { x, y: shop.y, z }, yaw: 0, slot: 0 });
+          await sleep(105);
+          const verdict = A.last('emplacementPreview');
+          if (verdict?.ok === false && /team limit/i.test(verdict.reason ?? '')) pad = { x, y: shop.y, z };
+        }
+      }
+      check('the ghost reports the team limit on open ground', !!pad, pad ? '' : 'no limit refusal found');
+      if (!pad) throw new Error('no pad was refused for the team limit');
+      const stockBeforeRefusal = await syncStock(120);
+      const mark = A.messages.length;
+      await A.send({ type: 'placeEmplacement', kind: 'supplyCrate', position: pad, yaw: 0, slot: 0 });
+      await sleep(300);
+      const refusal = since(mark, 'emplacementMessage').pop();
+      check('the per-team limit refuses the fourth build',
+        !!refusal && /team limit/i.test(refusal.message), `reason=${refusal?.message}`);
+      check('the limit refusal costs nothing', (await syncStock(120)) === stockBeforeRefusal, `stock=${stock}`);
     }
   }
 

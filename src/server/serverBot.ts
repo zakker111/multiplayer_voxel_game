@@ -177,6 +177,9 @@ const PANIC_COVER_COOLDOWN = 3;
 // to rifle range and walls the pursuer off much earlier than before.
 const ESCORT_ENGAGE_RANGE = 75;
 const ESCORT_COVER_RANGE = 60;
+// A bot fighting a placed build holds this ring instead of closing on it, so it
+// never walks into a manned nest's footprint or its muzzle.
+const EMPLACEMENT_STANDOFF_RANGE = 12;
 
 // Difficulty knobs (env-overridable so Render can tune without code changes)
 const BOT_MAX_HP = Number(process.env.SERVER_BOT_HP ?? 130); // beefier than players (100)
@@ -799,9 +802,16 @@ export class ServerBot extends ServerPlayer {
     if (this.isReloading && dist < 26) {
       this.breakContact(enemy.position, step, ctx);
     } else if (enemy.emplacement) {
-      // Closing on a build: walk toward it (blockedBy keeps us out of its
-      // footprint) rather than strafing, which is tuned for moving targets.
-      this.moveTo(enemy.position, step, ctx, false);
+      // A build is a fixed target: close to a standoff ring and stop there.
+      // blockedBy already keeps bots out of the pad, but walking up to the
+      // footprint put them in the muzzle of a manned nest.
+      if (dist > EMPLACEMENT_STANDOFF_RANGE) {
+        this.moveTo(enemy.position, step, ctx, false);
+      } else {
+        this.velocity.x = 0;
+        this.velocity.z = 0;
+        this.snapToGround(ctx);
+      }
     } else {
       // Strafe while shooting — never walk straight into the barrel
       this.strafeAround(enemy.position, step, ctx, dist);
