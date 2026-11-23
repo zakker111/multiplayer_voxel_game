@@ -1782,6 +1782,13 @@ export class Game {
       return;
     }
 
+    // Slight terrain damage, mirroring the server: a round that reaches the
+    // ground chips the voxel it hit.
+    if (!best && terrainHit) {
+      const { x, y, z } = terrainHit.voxelPos;
+      this.world.damageVoxel(x, y, z, 1);
+    }
+
     const tracerDist = best ? best.distance : maxDist;
     this.createMuzzleFlash(muzzle, rayDir);
     this.createBulletTracer(muzzle, rayDir, tracerDist, 300);
@@ -1919,6 +1926,28 @@ export class Game {
       const distance = Math.hypot(jeep.position.x - impact.x, jeep.position.y + 1 - impact.y, jeep.position.z - impact.z);
       if (distance > radius) continue;
       this.damageLocalJeep(jeep, Math.max(power * 0.25, power * (1 - distance / radius)));
+    }
+    // Enemy builds inside the blast take the same falloff; the direct hit is
+    // only one of several structures a round can catch.
+    for (const emplacement of [...this.localEmplacements]) {
+      if (emplacement.team === team) continue;
+      const distance = Math.hypot(
+        emplacement.position.x - impact.x,
+        emplacement.position.y + 0.6 - impact.y,
+        emplacement.position.z - impact.z,
+      );
+      if (distance > radius) continue;
+      this.damageLocalEmplacement(emplacement.id, Math.max(power * 0.25, power * (1 - distance / radius)));
+    }
+    // Slight terrain damage: the same ten-cell crater the server carves, so an
+    // offline round dents the ground instead of only popping in the air.
+    const craterY = Math.round(impact.y);
+    for (const [dx, dy, dz] of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 0, 1], [-1, 0, -1], [1, 0, -1], [-1, 0, 1], [0, -1, 0]]) {
+      const x = Math.round(impact.x) + dx;
+      const y = craterY + dy;
+      const z = Math.round(impact.z) + dz;
+      if (!this.world.isSolid(x, y, z)) continue;
+      this.world.damageVoxel(x, y, z, 3);
     }
   }
 

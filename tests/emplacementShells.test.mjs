@@ -6,10 +6,11 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
+const { ServerBot } = require('../dist/tests/serverBot.cjs');
 const {
   emplacementSpec, EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE,
   MORTAR_BLAST_RADIUS, MANNED_EMPLACEMENTS, EMPLACEMENT_MG_SPREAD, emplacedShotDirection,
-  WEAPONS, vehicleSpec,
+  WEAPONS, vehicleSpec, VOXEL_STONE,
 } = require('../dist/tests/sharedTypes.cjs');
 const { shellArc, shellStopsAt, CANNON_SHELL_SPEED } = require('../dist/tests/ballistics.cjs');
 process.env.SERVER_BOT_COUNT = '0';
@@ -576,4 +577,83 @@ test('the cannon preview ring bursts on the jeep it draws the arc through', () =
   assert.ok(impact, 'the round came down');
   const miss = Math.hypot(impact.position.x - preview.impact.x, impact.position.z - preview.impact.z);
   assert.ok(miss < 0.05, `the live round burst ${miss.toFixed(3)}m from the preview ring`);
+});
+
+test('the mortar aim snaps to the ground under the mark, not the gun level', () => {
+  const game = new ServerGame();
+  const { gun } = manGun(game, 'mortar');
+  const tx = gun.position.x + 60;
+  const tz = gun.position.z;
+  const base = groundTop(game, tx, tz);
+  assert.ok(base !== null, 'the mark starts on solid ground');
+
+  // Raise a 3x3 pad six blocks tall on the mark: the round has to be solved
+  // for the raised surface, not for the gun's own height.
+  const baseVoxel = Math.floor(base);
+  for (let ox = -1; ox <= 1; ox++) {
+    for (let oz = -1; oz <= 1; oz++) {
+      for (let h = 1; h <= 6; h++) {
+        game.world.setVoxel(tx + ox, baseVoxel + h, tz + oz, VOXEL_STONE, 3);
+      }
+    }
+  }
+  const raised = game.world.getGroundHeight(tx, tz);
+  assert.ok(raised > base + 5, 'the mark now sits on the raised pad');
+
+  const solution = game.mortarAimPoint(gun, { x: tx, y: raised, z: tz });
+  assert.ok('point' in solution, 'the shot is solvable');
+  assert.equal(solution.point.y, raised, 'the aim uses the ground under the mark, not the gun height');
+});
+
+test('an MG nest chips the terrain it hits', () => {
+  const game = new ServerGame();
+  const { gun, gunner } = manGun(game, 'mgNest');
+  const yaw = gun.yaw;
+  const dir = { x: -Math.sin(yaw), z: -Math.cos(yaw) };
+  const fromX = gun.position.x + dir.x * 0.9;
+  const fromZ = gun.position.z + dir.z * 0.9;
+
+  // A three-wide, three-high block wall a couple of metres down the lane. A
+  // single round must break the block it strikes and tell clients about it.
+  const wallX = Math.round(fromX + dir.x * 2.5);
+  const wallZ = Math.round(fromZ + dir.z * 2.5);
+  const baseY = Math.floor(gun.position.y + 1);
+  const wall = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dy = 0; dy < 3; dy++) {
+        const x = wallX + dx, y = baseY + dy, z = wallZ + dz;
+        game.world.setVoxel(x, y, z, VOXEL_STONE, 1);
+        wall.push({ x, y, z });
+      }
+    }
+  }
+
+  gunner.frames.length = 0;
+  game.handleMessage(gunner.id, { type: 'fireEmplacement' });
+
+  const holes = wall.filter((voxel) => !game.world.isSolid(voxel.x, voxel.y, voxel.z));
+  assert.equal(holes.length, 1, 'one round removes exactly the block it hit');
+  assert.ok(
+    gunner.frames.some((f) => f.type === 'voxelChanged' && f.change.x === holes[0].x && f.change.y === holes[0].y && f.change.z === holes[0].z),
+    'clients are told the block broke',
+  );
+});
+
+test('a mortar shell damages bots caught in the blast', () => {
+  const game = new ServerGame();
+  const { gun, gunner } = manGun(game, 'mortar', 'blue');
+  const target = { x: gun.position.x + 60, y: 0, z: gun.position.z };
+  target.y = groundTop(game, target.x, target.z);
+
+  const bot = new ServerBot('blast-target', { ...target }, 'red', 'BlastBot');
+  bot.botUpdate = () => {}; // hold still so the shell lands on the mark
+  game.players.set(bot.id, bot);
+  game.spawnProtectedUntil.delete(bot.id);
+  const before = bot.hp;
+
+  game.handleMessage(gunner.id, { type: 'fireEmplacement', target });
+  run(game, 8);
+
+  assert.ok(bot.hp < before, `the blast hurt the bot (${before} -> ${bot.hp})`);
 });

@@ -665,6 +665,21 @@ export class ServerGame {
       // applyDamage already confirms the hit to the shooter.
       this.applyDamage(best.id, damage, playerId, best.headshot);
     }
+
+    // Slight terrain damage: a nest chips the voxel it actually hits, so a
+    // sustained burst can dig through a wall one round at a time. Rounds that
+    // stopped on a body, a vehicle or a build never reach the ground.
+    const blockerDistance = Math.min(
+      best ? best.distance : Infinity,
+      structureHit ? structureHit.distance : Infinity,
+      vehicleHit ? vehicleHit.distance : Infinity,
+    );
+    if (terrainHit && terrainHit.distance < blockerDistance) {
+      const { x, y, z } = terrainHit.voxelPos;
+      if (this.world.damageVoxel(x, y, z, 1)) {
+        this.broadcast({ type: 'voxelChanged', change: { x, y, z, type: VOXEL_AIR, durability: 0 } });
+      }
+    }
   }
 
   /**
@@ -705,7 +720,11 @@ export class ServerGame {
     const x = emplacement.position.x + dirX * capped;
     const z = emplacement.position.z + dirZ * capped;
     if (Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) return { reason: 'That is outside the map' };
-    const ground = surfaceGround(this.world, x, z, emplacement.position.y + 40) ?? emplacement.position.y;
+    // Snap to the ground actually under the marked point. Sampling a band high
+    // above the gun found nothing and fell back to the gun's own height, so on
+    // a slope the solved round crossed that level beyond the target and burst
+    // metres away from the landing ring the gunner aimed with.
+    const ground = this.world.getGroundHeight(x, z);
 
     // Face the shot: the model and every following round point at the fight.
     emplacement.yaw = Math.atan2(-dirX, -dirZ);
