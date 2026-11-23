@@ -13,6 +13,8 @@ export class NetworkClient {
   private onDisconnectCallback: (() => void) | null = null;
   /** Set once per lost session, so the game hears "disconnected" exactly once. */
   private disconnectNotified = false;
+  /** True after an intentional teardown: its socket events are not failures. */
+  private closedByUser = false;
   
   public localPeerId: string;
   public assignedPlayerId: string | null = null;
@@ -229,6 +231,7 @@ export class NetworkClient {
   }
 
   connect(): Promise<void> {
+    this.closedByUser = false;
     return new Promise((resolve) => {
       let settled = false;
 
@@ -311,6 +314,9 @@ export class NetworkClient {
         this.ws.onclose = () => {
           const hadSession = this.wsConnected;
           this.wsConnected = false;
+          // Leaving online play (or being kicked) closes this socket on purpose:
+          // it must not look like a dropped session or start a reconnect.
+          if (this.closedByUser) return;
           if (hadSession) this.notifyDisconnect();
           if (!this.sseConnected) {
             this.connectSSE(finishConnect);
@@ -318,6 +324,7 @@ export class NetworkClient {
         };
 
         this.ws.onerror = (error) => {
+          if (this.closedByUser) return;
           console.warn('WebSocket connection note (initiating fallback):', error);
           if (!this.wsConnected && !this.sseConnected) {
             this.connectSSE(finishConnect);
@@ -369,6 +376,7 @@ export class NetworkClient {
       // cuts long-lived streams that is an endless join/leave loop, so drop the
       // dead stream and go back to the WebSocket transport instead.
       this.sse.onerror = () => {
+        if (this.closedByUser) return;
         console.warn('SSE stream status update');
         if (!this.sse || this.sse.readyState !== EventSource.CLOSED) return;
         const hadSession = this.sseConnected;
@@ -515,6 +523,7 @@ export class NetworkClient {
   }
 
   disconnect(): void {
+    this.closedByUser = true;
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -528,10 +537,12 @@ export class NetworkClient {
       this.channel = null;
     }
     if (this.ws) {
+      this.ws.onclose = null;
       this.ws.close();
       this.ws = null;
     }
     if (this.sse) {
+      this.sse.onerror = null;
       this.sse.close();
       this.sse = null;
     }
