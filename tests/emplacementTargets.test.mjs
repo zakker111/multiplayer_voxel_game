@@ -283,6 +283,37 @@ test('a flag carrier never walls off its own run home', () => {
   assert.equal(columns, 1, 'cover behind the carrier still goes up');
 });
 
+test('a pacing bot keeps its detour side instead of mirroring into a deadlock', () => {
+  // Regression: when a wall ahead left only sideways steps, the probe loop
+  // picked one side and the next tick's fallback picked the other, cancelling
+  // out. A carrier in that state held the flag for 623s.
+  const world = new ServerWorld();
+  const ctx = {
+    world,
+    serverTime: 100,
+    targets: [],
+    friendlyDroppedFlagPos: null,
+    canSee: () => false,
+    fireWeapon: () => {},
+    buildBlock: () => {},
+    // A wall ahead that only extends west of x=3: going around it eastward
+    // opens the direct route, exactly like a crate beside the flag stand.
+    blockedBy: (x, z) => z > 0.5 && x < 3,
+  };
+  const bot = new ServerBot('pacing-test', { x: 0, y: GROUND_LEVEL, z: 0 }, 'blue', 'Pacer');
+  bot.detourDir = -1; // committed to +x (the side that gets around the wall)
+  bot.detourUntil = 100.8;
+
+  for (let tick = 0; tick < 80; tick++) {
+    ctx.serverTime += 1 / 20;
+    bot.lastStuckAt = ctx.serverTime; // the objective run is still making no headway
+    bot.moveTo({ x: 0, y: GROUND_LEVEL, z: 20 }, 1 / 20, ctx, false);
+    assert.ok(bot.position.x >= -0.1, 'never mirrors onto the uncommitted side');
+  }
+  assert.ok(bot.position.x > 3, 'the committed side actually gets around the wall');
+  assert.ok(bot.position.z > 2, 'and then makes progress toward the objective');
+});
+
 test('a bot treats an enemy nest as a visible target in the shared context', () => {
   const game = new ServerGame();
   const [spot] = findSpots(game, 1);
