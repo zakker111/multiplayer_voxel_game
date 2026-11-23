@@ -27,7 +27,7 @@ import {
   emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
   EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE, emplacedShotDirection,
-  CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
+  CANNON_BLAST_RADIUS, MORTAR_BLAST_RADIUS,
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
   type EmplacementSpec, type Footprint, type SpotContact,
   isWorkshopProtectedCell,
@@ -38,8 +38,9 @@ import {
 } from '../shared/types';
 import {
   CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc,
-  shellStopsAt, blastBuildHits, type ShellObstacle,
+  shellStopsAt, type ShellObstacle,
 } from '../shared/ballistics';
+import { SHELL_STEP, stepOfflineShells } from './localShells';
 
 /** How long a killfeed row stays on screen. */
 const KILLFEED_SECONDS = 8;
@@ -164,9 +165,6 @@ export interface ScoreboardData {
 }
 
 // Game Constants
-/** Fixed integration step for shells: the preview arc and the offline rounds
- *  share it, so a live round bursts where the marker was drawn. */
-const SHELL_STEP = 0.025;
 
 export type EquipmentType = 'rifle' | 'smg' | 'spade' | 'pickaxe';
 type Team = 'red' | 'blue';
@@ -1861,73 +1859,44 @@ export class Game {
     this.createMuzzleFlash(position, velocity.clone().normalize());
   }
 
-  /** Step the shells offline and burst them on ground, a body or a build. */
+  /** Step the offline shells; damage is resolved in one pass by the module. */
   private updateLocalShells(dt: number): void {
     if (this.localShells.length === 0) return;
-    // Fixed sub-steps, like the preview arc: stepping a live round by the frame
-    // `dt` (up to 0.05s) let a cannon shell jump 4.2m at a time and burst a
-    // step past the ring it was aimed with.
-    const steps = Math.max(1, Math.ceil(dt / SHELL_STEP));
-    for (let s = 0; s < steps; s++) this.stepLocalShells(dt / steps);
-  }
-
-  /** One fixed-size integration step for every offline round in the air. */
-  private stepLocalShells(dt: number): void {
-    for (let i = this.localShells.length - 1; i >= 0; i--) {
-      const shell = this.localShells[i];
-      shell.velocity.y -= EMPLACEMENT_SHELL_GRAVITY * dt;
-      shell.position.addScaledVector(shell.velocity, dt);
-      shell.mesh.position.copy(shell.position);
-
-      const ground = this.world.getGroundHeight(shell.position.x, shell.position.z);
-      // The same shared stop rule the preview ring and the server use, so an
-      // offline round bursts exactly where the marker promised.
-      const obstacles = this.shellObstacles();
-      const stopped = shellStopsAt(shell.position, shell.team, obstacles);
-      const stale = this.localTime - shell.firedAt > 8;
-      if (shell.position.y > ground && !stopped && !stale) continue;
-
-      const impact = shell.position.clone();
-      impact.y = Math.max(ground, impact.y);
-      // The blast is the only damage path: a build the round struck directly
-      // is the distance-0 entry in its build list, not an extra direct hit.
-      this.explodeLocalShell(shell.kind, shell.team, impact);
-      this.scene.remove(shell.mesh);
-      shell.mesh.geometry.dispose();
-      (shell.mesh.material as THREE.Material).dispose();
-      this.localShells.splice(i, 1);
+    stepOfflineShells(
+      this.localShells,
+      dt,
+      this.world,
+      this.shellObstacles(),
+      this.localTime,
+      { bots: this.bots, jeeps: this.localJeeps, builds: this.localEmplacements },
+      {
+        damageBot: (bot, damage) => this.damageLocalBot(bot, damage, false),
+        damageJeep: (jeep, damage) => this.damageLocalJeep(jeep, damage),
+        damageBuild: (build, damage) => this.damageLocalEmplacement(build.id, damage),
+        onExplode: (shell, impact, radius) => {
+          this.explodeLocalShell(impact, radius);
+          this.scene.remove(shell.mesh);
+          shell.mesh.geometry.dispose();
+          (shell.mesh.material as THREE.Material).dispose();
+        },
+      },
+    );
+    // The module owns flight physics, so carry each live round's mesh along
+    // with its position for this frame.
+    for (const shell of this.localShells) {
+      shell.mesh.position.set(shell.position.x, shell.position.y, shell.position.z);
     }
   }
 
-  /** Splash damage with the shared radii and power, strongest at the centre. */
-  private explodeLocalShell(kind: 'cannon' | 'mortar', team: Team, impact: THREE.Vector3): void {
-    const radius = kind === 'mortar' ? MORTAR_BLAST_RADIUS : CANNON_BLAST_RADIUS;
-    const power = kind === 'mortar' ? MORTAR_BLAST_DAMAGE : CANNON_BLAST_DAMAGE;
+  /** Blast visuals and the terrain crater. Damage was already resolved by
+   *  `stepOfflineShells`; this path must never damage a victim as well. */
+  private explodeLocalShell(impact: Position, radius: number): void {
     const material = new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.85, depthWrite: false });
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius * 0.6, 12, 8), material);
-    mesh.position.copy(impact);
+    mesh.position.set(impact.x, impact.y, impact.z);
     this.scene.add(mesh);
     this.shellBlasts.push({ mesh, material, until: performance.now() / 1000 + 0.35 });
     this.sounds.collapse();
-    for (const bot of this.bots) {
-      if (bot.isDead || bot.team === team) continue;
-      const distance = Math.hypot(bot.position.x - impact.x, bot.position.y + 1 - impact.y, bot.position.z - impact.z);
-      if (distance > radius) continue;
-      this.damageLocalBot(bot, Math.max(power * 0.25, power * (1 - distance / radius)), false);
-    }
-    // Workshop hardware burns too: a shell that lands next to a jeep wrecks it,
-    // exactly like the authoritative server's blast.
-    for (const jeep of this.localJeeps) {
-      if (jeep.wreck || jeep.team === team) continue;
-      const distance = Math.hypot(jeep.position.x - impact.x, jeep.position.y + 1 - impact.y, jeep.position.z - impact.z);
-      if (distance > radius) continue;
-      this.damageLocalJeep(jeep, Math.max(power * 0.25, power * (1 - distance / radius)));
-    }
-    // Enemy builds inside the blast take the falloff from the shared hit list;
-    // the build the round struck directly is simply the distance-0 entry.
-    for (const { build, damage } of blastBuildHits(team, impact, radius, power, this.localEmplacements)) {
-      this.damageLocalEmplacement(build.id, Math.max(power * 0.25, damage));
-    }
     // Slight terrain damage: the same ten-cell crater the server carves, so an
     // offline round dents the ground instead of only popping in the air.
     const craterY = Math.round(impact.y);

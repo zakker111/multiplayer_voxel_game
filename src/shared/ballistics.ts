@@ -5,7 +5,7 @@
 // aim is the round that lands — the mortar used to launch at a fixed 45° with a
 // fixed speed, which put every shot in the same ~90 m band no matter where the
 // gunner looked.
-import type { Footprint, Position } from './types';
+import { emplacementSpec, type Footprint, type Position } from './types';
 
 /** Muzzle speed of a cannon round. Flat and fast: direct fire. */
 export const CANNON_SHELL_SPEED = 85;
@@ -168,25 +168,49 @@ export interface BlastBuildTarget {
   id: string;
   team: 'red' | 'blue';
   position: Position;
+  /** Blueprint kind; needed to test whether the impact landed on this build. */
+  kind?: string;
+}
+
+/**
+ * The enemy build a burst landed on, if any. Its footprint is the circumscribed
+ * circle the projectile stops on, so the burst centre sits up to that radius
+ * from the build's centre; a direct hit still counts as distance zero.
+ */
+export function directBuildHit<T extends BlastBuildTarget & { kind: string }>(
+  team: 'red' | 'blue', point: Position, builds: Iterable<T>,
+): T | undefined {
+  for (const build of builds) {
+    if (build.team === team) continue;
+    const spec = emplacementSpec(build.kind);
+    if (!spec) continue;
+    if (shellHitsObstacle(point, team, { kind: 'footprint', team: build.team, position: build.position, footprint: spec })) {
+      return build;
+    }
+  }
+  return undefined;
 }
 
 /**
  * Enemy builds caught by one blast, each exactly once, with its linear falloff
  * damage (callers apply their own minimum). A build the round struck directly
- * is just the distance-0 entry: the projectile step must never damage it a
- * second time on top of this list.
+ * is the full-power entry — `directBuildId` — so the projectile step must never
+ * damage it a second time on top of this list.
  */
 export function blastBuildHits<T extends BlastBuildTarget>(
   team: 'red' | 'blue', impact: Position, radius: number, power: number, builds: Iterable<T>,
+  directBuildId?: string,
 ): Array<{ build: T; damage: number }> {
   const hits: Array<{ build: T; damage: number }> = [];
   for (const build of builds) {
     if (build.team === team) continue;
-    const distance = Math.hypot(
-      build.position.x - impact.x,
-      build.position.y + 0.6 - impact.y,
-      build.position.z - impact.z,
-    );
+    const distance = build.id === directBuildId
+      ? 0
+      : Math.hypot(
+        build.position.x - impact.x,
+        build.position.y + 0.6 - impact.y,
+        build.position.z - impact.z,
+      );
     if (distance > radius) continue;
     hits.push({ build, damage: Math.max(0, power * (1 - distance / radius)) });
   }
