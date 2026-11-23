@@ -1574,18 +1574,16 @@ export class ServerBot extends ServerPlayer {
       this.botState === 'DEFEND' ||
       this.botState === 'MAN_GUN' ||
       waitingAtStand;
-    // A bot can be walled in while holding one of those posts: a shell crater
-    // two blocks deep or a roof over its head blocks every step, so standing
-    // still is no longer by design. Treat an enclosed body as stuck so the
-    // recovery below can mine its way out.
-    if (stationaryByDesign && !this.isEnclosed(ctx)) {
-      this.stuckStrikes = 0;
-      if (moved > 0.6) this.recoveryAttempts = 0;
-      return;
-    }
     if (moved > 0.6) {
       this.stuckStrikes = 0;
-      if (moved > 0.6) this.recoveryAttempts = 0;
+      this.recoveryAttempts = 0;
+      return;
+    }
+    // Standing still is only by design while the bot could step away from the
+    // post. A shell crater two blocks deep or a roof over its head can block
+    // every step, so the recovery below should mine its way out.
+    if (stationaryByDesign && !this.isEnclosed(ctx)) {
+      this.stuckStrikes = 0;
       return;
     }
     this.lastStuckAt = t;
@@ -1594,20 +1592,19 @@ export class ServerBot extends ServerPlayer {
   }
 
   /**
-   * True when every step is blocked by the same two cells the movement probe
-   * checks (head and the cell above it). That is a pit or a roofed cell, not a
-   * firing position: normal trenches and nests always leave the firing side
-   * open. Testing both cells catches a roof over the bot's head even when the
-   * walls beside it are only waist high.
+   * True when no cardinal step is clear by the movement probe's own test. That
+   * is a pit or a roofed cell, not a firing position: a trench, nest or bunker
+   * keeps its wall a cell away and leaves the firing side open. Only voxels
+   * count, because digging back out is the only way recovery can open a step.
    */
   private isEnclosed(ctx: BotContext): boolean {
-    const x = Math.round(this.position.x);
-    const z = Math.round(this.position.z);
-    const low = Math.round(this.position.y + 0.8);
-    const high = Math.round(this.position.y + 1.6);
-    const blocked = (dx: number, dz: number) =>
-      ctx.world.isSolid(x + dx, low, z + dz) || ctx.world.isSolid(x + dx, high, z + dz);
-    return blocked(1, 0) && blocked(-1, 0) && blocked(0, 1) && blocked(0, -1);
+    const reach = 1.4; // the movement probe's look-ahead
+    return (
+      !this.stepClear(ctx, this.position.x + reach, this.position.z) &&
+      !this.stepClear(ctx, this.position.x - reach, this.position.z) &&
+      !this.stepClear(ctx, this.position.x, this.position.z + reach) &&
+      !this.stepClear(ctx, this.position.x, this.position.z - reach)
+    );
   }
 
   /**
@@ -1645,10 +1642,10 @@ export class ServerBot extends ServerPlayer {
       for (const [ahead, side] of probes) {
         const gx = Math.round(this.position.x + fwd.x * ahead - fwd.z * side);
         const gz = Math.round(this.position.z + fwd.z * ahead + fwd.x * side);
-        // Feet, torso/head and the block above the head: the movement probe
-        // wants two cells of headroom, so in a two-deep trench the wall's top
-        // block sits above the bot's head and was never mined. Without it the
-        // bot clears the bottom of the wall and still cannot step out.
+        // Head, above the head and the feet: the first two are the clearance
+        // cells `stepClear` checks on flat ground. Without the above-head cell a
+        // bot in a two-deep trench cleared the bottom of the wall and still
+        // could not step out.
         for (const y of [bodyY + 1, bodyY, bodyY - 1]) {
           if (ctx.world.isSolid(gx, y, gz)) {
             ctx.digBlock(this, { x: gx, y, z: gz });
@@ -1844,10 +1841,8 @@ export class ServerBot extends ServerPlayer {
     for (const [px, pz] of probes) {
       const tx = this.position.x + px * lookAhead;
       const tz = this.position.z + pz * lookAhead;
-      const ty = this.groundProbe(ctx, tx, tz);
       if (ctx.blockedBy?.(tx, tz)) continue; // structures are not steppable
-      if (!ctx.world.isSolid(Math.round(tx), Math.round(ty + 0.8), Math.round(tz)) &&
-          !ctx.world.isSolid(Math.round(tx), Math.round(ty + 1.6), Math.round(tz))) {
+      if (this.stepClear(ctx, tx, tz)) {
         // A pure sideways step is a detour, not progress. Commit to one side
         // for a moment: without the hold, the next tick's mirror probe wins,
         // the two steps cancel out and the bot paces in front of a crate or
@@ -2121,6 +2116,19 @@ export class ServerBot extends ServerPlayer {
 
   private groundProbe(ctx: BotContext, x: number, z: number): number {
     return ctx.world.getGroundHeightBelow(x, this.position.y, z);
+  }
+
+  /**
+   * The head cell and the cell above it are free: the movement probe's own
+   * clearance test, shared so enclosure detection and stuck recovery agree
+   * with the step the bot is trying to take.
+   */
+  private stepClear(ctx: BotContext, x: number, z: number): boolean {
+    const ground = this.groundProbe(ctx, x, z);
+    return (
+      !ctx.world.isSolid(Math.round(x), Math.round(ground + 0.8), Math.round(z)) &&
+      !ctx.world.isSolid(Math.round(x), Math.round(ground + 1.6), Math.round(z))
+    );
   }
 
   private hasNearbyEnemy(ctx: BotContext, range: number): boolean {

@@ -14,13 +14,14 @@ const types = require('../dist/tests/sharedTypes.cjs');
 const GROUND = 8; // flat mock terrain
 
 /** Context with a mocked, perfectly flat and empty world. */
-function mockCtx(overrides = {}) {
+function mockCtx({ world = {}, ...overrides } = {}) {
   return {
     world: {
       canBuild: () => true,
       getGroundHeight: () => GROUND,
+      getGroundHeightBelow: () => GROUND,
       isSolid: () => false,
-      ...(overrides.world || {}),
+      ...world,
     },
     serverTime: 0,
     targets: [],
@@ -159,6 +160,27 @@ test('an enclosed bot recovers even while holding a stationary state', () => {
   ctx.serverTime = 3;
   bot.checkProgress(ctx);
   assert.strictEqual(bot.recoveryAttempts, 1, 'an enclosed CAMP bot must still try to get out');
+});
+
+test('a normal firing post is not mistaken for an enclosure', () => {
+  // Stand one cell behind its own 3-high front wall: the most walled-in a
+  // normal post gets. The rear stays open, so this is cover, not a cage.
+  const bot = botAt(0, 1);
+  const walls = new Set(
+    bot.planStructure(mockCtx(), 'bunker-ports', { x: 0, z: 0 }, 1)
+      .map((c) => `${c.x},${c.y},${c.z}`),
+  );
+  const ctx = mockCtx({
+    world: { isSolid: (x, y, z) => walls.has(`${x},${y},${z}`) },
+  });
+  bot.botState = 'CAMP';
+  ctx.serverTime = 1;
+  bot.checkProgress(ctx);
+  ctx.serverTime = 2;
+  bot.checkProgress(ctx);
+  ctx.serverTime = 3;
+  bot.checkProgress(ctx);
+  assert.strictEqual(bot.recoveryAttempts, 0, 'a bot behind its own wall is allowed to hold still');
 });
 
 test('recovery is bounded and re-plans after repeated failures', () => {
