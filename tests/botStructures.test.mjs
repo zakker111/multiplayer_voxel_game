@@ -127,6 +127,40 @@ test('a stuck bot clears the block directly ahead', () => {
   assert.strictEqual(dug.z, -1, 'the block ahead is the target');
 });
 
+test('stuck recovery mines the block above the head (two-deep trench)', () => {
+  const bot = botAt(0, 0);
+  let dug = null;
+  const headroom = GROUND + 2;
+  const ctx = mockCtx({
+    // Only the cell above the bot's head is solid: the bottom of the wall was
+    // already cleared in an earlier attempt, but the top course still blocks
+    // the two-cell movement clearance in every direction.
+    world: { canBuild: () => true, getGroundHeight: () => GROUND, isSolid: (_x, y) => y === headroom },
+    digBlock: (_bot, pos) => { dug = pos; },
+  });
+  bot.forwardDir = () => ({ x: 0, y: 0, z: -1 });
+  bot.recoverFromStuck(ctx, 100);
+  assert.ok(dug, 'recovery should mine the headroom block instead of re-routing forever');
+  assert.strictEqual(dug.y, headroom, 'the block above the head is the target');
+  assert.strictEqual(dug.z, -1, 'and it is the one directly ahead');
+});
+
+test('an enclosed bot recovers even while holding a stationary state', () => {
+  const bot = botAt(5, 5);
+  const ctx = mockCtx({
+    // A roof directly above the head blocks every movement probe.
+    world: { canBuild: () => true, getGroundHeight: () => GROUND, isSolid: (_x, y) => y === GROUND + 2 },
+  });
+  bot.botState = 'CAMP';
+  ctx.serverTime = 1;
+  bot.checkProgress(ctx);
+  ctx.serverTime = 2;
+  bot.checkProgress(ctx);
+  ctx.serverTime = 3;
+  bot.checkProgress(ctx);
+  assert.strictEqual(bot.recoveryAttempts, 1, 'an enclosed CAMP bot must still try to get out');
+});
+
 test('recovery is bounded and re-plans after repeated failures', () => {
   const bot = botAt(0, 0);
   const ctx = mockCtx(); // no digging available, nothing solid

@@ -1574,7 +1574,16 @@ export class ServerBot extends ServerPlayer {
       this.botState === 'DEFEND' ||
       this.botState === 'MAN_GUN' ||
       waitingAtStand;
-    if (stationaryByDesign || moved > 0.6) {
+    // A bot can be walled in while holding one of those posts: a shell crater
+    // two blocks deep or a roof over its head blocks every step, so standing
+    // still is no longer by design. Treat an enclosed body as stuck so the
+    // recovery below can mine its way out.
+    if (stationaryByDesign && !this.isEnclosed(ctx)) {
+      this.stuckStrikes = 0;
+      if (moved > 0.6) this.recoveryAttempts = 0;
+      return;
+    }
+    if (moved > 0.6) {
       this.stuckStrikes = 0;
       if (moved > 0.6) this.recoveryAttempts = 0;
       return;
@@ -1582,6 +1591,23 @@ export class ServerBot extends ServerPlayer {
     this.lastStuckAt = t;
     this.stuckStrikes++;
     if (this.stuckStrikes >= 2) this.recoverFromStuck(ctx, t);
+  }
+
+  /**
+   * True when every step is blocked by the same two cells the movement probe
+   * checks (head and the cell above it). That is a pit or a roofed cell, not a
+   * firing position: normal trenches and nests always leave the firing side
+   * open. Testing both cells catches a roof over the bot's head even when the
+   * walls beside it are only waist high.
+   */
+  private isEnclosed(ctx: BotContext): boolean {
+    const x = Math.round(this.position.x);
+    const z = Math.round(this.position.z);
+    const low = Math.round(this.position.y + 0.8);
+    const high = Math.round(this.position.y + 1.6);
+    const blocked = (dx: number, dz: number) =>
+      ctx.world.isSolid(x + dx, low, z + dz) || ctx.world.isSolid(x + dx, high, z + dz);
+    return blocked(1, 0) && blocked(-1, 0) && blocked(0, 1) && blocked(0, -1);
   }
 
   /**
@@ -1619,7 +1645,11 @@ export class ServerBot extends ServerPlayer {
       for (const [ahead, side] of probes) {
         const gx = Math.round(this.position.x + fwd.x * ahead - fwd.z * side);
         const gz = Math.round(this.position.z + fwd.z * ahead + fwd.x * side);
-        for (const y of [bodyY, bodyY - 1]) {
+        // Feet, torso/head and the block above the head: the movement probe
+        // wants two cells of headroom, so in a two-deep trench the wall's top
+        // block sits above the bot's head and was never mined. Without it the
+        // bot clears the bottom of the wall and still cannot step out.
+        for (const y of [bodyY + 1, bodyY, bodyY - 1]) {
           if (ctx.world.isSolid(gx, y, gz)) {
             ctx.digBlock(this, { x: gx, y, z: gz });
             this.detourDir *= -1; // try the other side once the block is gone
