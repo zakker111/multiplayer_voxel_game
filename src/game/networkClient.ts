@@ -274,6 +274,7 @@ export class NetworkClient {
         // while looking "connected". Only fall back once the socket is really
         // unusable, and give the init frame time to arrive.
         const wsTimeout = setTimeout(() => {
+          if (this.closedByUser) return;
           if (this.wsConnected || this.sseConnected) return;
           // Still open: the 8s init timeout below is what decides a silent socket.
           if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
@@ -287,6 +288,7 @@ export class NetworkClient {
         let initTimeout: ReturnType<typeof setTimeout> | null = null;
         const failSilentSocket = (why: string) => {
           if (initTimeout) { clearTimeout(initTimeout); initTimeout = null; }
+          if (this.closedByUser) return;
           if (this.wsConnected || this.sseConnected) return;
           console.warn(`WebSocket ${why} — dropping it and retrying`);
           try { this.ws?.close(); } catch { /* ignore */ }
@@ -348,6 +350,9 @@ export class NetworkClient {
   }
 
   private connectSSE(onSuccess?: (type: 'sse') => void): void {
+    // A fallback timer from the previous connection can fire after the player
+    // left; it must not revive a session that was deliberately ended.
+    if (this.closedByUser) return;
     if (this.sse || this.sseConnected || typeof window === 'undefined') return;
 
     try {

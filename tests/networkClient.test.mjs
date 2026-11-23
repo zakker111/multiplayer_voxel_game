@@ -122,3 +122,64 @@ test('a dropped session notifies the game once, and a healthy one stays quiet', 
 
   client.disconnect();
 });
+
+/**
+ * Leaving online play (or being kicked) closes the socket on purpose. The old
+ * socket's queued close event and any fallback timer from that connection must
+ * stay inert: otherwise the game shows "Disconnected from server. Reconnecting..."
+ * and an SSE stream re-joins a session the player just ended.
+ */
+test('an intentional disconnect stays silent and never revives a session', () => {
+  const notices = [];
+  let fallbackStreams = 0;
+
+  class FakeWebSocket {
+    static OPEN = 1;
+    constructor(url) {
+      this.url = url;
+      this.readyState = FakeWebSocket.OPEN;
+      FakeWebSocket.instance = this;
+    }
+    close() { this.readyState = 3; }
+  }
+
+  class FakeEventSource {
+    constructor() {
+      fallbackStreams++;
+      FakeEventSource.instance = this;
+    }
+    close() {}
+  }
+
+  globalThis.window = {
+    location: { protocol: 'http:', host: 'localhost:3000' },
+    setTimeout,
+    clearTimeout,
+  };
+  globalThis.WebSocket = FakeWebSocket;
+  globalThis.EventSource = FakeEventSource;
+  globalThis.fetch = () => Promise.resolve({ ok: true });
+
+  const client = new NetworkClient('ws://127.0.0.1:9', 'blue', 'Tester');
+  client.onDisconnect(() => notices.push('disconnected'));
+  client.connect();
+
+  const socket = FakeWebSocket.instance;
+  assert.ok(socket, 'the WebSocket transport is opened first');
+  socket.onopen?.();
+  socket.onmessage({ data: JSON.stringify({ type: 'init', playerId: 'p1', sessionToken: 'tok-1' }) });
+  assert.equal(client.isConnected(), true);
+
+  // The player leaves while a close event is still queued for the old socket.
+  const queuedClose = socket.onclose;
+  client.disconnect();
+  assert.equal(client.isConnected(), false);
+
+  queuedClose();
+  assert.equal(notices.length, 0, 'leaving on purpose must not report a lost session');
+
+  // The 10s WebSocket timeout from that connection can still fire afterwards;
+  // it calls connectSSE, which must refuse to reopen an ended session.
+  client.connectSSE();
+  assert.equal(fallbackStreams, 0, 'an ended session must not reopen over SSE');
+});
