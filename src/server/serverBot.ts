@@ -1834,9 +1834,12 @@ export class ServerBot extends ServerPlayer {
     }
     if (!chosen) {
       // Fully blocked (wall / trench line). Pressing straight into it just pins
-      // the bot against the block, so slide along it and look for a gap.
+      // the bot against the block, so slide along it and look for a gap. The
+      // side is held for a beat even when the bot is not pacing: re-rolling
+      // every tick turns the slide into a jitter on the spot.
       if (now >= this.detourUntil) {
         this.detourDir = Math.random() < 0.5 ? -1 : 1;
+        this.detourUntil = now + 0.8;
       }
       chosen = [-nz * this.detourDir, nx * this.detourDir];
       chosenSide = this.detourDir;

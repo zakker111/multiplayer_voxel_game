@@ -314,6 +314,38 @@ test('a pacing bot keeps its detour side instead of mirroring into a deadlock', 
   assert.ok(bot.position.z > 2, 'and then makes progress toward the objective');
 });
 
+test('a fully blocked bot holds its slide side for a beat', () => {
+  // Regression: the fallback direction must be re-rolled every 0.8s, not every
+  // tick. Re-rolling each tick turns a slide along a wall into a jitter on the
+  // spot (it cost ~15 pickups on seeded matches when it slipped in).
+  const world = new ServerWorld();
+  const ctx = {
+    world,
+    serverTime: 100,
+    targets: [],
+    friendlyDroppedFlagPos: null,
+    canSee: () => false,
+    fireWeapon: () => {},
+    buildBlock: () => {},
+    blockedBy: () => true, // every probe is blocked -> pure fallback slide
+  };
+  const bot = new ServerBot('slide-test', { x: 0, y: GROUND_LEVEL, z: 0 }, 'blue', 'Slider');
+  const realRandom = Math.random;
+  let roll = 0;
+  Math.random = () => (roll++ % 2 === 0 ? 0.1 : 0.9); // alternate the side on every roll
+  const signs = [];
+  try {
+    for (let tick = 0; tick < 16; tick++) {
+      ctx.serverTime += 1 / 20;
+      bot.moveTo({ x: 0, y: GROUND_LEVEL, z: 20 }, 1 / 20, ctx, false);
+      signs.push(Math.sign(bot.velocity.x));
+    }
+  } finally {
+    Math.random = realRandom;
+  }
+  assert.equal(new Set(signs).size, 1, 'one side for the whole 0.8s window');
+});
+
 test('a bot treats an enemy nest as a visible target in the shared context', () => {
   const game = new ServerGame();
   const [spot] = findSpots(game, 1);
