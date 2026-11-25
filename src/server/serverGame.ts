@@ -170,7 +170,7 @@ export class ServerGame {
   // is decided by captures, then by flag touches, then by flag returns, then by
   // kills; only a round level on all four is a draw. Everything resets during a
   // short intermission and the next round starts. Rounds are long on purpose:
-  // the arena is 448m wide and a flag run crosses ~320m, so shorter rounds
+  // the arena is 512m wide and a flag run crosses ~280m, so shorter rounds
   // would mostly be travel.
   private roundSeconds: number = Math.max(
     60,

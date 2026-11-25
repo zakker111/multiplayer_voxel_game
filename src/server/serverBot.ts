@@ -486,7 +486,7 @@ export class ServerBot extends ServerPlayer {
         this.transition('RETREAT', t, RETREAT_MAX_SECONDS);
       }
     } else if (this.carryingFlag) {
-      // Long enough for a 320m run home; the old 10s window expired mid-run
+      // Long enough for a 280m run home; the old 10s window expired mid-run
       // and flipped the carrier back into GRABFLAG waypoint churn.
       if (this.botState !== 'RETURN') this.transition('RETURN', t, 60);
     } else if (
@@ -727,7 +727,7 @@ export class ServerBot extends ServerPlayer {
     }
 
     // Priority 2: grab the enemy flag when reasonably free. Radius scales
-    // with the map (flags are now 320m apart, so midfield is ~160m out;
+    // with the map (flags are 280m apart, so midfield is ~140m out;
     // was a fixed 120 which made bots ignore the objective on the big map).
     const GRABFLAG_RADIUS = WORLD_SIZE / 2;
     if (distToEnemyFlag < GRABFLAG_RADIUS && Math.random() < 0.55) {
@@ -985,7 +985,7 @@ export class ServerBot extends ServerPlayer {
       // is a free kill for the chaser behind it. Feet keep moving either way.
       if (dist < 45) this.aimAndShoot(enemy, ctx, t);
       // Wall off the chaser early and often. One wall per 3s screened only the
-      // first few metres of a 320m run; at 1.6s the screen keeps pace with the
+      // first few metres of a 280m run; at 1.6s the screen keeps pace with the
       // carrier, and the pickup zone is exactly where the chase starts.
       if (dist < 120) this.buildPanicCover(enemy.position, ctx, t, CARRIER_SCREEN_COOLDOWN, 2);
     }

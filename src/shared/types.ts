@@ -222,7 +222,7 @@ export interface GameState {
 // Constants (shared between client and server)
 // NOTE: single source of truth for map size. The client voxel world
 // (src/game/world.ts) imports this value — do not re-declare it there.
-export const WORLD_SIZE = 448; // 28 chunks of CHUNK_SIZE(16); keeps half=224 aligned to chunk grid
+export const WORLD_SIZE = 512; // 32 chunks of CHUNK_SIZE(16); keeps half=256 aligned to chunk grid
 export const CHUNK_SIZE = 16;
 
 /** Half-extent of the playable map. Derived from WORLD_SIZE so that resizing
@@ -456,9 +456,9 @@ export function isWorkshopProtectedCell(x: number, z: number): boolean {
   );
 }
 
-/** Round length in minutes. Both teams are already 320m apart at the start of a
- *  round and a flag run crosses the whole arena, so rounds are long by design;
- *  override with ROUND_MINUTES (the round clock is never shorter than 30 min). */
+/** Round length in minutes. The flag stands are already 280m apart and the spawn
+ *  bands sit behind them, so a round is mostly long runs; override with
+ *  ROUND_MINUTES (the round clock is never shorter than 30 min). */
 export const DEFAULT_ROUND_MINUTES = 30;
 
 /** Pause between rounds: flags return to their stands, everyone respawns. */
@@ -631,17 +631,20 @@ export const TOOLS = {
   spade: { damage: 3, cooldown: 0.3, harvests: false, affectsMultiple: true },
 };
 
-// Flag bases moved deeper into the halves (-160 / +160) so the two bases are
-// 320m apart on the enlarged map.
-export const BLUE_FLAG_POS = { x: 0, z: -160 };
-export const RED_FLAG_POS = { x: 0, z: 160 };
+// Flag stands sit toward midfield (±140, 280m apart). They used to be within 32m
+// of the spawn band, so a defender was back on the flag seconds after dying and
+// no steal survived; the nearest spawn is now 70m away (tests/spawnBounds.test.mjs
+// enforces ≥60m).
+export const BLUE_FLAG_POS = { x: 0, z: -140 };
+export const RED_FLAG_POS = { x: 0, z: 140 };
 
 // Spawns are placed behind the base flag and spread in x so teams do not all
 // start in one lane. The band is far enough back that a team still has to cross
-// most of the map to reach the enemy flag. If the map is enlarged later, keep
-// spawns well inside the playable half and recheck spawnBounds.test.mjs.
-export const BLUE_SPAWN_Z_MIN = -222;
-export const BLUE_SPAWN_Z_MAX = -192;
-export const RED_SPAWN_Z_MIN = 192;
-export const RED_SPAWN_Z_MAX = 222;
+// most of the map to reach the enemy flag, and far enough from its own stand
+// that dying on defence costs a real run back. If the map is enlarged later,
+// keep spawns well inside the playable half and recheck spawnBounds.test.mjs.
+export const BLUE_SPAWN_Z_MIN = -240;
+export const BLUE_SPAWN_Z_MAX = -210;
+export const RED_SPAWN_Z_MIN = 210;
+export const RED_SPAWN_Z_MAX = 240;
 export const SPAWN_X_RANGE = 120;

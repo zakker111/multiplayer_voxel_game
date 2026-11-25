@@ -57,7 +57,7 @@ async function main() {
     || a.frames.some((f) => f.type === 'playerUpdated'));
 
   // Movement is observed from the other client: the server never echoes a
-  // player's own movement back to them. Spawn x is random within ±32, so the
+  // player's own movement back to them. Spawn x is random within ±120 (SPAWN_X_RANGE), so the
   // step must be small enough for the movement budget: the old fixed target
   // (0, -210) was a cross-map teleport that validation rightly refused.
   // Joining respawns the player at a fresh random spawn, so the init position

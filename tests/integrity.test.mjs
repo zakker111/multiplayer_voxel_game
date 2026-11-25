@@ -9,6 +9,7 @@ import assert from 'node:assert';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
+const { BLUE_FLAG_POS, RED_FLAG_POS } = require('../dist/tests/sharedTypes.cjs');
 
 /** Connection stub that records every frame the server sends to it. */
 function recordingConn(frames = []) {
@@ -27,7 +28,7 @@ function playerOnEnemyStand() {
   const id = game.addPlayer(conn(), '127.0.0.1');
   const player = game.players.get(id);
   player.team = 'blue';
-  player.position = { x: 0, y: 0, z: 160 }; // RED_FLAG_POS
+  player.position = { x: 0, y: 0, z: RED_FLAG_POS.z };
   return { game, id, player };
 }
 
@@ -112,7 +113,7 @@ test('a shot from a spoofed origin does not cost ammo', () => {
 
 test('a base pickup does not also consume a dropped flag', () => {
   const { game, id, player } = playerOnEnemyStand();
-  game.droppedFlags.push({ position: { x: 0, y: 0, z: 160 }, team: 'red', respawnTimer: 60 });
+  game.droppedFlags.push({ position: { x: 0, y: 0, z: RED_FLAG_POS.z }, team: 'red', respawnTimer: 60 });
 
   game.handleMessage(id, { type: 'pickupFlag' });
 
@@ -126,7 +127,7 @@ test('an automatic capture credits the scoreboard tally', () => {
   player.carryingFlag = true;
   game.redFlagCarrier = id;
   game.redFlagAtBase = false;
-  player.position = { x: 0, y: 0, z: -160 }; // home base
+  player.position = { x: 0, y: 0, z: BLUE_FLAG_POS.z }; // home base
 
   game.update(0.05);
 
@@ -140,7 +141,7 @@ test('the client-driven capture path scores identically to the automatic one', (
   player.carryingFlag = true;
   game.redFlagCarrier = id;
   game.redFlagAtBase = false;
-  player.position = { x: 0, y: 0, z: -160 };
+  player.position = { x: 0, y: 0, z: BLUE_FLAG_POS.z };
 
   game.handleMessage(id, { type: 'captureFlag', team: 'blue' });
 

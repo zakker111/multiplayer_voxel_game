@@ -414,7 +414,7 @@ export class Player {
     }
 
     // Safety: if player falls into void, eliminate them so they respawn properly at base.
-    // The bounds come from the shared world size — spawn zones sit at |z| 200..220,
+    // The bounds come from the shared world size — spawn zones sit at |z| 210..240,
     // so any smaller hardcoded extent makes every freshly spawned player "fall out
     // of the world" and get eliminated on the first frame ("spawns eliminated").
     if (isOutOfWorld(newPos)) {

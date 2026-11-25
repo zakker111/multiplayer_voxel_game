@@ -436,7 +436,7 @@ function App() {
                     </span>
                     {modalTeam === 'blue' && <Check className="w-4 h-4 text-blue-400" />}
                   </div>
-                  <p className="text-xs text-gray-300">Base at North (-95m). Capture South flag.</p>
+                  <p className="text-xs text-gray-300">Base at North (-140m). Capture South flag.</p>
                 </button>
 
                 <button
@@ -454,7 +454,7 @@ function App() {
                     </span>
                     {modalTeam === 'red' && <Check className="w-4 h-4 text-red-400" />}
                   </div>
-                  <p className="text-xs text-gray-300">Base at South (+95m). Capture North flag.</p>
+                  <p className="text-xs text-gray-300">Base at South (+140m). Capture North flag.</p>
                 </button>
               </div>
             </div>

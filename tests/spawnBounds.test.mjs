@@ -3,7 +3,7 @@
 // Every team spawn must be INSIDE the "fell out of the world" bounds, otherwise
 // the client eliminates a player on the very first frame after spawning
 // ("player spawns eliminated"). The bound used to be a hardcoded 124 while the
-// map is 448 wide and spawns sit at |z| 200..220.
+// map is 512 wide and spawns sit at |z| 210..240.
 import { test } from 'node:test';
 import assert from 'node:assert';
 import { createRequire } from 'node:module';
@@ -49,6 +49,18 @@ test('every possible spawn point is inside the world (not void-killed at spawn)'
         );
       }
     }
+  }
+});
+
+test('spawn zones leave a real run back to the flag stand', () => {
+  // At 32m a defender respawned onto their own flag; this keeps the run back.
+  const MIN_GAP = 60;
+  for (const [label, ownFlag, zMin, zMax] of [
+    ['blue', BLUE_FLAG_POS, BLUE_SPAWN_Z_MIN, BLUE_SPAWN_Z_MAX],
+    ['red', RED_FLAG_POS, RED_SPAWN_Z_MIN, RED_SPAWN_Z_MAX],
+  ]) {
+    const gap = Math.min(Math.abs(ownFlag.z - zMin), Math.abs(ownFlag.z - zMax));
+    assert.ok(gap >= MIN_GAP, `${label} spawns are only ${gap}m from their own flag stand`);
   }
 });
 

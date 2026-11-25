@@ -73,7 +73,7 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
    - Server synchronizes players, positions, equipment, flag states, voxel modifications, and match scores at 20Hz. Teams are kept at 10v10 by retiring a bot when a human joins that team and backfilling a bot when a human leaves/is kicked/disconnects.
    - Legacy client-side bots are DISABLED in online mode (server owns all bots) to prevent duplicates.
 2. **🤖 Bot Match (`'multiplayer'` client mode)**:
-   - Offline local simulation with client-side tactical AI bots on Red and Blue teams across the 448m arena (only used when NOT connected to a server).
+   - Offline local simulation with client-side tactical AI bots on Red and Blue teams across the 512m arena (only used when NOT connected to a server).
    - Player can play as either team or enter Spectator mode (`P`).
 3. **🧪 Free Sandbox (`'singleplayer'` client mode)**:
    - No bots or enemies; used for free building, terrain destruction testing, and weapon mechanics.
@@ -122,16 +122,19 @@ Because browser iframe sandboxes often restrict the HTML5 Pointer Lock API:
 ## 5. Arena Sizing, Spawns & Anti-Clipping System
 
 ### Arena Dimensions & Spawn Positioning
-- **World Dimensions**: Arena size `WORLD_SIZE = 448` meters (`-224` to `+224` along X and Z; chunk-aligned at 28x28 chunks of 16m).
+- **World Dimensions**: Arena size `WORLD_SIZE = 512` meters (`-256` to `+256` along X and Z; chunk-aligned at 32x32 chunks of 16m).
 - **Flag Positions** (`BLUE_FLAG_POS` / `RED_FLAG_POS` in `src/shared/types.ts`):
-  - Blue Flag: `(0, y, -160)`
-  - Red Flag: `(0, y, +160)` — 320m apart, so a flag run crosses the whole arena
+  - Blue Flag: `(0, y, -140)`
+  - Red Flag: `(0, y, +140)` — 280m apart, so a flag run covers most of the 512m arena
 - **Spawn Zones**: Positioned deep behind home flags to ensure safe rallies and tactical progression:
-  - Blue Team Spawn: `Z = -220` to `-200`, `X = ±32`
-  - Red Team Spawn: `Z = +200` to `+220`, `X = ±32`
+  - Blue Team Spawn: `Z = -240` to `-210`, `X = ±120`
+  - Red Team Spawn: `Z = +210` to `+240`, `X = ±120`
+  - The nearest spawn is 70-100m behind the stand on purpose: at 32m defenders
+    respawned onto their own flag and attackers never held it.
+    `tests/spawnBounds.test.mjs` enforces ≥60m.
 - **Out-of-world check**: `isOutOfWorld()` / `VOID_KILL_Y` are derived from `WORLD_SIZE`
   (`WORLD_HALF`); never hardcode a map bound — a stale `124` was what made spawns
-  self-eliminate on the 448m map.
+  self-eliminate on the 512m map.
 - **Guaranteed Solid Ground & Headroom**:
   - Spawning checks up to 25 candidate spots using `world.getGroundHeight(x, z)` to position entity feet exactly on the surface (`pos.y = groundY`).
   - Headspace clearance is verified at `y + 0.8` and `y + 1.6` meters to prevent entities from ever spawning embedded inside blocks.
@@ -285,9 +288,12 @@ rate-limited to one action per 2.5s and capped at four attempts:
   (20 bots, 296 deaths). The latest 30-minute run produced **1 capture, 12
   pickups, 450 deaths, 585 blocks and 17 completed structures** (5 trench,
   10 L-trench, 2 bunker, 0 firing-port) with **84 recoveries**; starts matched
-  completions exactly. Recent 30-minute runs produce 0–12 captures and 12–63
-  pickups with roughly 450–560 deaths; construction runs at 519–1422 blocks
-  and 6–18 completed structures, with all four kinds appearing across runs.
+  completions exactly. The 512m layout (stands ±140, spawns ±210–240) moved the
+  objective: two 30-minute runs produced **17 and 33 captures** with 38 and 88
+  pickups, 381–411 deaths, 1428–3284 blocks and 6–18 completed structures of all
+  four kinds, against 0–12 captures and 12–63 pickups on the old 448m layout
+  where the stands sat 32m in front of the spawns. Two samples per layout only —
+  treat the direction as measured, the exact numbers as noisy.
   Use that script when touching movement, roles, structures or flag logic — it
   is the only way to notice that the objective or construction silently stopped
   being exercised. `ServerBot` exposes `blocksPlaced`, `structuresStarted` and
@@ -296,7 +302,7 @@ rate-limited to one action per 2.5s and capped at four attempts:
   `structuresStarted`, so back-to-back plans are not collapsed into one.
 
 ### Rounds (`serverGame.ts`)
-- A round is a fixed-length window of CTF: `ROUND_MINUTES` (default 30) → `roundSeconds`. Rounds are long on purpose (448m arena, ~320m flag runs).
+- A round is a fixed-length window of CTF: `ROUND_MINUTES` (default 30) → `roundSeconds`. Rounds are long on purpose (512m arena, ~280m flag runs).
 - `updateRound(dt)` runs from the game loop: live → clock down → `endRound()` (more captures wins, equal is a draw) → 20s intermission → `startNextRound()` (captures reset, flags home, everyone respawns at their own spawn).
 - Scoring is frozen outside a live round: `handleFlagPickup()` and `handleFlagCapture()` early-return, and `update()` skips `checkFlagCaptures()`. The world keeps simulating so the battle stays alive through the intermission.
 - `getRoundSnapshot()` is the single source for the HUD (`init` + `roundUpdate`) and `/api/status`.
@@ -407,7 +413,7 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 260 regression tests (voxel rules, bots, rounds,
+npm test            # node --test tests/ — 263 regression tests (voxel rules, bots, rounds,
                     # workshop/jeep/logistics, spawn shield/regen, feedback, integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):
