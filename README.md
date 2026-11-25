@@ -49,6 +49,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 | **Dismantle / scuttle** | `X` | Online & Beta: tears down a friendly emplacement (crewing it is no obstacle — the gunner steps out) or scuttles a friendly jeep in reach (the crew steps out); the cost (plus any crate contents) returns to the workshop |
 | **Enter / exit jeep** | `F` | Team jeep only, either seat (online & Beta); exit requires clear space |
 | **Drive / brake** | `WASD` / `Space` | Accelerate, reverse, steer / brake while driving |
+| **Gunner zoom** | `Right Click` | While manning a cannon or mortar: toggles a tighter zoom on the target |
 | **Jump** | `Space` | Jump over obstacles and climb terrain |
 | **Sprint** | `Shift` | High-speed dash |
 | **Crouch** | `C` or `Ctrl` | Lowers profile, tightens spread, speeds up footsteps interval |
@@ -72,7 +73,7 @@ npm run dev
 
 # Full verification pipeline (used by CI)
 npm run lint      # tsc --noEmit
-npm test          # node --test tests/  (260 regression tests)
+npm test          # node --test tests/  (263 regression tests)
 npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)

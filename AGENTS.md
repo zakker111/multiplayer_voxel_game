@@ -199,6 +199,15 @@ Every armed build is crew-able: cannon and mortar shells go through the same
 seat/aim/fire path a human uses, so bots gun them. `ServerBot.emplacedByKind`
 records what each engineer actually placed (diagnostics only).
 
+A manned cannon or mortar gets a gunner zoom (right-click, FOV 40), and the
+mortar HUD prints the aimed landing point (X / Z / range). Mortar rounds are
+area fire: `mortarImpactPoint()` (`src/shared/ballistics.ts`) scatters the aimed
+point inside `MORTAR_DISPERSION` (2.5m), clamps it back into the range band and
+snaps it to the ground, so consecutive rounds at one aim point do not crater the
+same tile. The blast ring is the target; the round lands inside it. The server
+and offline Beta both call that helper. The hand weapon is hidden while manning
+any build, and a jeep draws team-coloured crew figures in both seats.
+
 Bot jeeps take their own flank lane (`BotJeepTask.lane`, stable from the bot id)
 to a staging point ~115m short of the enemy stand and only then run in, instead
 of driving the garage-to-stand straight line across midfield. The arrival radius
