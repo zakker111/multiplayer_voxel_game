@@ -5,7 +5,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 ![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
-![Tests](https://img.shields.io/badge/tests-251%2F251%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-260%2F260%20passing-brightgreen.svg)
 
 ---
 
@@ -19,6 +19,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 - **⚖️ Always 10v10**: The server runs a full 10-vs-10 bot battle by default. When a human joins, one bot is retired from *that human's team*; when a human leaves/disconnects/is kicked, a replacement bot respawns on the same team. Matches never go short-sided.
 - **🤖 Vicious FSM Bots**: 20 server-side AI bots (130 HP each, tunable via env) driven by a finite-state machine: `ENGAGE`, `FLANK`, `CAMP`, `ADVANCE`, `GRABFLAG`, `RETURN`, `ESCORT`, `DEFEND`, `BUILD`, `TRENCH`, `RETREAT`. They revenge-target killers, prioritize enemy flag carriers, escort their own runner, hold defensive posts, shoot with line-of-sight checks, aim error, distance falloff and a short target-acquisition reaction delay, harvest blocks, kite and drop panic cover, and build trenches, L-trenches, bunkers or firing-port bunkers. Each team starts with two dedicated firebase engineers: assault engineers dig one forward firebase 40–95m short of the stand, while support engineers build a main position plus a 10m side annex; non-engineers keep fighting.
 - **🧱 Destructible & Buildable Voxel World**: Procedural terrain; gunfire blasts voxels (3 hits), spade digs trenches, pickaxe harvests blocks into inventory. Building supports stacking, bridging, and tower play — placement validated by a unified client/server `canBuild()` flood-fill (structural support + adjacency), so what you see is what the server accepts.
+- **🛠️ Dismantle Your Own Builds (online)**: Press **X** next to a friendly emplacement to tear it down; its blueprint cost — and anything a supply crate held — goes back to the workshop stock, so a misplaced nest is no longer permanent. A crewed build comes down too: its gunner (bot or player) steps out through the same safe exit a wrecked build uses. The same key scuttles a friendly jeep in reach: its cost returns to the stock and its crew steps out, so a vehicle wedged in a doorway is not 40 blocks of dead weight for the round. Built voxel blocks already come back when the pickaxe breaks them.
 - **🏭 Team Workshops (online)**: Each team has a protected garage east of its base and a shared stockpile (starts at 50, capacity 200). Mine natural terrain with the pickaxe and press **E** near your workshop to deposit. Mined blocks can also be used for building; free respawn blocks and recovered built blocks cannot be deposited. Carried mined blocks are lost on respawn, and stockpiles reset each round. Jeeps are available for 40 team blocks.
 - **🚙 Blocky Jeeps (online)**: Press G near your team workshop to build a two-seat jeep for 40 team blocks (maximum two active per team). Press F to board an empty jeep as driver or a driven one as passenger; WASD drives and Space brakes. Vehicles are server-controlled, absorb enemy shots and leave a temporary wreck when destroyed. Flag carriers cannot ride, and drivers cannot pick up flags or fire. Leaving the driver's seat or losing the jeep also puts the passenger safely on the ground. Assault bots can build and drive jeeps toward objectives using the vehicle's real rectangular footprint; one bot per team drives while engineers and defenders stay on foot, and line bots hop into a free passenger seat when a driven team jeep comes within reach.
 - **🧪 Beta Development Mode**: A menu option (`?mode=beta`) that runs the **full authoritative online code path** — workshops, jeeps and workshop logistics bots included — while online CTF stays the main game. Use it to playtest new server-side features before they land for everyone; the HUD shows a Beta badge.
@@ -44,6 +45,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 | **Reload** | `R` | Reloads magazine with animation |
 | **Workshop deposit** | `E` | In online & Beta play, deposit mined blocks while near your team's garage |
 | **Build jeep** | `G` | At your online/Beta workshop; costs 40 team blocks |
+| **Dismantle / scuttle** | `X` | Online & Beta: tears down a friendly emplacement (crewing it is no obstacle — the gunner steps out) or scuttles a friendly jeep in reach (the crew steps out); the cost (plus any crate contents) returns to the workshop |
 | **Enter / exit jeep** | `F` | Team jeep only, either seat (online & Beta); exit requires clear space |
 | **Drive / brake** | `WASD` / `Space` | Accelerate, reverse, steer / brake while driving |
 | **Jump** | `Space` | Jump over obstacles and climb terrain |
@@ -69,7 +71,7 @@ npm run dev
 
 # Full verification pipeline (used by CI)
 npm run lint      # tsc --noEmit
-npm test          # node --test tests/  (251 regression tests)
+npm test          # node --test tests/  (260 regression tests)
 npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)
@@ -131,7 +133,7 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
 
 ## 🧪 Testing & Playtesting
 
-- **Automated**: `npm test` runs 251 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
+- **Automated**: `npm test` runs 260 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
 - **Bot simulation**: `npm run measure:bots -- 30` runs a headless 30-minute bot-only round against the real server. It reports pickups, captures, deaths, structure starts and completions, blocks placed and stuck recoveries. Latest 30-minute run: 1 capture, 12 pickups, 450 deaths, 585 blocks placed, 17 completed structures (5 trench, 10 L-trench, 2 bunker, 0 firing-port) and 84 recoveries; starts and completions matched at 17. Across recent runs: 0–12 captures, 12–63 pickups, 519–1422 blocks placed, 6–18 completed structures, with all four kinds appearing across runs.
 - **Beta battle simulation**: `node scripts/beta-simulate.mjs 30 30 3 10 12345` runs three full 30-minute 10v10 matches on the real server tick loop (rounds, blueprints, jeeps, workshops and bots), reporting round-scoped captures, pickups, returns, flag droughts, hardware by kind, jeeps and stalls. The last argument is a seed, so the same command reproduces the report exactly (run *i* uses `seed + i - 1`); every run prints its seed and the banner prints the rerun command. The harness checks its own counters and throws instead of reporting an impossible number.
 - **Live smoke test**: with a server running on `SMOKE_PORT` (default 3110), `npm run smoke` drives WS join/input/respawn, malformed frames, the HTTP token auth path and the SSE init stream.
@@ -146,6 +148,7 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
   8. Press `P` → spectator cam; try to shoot/build as spectator → blocked.
   9. Kill/be killed → killfeed row appears with the weapon used; getting shot shows a red direction arc; the status strip shows a ping in ms.
  10. Get hit, then break contact for ~6s → HP regenerates; spawn → 2.5s shield badge, and firing cancels it.
+ 11. Stand at your team's bench, press `B`, click **Buy** on *Ammo magazine* → team stock drops by the weapon's magazine price (3 rifle / 2 SMG) and the HUD pouch count rises; empty the magazine and reload to watch the pouch fall.
 
 ---
 

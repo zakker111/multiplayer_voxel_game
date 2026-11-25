@@ -9,9 +9,10 @@ import {
   PLAYER_MAX_FALL_SPEED,
   WORLD_SIZE,
   GROUND_LEVEL,
+  MAX_RESERVE_MAGAZINES,
   WEAPONS,
+  gunStats,
   isEquipment,
-  type WeaponId,
   type EquipmentId,
 } from '../shared/types';
 import { ServerWorld } from './serverWorld';
@@ -61,18 +62,14 @@ export class ServerPlayer {
   // Magazine system
   currentAmmo: number = 10;
   magazineSize: number = 10;
+  /** Rounds in the pouch besides the loaded magazine. A reload draws from here
+   *  and nothing else refills it, so a squad that stops paying for magazines
+   *  (workshop blocks at the bench) eventually runs dry. */
+  reserveAmmo: number = 0;
   isReloading: boolean = false;
   reloadStartTime: number = 0;
   reloadTime: number = 2.0; // seconds
   
-  /** Magazine size / reload time live in the shared weapon table (single
-   *  source of truth with the client). Tools have no magazine. */
-  private static gunStats(equipment: 'rifle' | 'smg' | 'pickaxe' | 'spade') {
-    return equipment === 'rifle' || equipment === 'smg'
-      ? WEAPONS[equipment as WeaponId]
-      : null;
-  }
-
   private input: PlayerInput = {
     moveX: 0,
     moveZ: 0,
@@ -89,6 +86,47 @@ export class ServerPlayer {
     this.rotation = { yaw: 0, pitch: 0 };
     this.velocity = { x: 0, y: 0, z: 0 };
     this.team = team;
+    this.applyWeaponLoadout();
+  }
+
+  /** What each gun still carries this life. A swap hands back the rounds it
+   *  left with: refilling on swap made two key presses (2 then 1) free ammo and
+   *  bypassed the bench economy entirely. */
+  private carriedAmmo: Record<EquipmentId, { magazine: number; pouch: number }> = {
+    rifle: { magazine: 0, pouch: 0 },
+    smg: { magazine: 0, pouch: 0 },
+    pickaxe: { magazine: 0, pouch: 0 },
+    spade: { magazine: 0, pouch: 0 },
+  };
+
+  /** Fresh life: every gun starts at its table loadout. Called on spawn and
+   *  respawn only — never on a weapon swap. */
+  private applyWeaponLoadout(): void {
+    for (const gun of ['rifle', 'smg'] as const) {
+      const stats = WEAPONS[gun];
+      this.carriedAmmo[gun] = {
+        magazine: stats.magazineSize,
+        pouch: stats.magazineSize * stats.reserveMagazines,
+      };
+    }
+    this.syncCarriedAmmo();
+  }
+
+  /** Point the active magazine/pouch at the equipped item's carried rounds
+   *  (tools have none, and their entries stay at zero). */
+  private syncCarriedAmmo(): void {
+    const stats = gunStats(this.equipment);
+    this.magazineSize = stats ? stats.magazineSize : 0;
+    this.reloadTime = stats ? stats.reloadTime : 0;
+    this.isReloading = false;
+    this.currentAmmo = this.carriedAmmo[this.equipment].magazine;
+    this.reserveAmmo = this.carriedAmmo[this.equipment].pouch;
+  }
+
+  /** Rounds the pouch may hold for the equipped gun (0 for tools). */
+  reserveCapacity(): number {
+    const stats = gunStats(this.equipment);
+    return stats ? stats.magazineSize * MAX_RESERVE_MAGAZINES : 0;
   }
 
   applyInput(input: PlayerInput): void {
@@ -255,27 +293,25 @@ export class ServerPlayer {
     this.velocity = { x: 0, y: 0, z: 0 };
     this.hp = this.maxHp;
     this.isDead = false;
-    // Reset magazine on respawn
-    const stats = ServerPlayer.gunStats(this.equipment);
-    this.magazineSize = stats ? stats.magazineSize : 0;
-    this.currentAmmo = this.magazineSize;
-    this.isReloading = false;
+    // Reset magazine and pouch on respawn
+    this.applyWeaponLoadout();
   }
 
   changeEquipment(equipment: EquipmentId): void {
+    if (equipment === this.equipment) return;
+    // Keep what the outgoing item still carries; the new one resumes its own.
+    this.carriedAmmo[this.equipment] = { magazine: this.currentAmmo, pouch: this.reserveAmmo };
     this.equipment = equipment;
-    const stats = ServerPlayer.gunStats(equipment);
-    this.magazineSize = stats ? stats.magazineSize : 0;
-    this.currentAmmo = this.magazineSize;
-    this.isReloading = false;
-    this.reloadTime = stats ? stats.reloadTime : 0;
+    this.syncCarriedAmmo();
   }
 
   startReload(): boolean {
     if (this.isReloading || this.currentAmmo === this.magazineSize) {
       return false;
     }
-    if (this.equipment === 'pickaxe' || this.equipment === 'spade') {
+    // No pouch round to load: the magazine cannot be topped up without buying
+    // more at the bench. (Tools exit above, since their magazine is empty.)
+    if (this.reserveAmmo <= 0) {
       return false;
     }
     
@@ -291,7 +327,12 @@ export class ServerPlayer {
     const elapsed = now - this.reloadStartTime;
     
     if (elapsed >= this.reloadTime) {
-      this.currentAmmo = this.magazineSize;
+      // Only load what the pouch can pay for; a partial pouch leaves the
+      // magazine short instead of conjuring rounds.
+      const needed = this.magazineSize - this.currentAmmo;
+      const loaded = Math.min(needed, this.reserveAmmo);
+      this.currentAmmo += loaded;
+      this.reserveAmmo -= loaded;
       this.isReloading = false;
     }
   }
@@ -321,6 +362,7 @@ export class ServerPlayer {
       isShooting: this.isShooting,
       currentAmmo: this.currentAmmo,
       magazineSize: this.magazineSize,
+      reserveAmmo: this.reserveAmmo,
       isReloading: this.isReloading,
       aimTransition: this.isAiming ? 1 : 0, // Sync aiming state
       carryingFlag: this.carryingFlag,

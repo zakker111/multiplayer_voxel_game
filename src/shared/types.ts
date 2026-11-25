@@ -26,6 +26,9 @@ export interface PlayerState {
   isShooting?: boolean;
   currentAmmo?: number;
   magazineSize?: number;
+  /** Rounds in the player's pouch; reloads draw from it and it is refilled by
+   *  buying magazines at the bench. */
+  reserveAmmo?: number;
   isReloading?: boolean;
   aimTransition?: number; // 0-1 for smooth aiming animation
   carryingFlag?: boolean; // Is player carrying enemy flag?
@@ -63,6 +66,9 @@ export type ClientMessage =
   | { type: 'craftBlueprint'; kind: EmplacementKind; slot: number }
   | { type: 'mountEmplacement'; emplacementId: string }
   | { type: 'dismountEmplacement' }
+  // Tear down a friendly structure and return its cost to the team stock, so a
+  // build dropped in a doorway is not permanent.
+  | { type: 'dismantleEmplacement'; emplacementId: string }
   // `target` is the ground point a mortar should land on (the crosshair hit).
   // The server validates the range and solves the arc itself.
   | { type: 'fireEmplacement'; target?: Position }
@@ -74,10 +80,16 @@ export type ClientMessage =
   | { type: 'build'; position: Position }
   | { type: 'depositWorkshop'; team: 'red' | 'blue' }
   | { type: 'buildJeep' }
+  // Scuttle a friendly jeep in reach and return its cost to the team stock, so
+  // a vehicle wedged in a doorway is not 40 blocks of dead weight all round.
+  | { type: 'scuttleJeep'; vehicleId: string }
   | { type: 'enterJeep'; vehicleId: string }
   | { type: 'exitJeep' }
   | { type: 'driveJeep'; throttle: number; steering: number; brake: boolean }
   | { type: 'reload' }
+  // Buy one magazine of the equipped gun at this team's blueprint bench, paid
+  // from the workshop stock. The server validates reach, stock and pouch space.
+  | { type: 'craftAmmo' }
   | { type: 'pickupFlag' }
   | { type: 'captureFlag'; team: 'red' | 'blue' }
   | { type: 'toggleSpectator' }
@@ -185,6 +197,7 @@ export type ServerMessage =
   | { type: 'emplacementDamaged'; emplacementId: string; damage: number; hp: number; maxHp: number }
   | { type: 'emplacementPreview'; ok: boolean; reason?: string; position?: Position; yaw?: number }
   | { type: 'emplacementMessage'; message: string }
+  | { type: 'ammoMessage'; message: string }
   | { type: 'emplacementMounted'; emplacementId: string; kind?: EmplacementKind; position: Position; yaw: number }
   | { type: 'shellFired'; id: string; kind: EmplacementKind; position: Position; velocity: Position }
   | { type: 'shellImpact'; id: string; kind: EmplacementKind; position: Position; radius: number }
@@ -541,6 +554,10 @@ export interface WeaponStats {
   spread: number;
   magazineSize: number;
   reloadTime: number;
+  /** Workshop blocks one magazine costs at the bench (ammo crafting). */
+  ammoCost: number;
+  /** Magazines a fresh loadout carries before any crafting. */
+  reserveMagazines: number;
   /** Full damage applies inside this many metres. */
   fullRange: number;
   /** Damage scales linearly from 1x at `fullRange` down to `minMultiplier`
@@ -559,6 +576,9 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
     spread: 0.0006,
     magazineSize: 10,
     reloadTime: 2.0,
+    // 3 blocks a magazine: rifle rounds are the expensive ones (10 a mag).
+    ammoCost: 3,
+    reserveMagazines: 3,
     fullRange: 140,
     falloffRange: 260,
     minMultiplier: 0.8,
@@ -572,11 +592,23 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
     spread: 0.012,
     magazineSize: 30,
     reloadTime: 1.5,
+    // Spray ammo is cheaper per round: 2 blocks for 30.
+    ammoCost: 2,
+    reserveMagazines: 2,
     fullRange: 18,
     falloffRange: 50,
     minMultiplier: 0.35,
   },
 };
+
+/** Most magazines a pouch can hold; buying at the bench stops here so ammo
+ *  cannot be stockpiled beyond one resupply's worth. */
+export const MAX_RESERVE_MAGAZINES = 6;
+
+/** Stats for a gun, or null for the tools, which have no magazine or ammo. */
+export function gunStats(equipment: EquipmentId): WeaponStats | null {
+  return equipment === 'rifle' || equipment === 'smg' ? WEAPONS[equipment] : null;
+}
 
 /** Range damage multiplier for a weapon (1 inside `fullRange`). */
 export function rangeMultiplier(weapon: WeaponStats, distance: number): number {

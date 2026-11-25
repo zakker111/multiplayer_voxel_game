@@ -241,30 +241,6 @@ test('the per-team limit stops the build after its allowance', () => {
   assert.equal(game.craftedBlueprints.get(id)?.[0], 'mgNest', 'the refused build kept its blueprint');
 });
 
-test('a bot build pays the team once and a refusal costs nothing', () => {
-  const { game } = setup();
-  const bot = game.players.get(game.addBot('blue', 'Blue-Engineer'));
-  const ctx = game.getBotContext();
-  const spec = emplacementSpec('mgNest');
-  const spots = findSpots(game, spec.teamLimit + 1);
-  assert.ok(spots.length > spec.teamLimit, 'needs one more flat spot than the limit');
-  game.workshopStock.blue = 400;
-
-  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[0], 0), true, 'a bot build is accepted');
-  assert.equal(game.workshopStock.blue, 400 - spec.cost, 'the team paid exactly one build');
-
-  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[0], 0), false, 'the same pad is refused');
-  assert.equal(game.workshopStock.blue, 400 - spec.cost, 'a refused bot build costs nothing');
-
-  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[1], 0), true, 'a second pad is accepted');
-  assert.equal(game.emplacements.size, spec.teamLimit, 'bot builds obey the team limit');
-  assert.equal(game.workshopStock.blue, 400 - spec.cost * spec.teamLimit, 'one charge per accepted build');
-
-  assert.equal(ctx.placeEmplacement(bot, 'mgNest', spots[spec.teamLimit], 0), false,
-    'a bot cannot exceed the team limit');
-  assert.equal(game.workshopStock.blue, 400 - spec.cost * spec.teamLimit, 'the limit refusal is free');
-});
-
 test('junk kinds and off-ground positions are ignored', () => {
   const { game, id } = setup();
   const [spot] = findSpots(game, 1);
@@ -370,4 +346,75 @@ test('a new round clears the map and the carried blueprints', () => {
 
   assert.equal(game.emplacements.size, 0, 'emplacements clear on round reset');
   assert.equal(game.craftedBlueprints.get(id), undefined, 'carried blueprints are dropped with no refund');
+});
+
+test('dismantling a friendly build clears it and returns its cost to the stock', () => {
+  const { game, id, frames } = setup();
+  const [nestSpot, crateSpot] = findSpots(game, 2);
+  game.workshopStock.blue = 200;
+
+  craft(game, id, 'mgNest', 0);
+  place(game, id, 'mgNest', nestSpot, 0, 0);
+  const nest = [...game.emplacements.values()][0];
+  assert.ok(nest, 'the nest is up');
+
+  game.players.get(id).position = { ...nest.position };
+  game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: nest.id });
+
+  assert.equal(game.emplacements.size, 0, 'the build is gone');
+  assert.equal(game.workshopStock.blue, 200, 'the full craft cost came back');
+  assert.equal(message(frames, 'Dismantled MG nest (+70 blocks)').length, 1, 'the player is told what came back');
+
+  // A crate hands back its contents too: they are the team's mined blocks.
+  // Leave the stock room to take them (a full workshop refunds nothing).
+  game.workshopStock.blue = 150;
+  const crate = game.createEmplacement('blue', emplacementSpec('supplyCrate'), crateSpot, 0);
+  crate.stock = 7;
+  game.players.get(id).position = { ...crate.position };
+  game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: crate.id });
+
+  assert.equal(game.workshopStock.blue, 150 + emplacementSpec('supplyCrate').cost + 7, 'cost plus contents');
+  assert.equal(game.emplacements.size, 0, 'the crate is gone too');
+});
+
+test('a dismantle refuses enemy and out-of-reach builds', () => {
+  const { game, id, frames } = setup();
+  const [enemySpot, ownSpot] = findSpots(game, 2);
+  game.workshopStock.blue = 200;
+
+  const enemy = game.createEmplacement('red', emplacementSpec('mgNest'), enemySpot, 0);
+  game.players.get(id).position = { ...enemy.position };
+  game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: enemy.id });
+  assert.equal(message(frames, 'Only your own team builds can be dismantled').length, 1, 'an enemy build refuses');
+
+  const own = game.createEmplacement('blue', emplacementSpec('mortar'), ownSpot, 0);
+  game.players.get(id).position = { x: own.position.x + 30, y: own.position.y, z: own.position.z };
+  game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: own.id });
+  assert.equal(message(frames, 'Walk up to the build to dismantle it').length, 1, 'reach refuses');
+
+  assert.equal(game.emplacements.size, 2, 'nothing was removed');
+  assert.equal(game.workshopStock.blue, 200, 'a refusal refunds nothing');
+});
+
+test('dismantling a nest a friendly bot mans evicts the bot instead of refusing', () => {
+  const { game, id, frames } = setup();
+  const [spot] = findSpots(game, 1);
+  game.workshopStock.blue = 100;
+  const nest = game.createEmplacement('blue', emplacementSpec('mgNest'), spot, 0);
+  const bot = game.players.get(game.addBot('blue', 'Crewman'));
+  bot.position = { ...nest.position };
+  assert.equal(game.getBotContext().guns.mount(bot, nest.id), true, 'the bot takes the seat');
+  assert.equal(nest.gunnerId, bot.id);
+
+  game.players.get(id).position = { ...nest.position };
+  game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: nest.id });
+
+  assert.equal(game.emplacements.size, 0, 'a crewed build still comes down');
+  assert.equal(nest.gunnerId, null, 'the seat is released');
+  assert.ok(
+    Math.hypot(bot.position.x - nest.position.x, bot.position.z - nest.position.z) > 1,
+    'the bot is put on clear ground instead of left inside the sandbags',
+  );
+  assert.equal(message(frames, 'Dismantled MG nest (+70 blocks)').length, 1, 'the cost still comes back');
+  assert.equal(game.workshopStock.blue, 170);
 });

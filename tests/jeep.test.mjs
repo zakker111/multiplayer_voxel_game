@@ -305,3 +305,60 @@ test('bots can take the passenger seat and leave with the driver', () => {
   assert.equal(jeep.passengerId, null, 'bot passenger is released with the driver');
   assert.ok(Math.hypot(rider.position.x - jeep.position.x, rider.position.z - jeep.position.z) >= 2);
 });
+
+test('scuttling a friendly jeep returns its cost and puts the crew out', () => {
+  const game = new ServerGame();
+  const frames = [], enemyFrames = [];
+  const id = game.addPlayer(conn(frames));
+  const enemyId = game.addPlayer(conn(enemyFrames));
+  game.handleMessage(id, { type: 'join', team: 'blue' });
+  game.handleMessage(enemyId, { type: 'join', team: 'red' });
+  const p = game.players.get(id), enemy = game.players.get(enemyId);
+  game.workshopStock.blue = 200;
+  p.position = { ...game.getWorkshops().blue.position };
+  game.handleMessage(id, { type: 'buildJeep' });
+  const jeep = [...game.jeeps.values()][0];
+  assert.equal(game.workshopStock.blue, 200 - JEEP_COST);
+
+  // Only the owning team may scuttle it, and only from arm's length.
+  enemy.position = { ...jeep.position };
+  game.handleMessage(enemyId, { type: 'scuttleJeep', vehicleId: jeep.id });
+  assert.equal(game.jeeps.size, 1, 'an enemy jeep is not yours to scuttle');
+  assert.ok(enemyFrames.some((f) => f.type === 'jeepMessage' && f.message === 'Only your own team jeeps can be scuttled'));
+  enemy.position = { x: 0, y: 10, z: 0 };
+
+  p.position = { x: jeep.position.x + 30, y: jeep.position.y, z: jeep.position.z };
+  game.handleMessage(id, { type: 'scuttleJeep', vehicleId: jeep.id });
+  assert.equal(game.jeeps.size, 1, 'reach refuses');
+  assert.ok(frames.some((f) => f.type === 'jeepMessage' && f.message === 'Walk up to the jeep to scuttle it'));
+
+  // A crewed jeep is not refused: the bot driver is put on the ground first.
+  const bot = game.players.get(game.addBot('blue', 'Driver'));
+  bot.position = { ...jeep.position };
+  game.handleMessage(bot.id, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.driverId, bot.id, 'the bot takes the wheel');
+  p.position = { x: jeep.position.x - 2, y: jeep.position.y, z: jeep.position.z };
+  game.handleMessage(id, { type: 'scuttleJeep', vehicleId: jeep.id });
+
+  assert.equal(game.jeeps.size, 0, 'a crewed jeep still leaves the map');
+  assert.equal(jeep.driverId, null, 'the seat is released');
+  assert.ok(
+    Math.hypot(bot.position.x - jeep.position.x, bot.position.z - jeep.position.z) > 1,
+    'the bot is put on clear ground instead of left inside the wreck',
+  );
+  assert.equal(game.workshopStock.blue, 200, 'the full cost came back');
+  assert.equal(frames.filter((f) => f.type === 'jeepMessage' && f.message === 'Scuttled jeep (+40 blocks)').length, 1);
+
+  // A full workshop refunds nothing, exactly like a dismantled build.
+  bot.position = { x: 0, y: 10, z: 0 };
+  p.position = { ...game.getWorkshops().blue.position };
+  game.handleMessage(id, { type: 'buildJeep' });
+  const second = [...game.jeeps.values()][0];
+  assert.ok(second && second.id !== jeep.id, 'a second jeep was built');
+  game.workshopStock.blue = 200;
+  p.position = { x: second.position.x - 2, y: second.position.y, z: second.position.z };
+  game.handleMessage(id, { type: 'scuttleJeep', vehicleId: second.id });
+  assert.equal(game.jeeps.size, 0);
+  assert.equal(game.workshopStock.blue, 200, 'a full stock takes nothing');
+  assert.ok(frames.some((f) => f.type === 'jeepMessage' && f.message === 'Scuttled jeep (workshop full)'));
+});

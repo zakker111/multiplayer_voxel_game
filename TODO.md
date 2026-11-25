@@ -119,6 +119,7 @@ These are starting choices for playtesting, not final balance numbers.
 **Goal:** Make the workshop a shared team activity.
 
 - [x] Let engineer or logistics bots gather and deposit resources under the same server rules as humans.
+- [x] Ammo economy: every gun reloads from a pouch, magazines are bought at the team bench with workshop blocks (3 per rifle magazine, 2 per SMG, six-magazine cap), and bots buy theirs from the same stock while leaving a build floor. Bots and humans both run dry when a team stops mining.
 - [x] Add a jeep passenger seat for bots and humans.
 - [ ] Make bots collect resources when supplies are low and request a jeep when it helps an attack, without wasting the entire team stockpile.
 - [ ] Show useful feedback such as low supplies, build progress and vehicle or emplacement availability.
@@ -160,4 +161,4 @@ Complete **Phase 4**: three blueprint slots, five emplacement kinds and the ghos
 ## Known issues (November 2026 verification)
 
 - **Bot-only matches can stall before the first flag pickup.** In a paired 20-seed sweep of full 30-minute 10v10 matches, 9 seeds produced zero captures and 2 seeds produced no pickups at all. The same pattern occurs on the pre-blueprint-AI baseline, so this is a break-through/balance problem, not a metric bug. Reproduce with `node scripts/beta-simulate.mjs 30 30 1 10 101`; fix before tuning vehicles against bot matches.
-- **Verification snapshot:** `npm run lint`, `npm run build`, `npm test` (251/251) and `npm run smoke` (against `dist/server.cjs`) all pass on `main`.
+- **Verification snapshot:** `npm run lint`, `npm run build`, `npm test` (260/260) and `npm run smoke` (against `dist/server.cjs`) all pass on `main`.

@@ -39,12 +39,12 @@ function App() {
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
     benchMenuOpen: false, benchFeedback: '',
     manningEmplacement: false, manningKind: null, manningAmmo: null, emplacementNearby: false,
-    crateNearby: false, crateStock: null,
+    crateNearby: false, crateStock: null, dismantleTarget: null,
     jeepNearby: false, jeepDriving: false, jeepRiding: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
     blueKills: 0, redKills: 0, blueCaptures: 0, redCaptures: 0, isAiming: false,
-    currentAmmo: 10, magazineSize: 10, isReloading: false,
+    currentAmmo: 10, magazineSize: 10, ammoReserve: 0, ammoCost: 3, isReloading: false,
     playerCarryingFlag: false, flagCarrierName: '',
     isSpectating: false,
     spectatorMode: 'action',
@@ -198,8 +198,15 @@ function App() {
     rifle: '🎯 Rifle', smg: '💨 SMG', spade: '🪣 Spade', pickaxe: '⛏️ Pickaxe',
   };
   const equipmentKeys: Record<string, string> = {
-    rifle: '1', smg: '2', spade: '3', pickaxe: '4',
+    rifle: '1',
+    smg: '2',
+    spade: '3',
+    pickaxe: '4',
   };
+  // The bench's ammo row is the only place ammo is bought, so its two
+  // conditions live here instead of being repeated through the markup.
+  const ammoCost = gameState.ammoCost;
+  const canBuyAmmo = gameMode === 'online' && ammoCost !== null && gameState.workshopStock >= ammoCost;
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black">
@@ -283,6 +290,7 @@ function App() {
               <div className="mt-3 pt-3 border-t border-gray-700">
                 <p className="text-gray-300"><b>Left Click</b> — Shoot / Use tool</p>
                 <p className="text-gray-300"><b>Right Click</b> — Toggle iron sights / Place block (instant)</p>                  <p className="text-gray-300"><b>R</b> — Reload weapon</p>
+                  <p className="text-gray-300"><b>X</b> — Dismantle own build / scuttle own jeep (online &amp; Beta)</p>
                   <p className="text-gray-300"><b>M</b> — Mute / unmute audio</p>
                 <p className="text-gray-300"><b>Mouse Wheel</b> — Switch equipment</p>
                 <div className="mt-2 text-xs text-gray-400 space-y-1">
@@ -970,6 +978,11 @@ function App() {
                       </span>
                       <span className="text-gray-500 text-sm">/ {gameState.magazineSize ?? 0}</span>
                     </div>
+                    {gameMode === 'online' && gameState.ammoCost !== null && (
+                      <div className={`text-xs mt-0.5 ${gameState.ammoReserve <= 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                        Pouch <span className="font-mono text-gray-200">{gameState.ammoReserve}</span> rounds
+                      </div>
+                    )}
                     {gameState.isReloading && (
                       <div className="text-xs text-yellow-500 mt-1 animate-pulse">
                         🔄 Reloading...
@@ -1043,6 +1056,14 @@ function App() {
                 </div>
               )}
 
+              {(gameMode === 'online' || gameMode === 'beta') && gameState.dismantleTarget && (
+                <div className="absolute bottom-52 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-rose-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
+                  {gameState.dismantleTarget === 'jeep'
+                    ? 'Press X to scuttle this jeep · cost returns to the workshop'
+                    : 'Press X to dismantle this build · cost returns to the workshop'}
+                </div>
+              )}
+
               {(gameMode === 'online' || gameMode === 'beta') && !gameState.manningEmplacement && gameState.crateNearby && (
                 <div className="absolute bottom-40 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-amber-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
                   SUPPLY CRATE · {gameState.crateStock ?? 0}/{SUPPLY_CRATE_CAPACITY} blocks · Press E to deposit mined blocks · G to take {SUPPLY_CRATE_DRAW}
@@ -1102,6 +1123,37 @@ function App() {
                         </div>
                       ))}
                     </div>
+
+                    {/* Ammo is bought with the same bench stock the builds use. */}
+                    {gameMode === 'online' && (
+                      <div className="mt-3 flex items-center gap-2 rounded-lg bg-gray-800/70 px-3 py-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-sm text-white">Ammo magazine</span>
+                            <span className={`text-xs font-mono ${canBuyAmmo ? 'text-amber-300' : 'text-gray-500'}`}>
+                              {ammoCost ?? '—'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-gray-400">
+                            {ammoCost === null
+                              ? 'Equip a rifle or SMG to buy ammo'
+                              : `One ${gameState.equipment.toUpperCase()} magazine · pouch ${gameState.ammoReserve} rounds`}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={!canBuyAmmo}
+                          onClick={() => gameRef.current?.buyAmmo()}
+                          className={`rounded-md border px-2 py-1 text-xs ${
+                            canBuyAmmo
+                              ? 'border-emerald-500/60 text-emerald-200 hover:bg-emerald-500/20'
+                              : 'cursor-not-allowed border-gray-700 text-gray-500'
+                          }`}
+                        >
+                          Buy
+                        </button>
+                      </div>
+                    )}
 
                     <div className="mt-3 space-y-2">
                       {(Object.keys(EMPLACEMENT_LABELS) as EmplacementKind[]).map((kind) => {

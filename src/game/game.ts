@@ -18,6 +18,7 @@ import {
   RED_FLAG_POS,
   WEAPONS,
   weaponDamage,
+  gunStats,
   DEFAULT_ROUND_MINUTES,
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
@@ -225,6 +226,8 @@ export interface GameState {
   crateNearby: boolean;
   /** Blocks held by that crate, for the HUD prompt. */
   crateStock: number | null;
+  /** What the dismantle key would tear down from here, or null. */
+  dismantleTarget: 'build' | 'jeep' | null;
   jeepNearby: boolean;
   jeepDriving: boolean;
   jeepRiding: boolean;
@@ -245,6 +248,12 @@ export interface GameState {
   isAiming: boolean;
   currentAmmo: number;
   magazineSize: number;
+  /** Rounds in the pouch besides the magazine (online); mirrored from the
+   *  server so the HUD counts down as reloads spend it. */
+  ammoReserve: number;
+  /** Blocks one magazine of the equipped gun costs at the bench, or null for
+   *  a tool that cannot buy ammo. */
+  ammoCost: number | null;
   isReloading: boolean;
   playerCarryingFlag: boolean;
   flagCarrierName: string;
@@ -507,6 +516,8 @@ export class Game {
   private benchMenuOpen = false;
   /** Last craft success/refusal, mirrored into the menu overlay. */
   private benchFeedback = '';
+  /** Online pouch rounds, mirrored from the server's own PlayerState. */
+  private ammoReserve = 0;
   /** Emplacements the server has broadcast, and the meshes drawn for them. */
   private emplacedSnapshots = new Map<string, EmplacementSnapshot>();
   private emplacementMeshes = new Map<string, THREE.Group>();
@@ -740,12 +751,14 @@ export class Game {
     spade: {
       fireRate: 0.5, lastFired: 0, damage: { head: 40, body: 25 }, spread: 0,
       name: 'Spade', magazineSize: 0, currentAmmo: 0, reloadTime: 0,
+      ammoCost: 0, reserveMagazines: 0,
       fullRange: 0, falloffRange: 0, minMultiplier: 1,
       isReloading: false, reloadStartTime: 0
     },
     pickaxe: {
       fireRate: 0.5, lastFired: 0, damage: { head: 40, body: 25 }, spread: 0,
       name: 'Pickaxe', magazineSize: 0, currentAmmo: 0, reloadTime: 0,
+      ammoCost: 0, reserveMagazines: 0,
       fullRange: 0, falloffRange: 0, minMultiplier: 1,
       isReloading: false, reloadStartTime: 0
     },
@@ -3736,6 +3749,7 @@ export class Game {
       this.player.yaw = state.team === 'blue' ? Math.PI : 0;
       this.player.updateCamera();
       this.onlineJoinConfirmed = true;
+      if (typeof state.reserveAmmo === 'number') this.ammoReserve = state.reserveAmmo;
     });
 
     // Handle player joined
@@ -3760,6 +3774,7 @@ export class Game {
             this.sounds.hurt();
           }
           if (typeof msg.state.hp === 'number') this.player.hp = msg.state.hp;
+          if (typeof msg.state.reserveAmmo === 'number') this.ammoReserve = msg.state.reserveAmmo;
           this.spawnProtected = !!msg.state.spawnProtected;
         }
         return;
@@ -4066,6 +4081,11 @@ export class Game {
       this.shellBlasts.push({ mesh, material, until: performance.now() / 1000 + 0.35 });
     });
     this.networkClient.onMessage('emplacementMessage', (msg: any) => {
+      if (typeof msg.message === 'string') this.showBenchMessage(msg.message);
+    });
+    // Ammo purchases answer on their own channel, but land on the same bench
+    // feedback line (which also updates the HUD banner).
+    this.networkClient.onMessage('ammoMessage', (msg: any) => {
       if (typeof msg.message === 'string') this.showBenchMessage(msg.message);
     });
     this.networkClient.onMessage('jeepExited', (msg: any) => {
@@ -4563,6 +4583,13 @@ export class Game {
     this.networkClient?.send({ type: 'craftBlueprint', kind, slot });
   }
 
+  /** Buy one magazine at the bench. The server validates reach, team stock and
+   *  pouch space, and the Buy row only renders online. */
+  buyAmmo(): void {
+    if (!this.benchOpen) { this.showBenchMessage('Stand at your blueprint bench to buy ammo'); return; }
+    this.networkClient?.send({ type: 'craftAmmo' });
+  }
+
   /** One-click bench path: craft into the first free slot. */
   craftFromBenchNext(kind: EmplacementKind): void {
     const slot = this.craftedSlots.findIndex((entry) => entry === null);
@@ -4687,6 +4714,25 @@ export class Game {
         best = snapshot;
         bestDistanceSq = distanceSq;
       }
+    }
+    return best;
+  }
+
+  /** The friendly build or jeep the dismantle key would tear down, or null. The
+   *  key and the HUD hint share this so they always agree on the target. */
+  private dismantleCandidate(): { type: 'build' | 'jeep'; id: string } | null {
+    if (!this.benchEnabled || this.player.isDead || this.mountedEmplacementId || this.drivingJeepId || this.ridingJeepId) return null;
+    let best: { type: 'build' | 'jeep'; id: string } | null = null;
+    let bestDistanceSq = EMPLACEMENT_USE_REACH * EMPLACEMENT_USE_REACH;
+    for (const snapshot of this.emplacedSnapshots.values()) {
+      if (snapshot.team !== this.playerTeam) continue;
+      const distanceSq = distanceSquared(this.player.position, snapshot.position);
+      if (distanceSq <= bestDistanceSq) { best = { type: 'build', id: snapshot.id }; bestDistanceSq = distanceSq; }
+    }
+    for (const { state } of this.jeeps.values()) {
+      if (state.team !== this.playerTeam || state.wreck) continue;
+      const distanceSq = distanceSquared(this.player.position, state.position);
+      if (distanceSq <= bestDistanceSq) { best = { type: 'jeep', id: state.id }; bestDistanceSq = distanceSq; }
     }
     return best;
   }
@@ -5244,6 +5290,15 @@ export class Game {
           if (jeep) this.enterLocalJeep(jeep);
         }
       }
+      return;
+    }
+    // X tears down a friendly build in reach, or scuttles a friendly jeep.
+    // Without it a misplaced nest or a wedged jeep sits in the squad's way
+    // until an enemy removes it.
+    if (!e.repeat && e.code === 'KeyX') {
+      const target = this.dismantleCandidate();
+      if (target?.type === 'build') this.networkClient?.send({ type: 'dismantleEmplacement', emplacementId: target.id });
+      else if (target?.type === 'jeep') this.networkClient?.send({ type: 'scuttleJeep', vehicleId: target.id });
       return;
     }
     if (this.drivingJeepId) {
@@ -6057,6 +6112,12 @@ export class Game {
   private startReload(): void {
     const weapon = this.weapons[this.equipment];
     if (!weapon || weapon.magazineSize === 0 || weapon.isReloading || weapon.currentAmmo === weapon.magazineSize) return;
+    // The pouch is empty: no reload is possible until magazines are bought at
+    // the bench. Offline practice keeps unlimited ammo.
+    if (this.gameMode === 'online' && this.ammoReserve <= 0) {
+      this.showMessage('Out of ammo — buy magazines at your bench (B)');
+      return;
+    }
     weapon.isReloading = true;
     weapon.reloadStartTime = performance.now() / 1000;
     this.isReloadAnimating = true;
@@ -6409,7 +6470,11 @@ export class Game {
       if (this.reloadAnimationTime >= this.reloadAnimationDuration) {
         const weapon = this.weapons[this.equipment];
         if (weapon && weapon.magazineSize > 0) {
-          weapon.currentAmmo = weapon.magazineSize;
+          const needed = weapon.magazineSize - weapon.currentAmmo;
+          const online = this.gameMode === 'online';
+          const loaded = online ? Math.min(needed, this.ammoReserve) : needed;
+          weapon.currentAmmo += loaded;
+          if (online) this.ammoReserve = Math.max(0, this.ammoReserve - loaded);
           weapon.isReloading = false;
         }
         this.isReloadAnimating = false;
@@ -8287,6 +8352,7 @@ export class Game {
         emplacementNearby: this.nearbyMannableEmplacement() !== null,
         crateNearby: crate !== null,
         crateStock: crate ? crate.stock : null,
+        dismantleTarget: this.dismantleCandidate()?.type ?? null,
         isDead: this.player.isDead,
         respawnTimer: this.player.respawnTimer,
         hitMarker: this.hitMarkerTimer > 0,
@@ -8302,6 +8368,8 @@ export class Game {
         isAiming: this.isAiming,
         currentAmmo: weapon ? weapon.currentAmmo : 0,
         magazineSize: weapon ? weapon.magazineSize : 0,
+        ammoReserve: this.ammoReserve,
+        ammoCost: gunStats(this.equipment)?.ammoCost ?? null,
         isReloading: weapon ? weapon.isReloading : false,
         playerCarryingFlag: this.player.carryingFlag,
         flagCarrierName: carrierName,

@@ -54,6 +54,7 @@ import {
   WORKSHOP_CAPACITY,
   WORKSHOP_REACH,
   GROUND_LEVEL,
+  gunStats,
   isWorkshopProtectedCell,
   Workshops,
   JeepSnapshot,
@@ -143,6 +144,8 @@ interface ServerJeep extends JeepSnapshot {
   lastInput: number;
   wreckUntil: number;
 }
+
+const BOT_AMMO_STOCK_FLOOR = 25;
 
 export class ServerGame {
   private players: Map<string, ServerPlayer> = new Map();
@@ -384,6 +387,49 @@ export class ServerGame {
     return emplacement;
   }
 
+  /** Put blocks back into a team's stock, capped by its capacity, and sync the
+   *  HUD. Dismantling and scuttling share this refund rule. */
+  private refundWorkshop(team: 'red' | 'blue', blocks: number): number {
+    const refund = Math.min(blocks, WORKSHOP_CAPACITY - this.workshopStock[team]);
+    this.workshopStock[team] += refund;
+    this.broadcastWorkshops();
+    return refund;
+  }
+
+  /**
+   * Tear down a friendly build and return what it cost to the team stock. A
+   * misplaced nest used to be permanent — only enemy fire could clear it — so
+   * one wrong click taxed the team's blocks for the whole round.
+   */
+  private dismantleEmplacement(playerId: string, emplacementId: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || typeof emplacementId !== 'string') return;
+    if (this.jeepOf(playerId)) return;
+    const emplacement = this.emplacements.get(emplacementId);
+    if (!emplacement) return;
+    if (emplacement.team !== player.team) return this.emplacementMessage(playerId, 'Only your own team builds can be dismantled');
+    // A crewed build is not refused: removeEmplacement puts the occupant out
+    // through the same safe exit a wrecked build uses, so a bot parked on a
+    // misplaced nest cannot make it permanent.
+    const spec = emplacementSpec(emplacement.kind);
+    if (!spec) return;
+    const distance = Math.hypot(
+      player.position.x - emplacement.position.x,
+      player.position.y - emplacement.position.y,
+      player.position.z - emplacement.position.z,
+    );
+    if (distance > EMPLACEMENT_USE_REACH) return this.emplacementMessage(playerId, 'Walk up to the build to dismantle it');
+
+    // The build's cost comes back, and so does anything a supply crate held.
+    const refund = this.refundWorkshop(player.team, spec.cost + emplacement.stock);
+    this.removeEmplacement(emplacement);
+    const label = emplacement.kind === 'mgNest' ? 'MG nest' : emplacement.kind;
+    this.emplacementMessage(
+      playerId,
+      refund > 0 ? `Dismantled ${label} (+${refund} blocks)` : `Dismantled ${label} (workshop full)`,
+    );
+  }
+
   /**
    * Hardware a team can still pay for and place. The bot AI picks from this
    * list so a squad fields the whole blueprint catalogue instead of stacking
@@ -415,6 +461,22 @@ export class ServerGame {
     if (this.workshopStock[bot.team] < spec.cost) return false;
     this.workshopStock[bot.team] -= spec.cost;
     this.createEmplacement(bot.team, verdict.spec, verdict.spot, verdict.rotation);
+    this.broadcastWorkshops();
+    return true;
+  }
+
+  /** Ammo issue for a dry bot: one magazine at the bench price, paid from
+   *  team stock. Bots are issued at the armoury rather than walking back to the
+   *  bench, but the purchase still leaves a build budget in the stockpile, so
+   *  mining keeps paying for ammo and a team that stops mining runs dry. */
+  private botBuyAmmo(bot: ServerPlayer): boolean {
+    if (this.roundPhase !== 'live' || bot.isDead) return false;
+    const stats = gunStats(bot.equipment);
+    if (!stats || bot.reserveAmmo > 0) return false;
+    // Leave the engineers their budget: bots only dip in above this floor.
+    if (this.workshopStock[bot.team] < stats.ammoCost + BOT_AMMO_STOCK_FLOOR) return false;
+    this.workshopStock[bot.team] -= stats.ammoCost;
+    bot.reserveAmmo = stats.magazineSize;
     this.broadcastWorkshops();
     return true;
   }
@@ -939,6 +1001,36 @@ export class ServerGame {
     this.broadcastJeeps();
   }
 
+  /**
+   * Scuttle a friendly jeep in reach: the vehicle leaves the map and its cost
+   * goes back to the workshop, capped exactly like a dismantled build. A crewed
+   * jeep is not refused — both seats are put out through the same safe exit a
+   * wreck uses, so a bot-driven jeep cannot make it permanent.
+   */
+  private scuttleJeep(playerId: string, vehicleId: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || typeof vehicleId !== 'string') return;
+    if (this.jeepOf(playerId)) return this.jeepMessage(playerId, 'Step out of the jeep before scuttling it');
+    const jeep = this.jeeps.get(vehicleId);
+    if (!jeep || jeep.wreck) return;
+    if (jeep.team !== player.team) return this.jeepMessage(playerId, 'Only your own team jeeps can be scuttled');
+    const distance = Math.hypot(
+      player.position.x - jeep.position.x,
+      player.position.y - jeep.position.y,
+      player.position.z - jeep.position.z,
+    );
+    if (distance > EMPLACEMENT_USE_REACH) return this.jeepMessage(playerId, 'Walk up to the jeep to scuttle it');
+
+    const refund = this.refundWorkshop(player.team, vehicleSpec(jeep.kind).cost);
+    // The driver's exit puts the passenger out too; a jeep cannot have a
+    // passenger without one.
+    if (jeep.driverId) this.exitJeep(jeep.driverId, true);
+    this.jeeps.delete(jeep.id);
+    this.botJeepVehicleCooldown.delete(jeep.id);
+    this.broadcastJeeps();
+    this.jeepMessage(playerId, refund > 0 ? `Scuttled jeep (+${refund} blocks)` : 'Scuttled jeep (workshop full)');
+  }
+
   private humanNearJeep(team: 'red' | 'blue', position: Position): boolean {
     return [...this.players.values()].some(p => !(p instanceof ServerBot) && p.team === team && !p.isDead && !p.isSpectating &&
       Math.hypot(p.position.x - position.x, p.position.y - position.y, p.position.z - position.z) <= BOT_JEEP_HUMAN_PRIORITY_RADIUS);
@@ -1075,10 +1167,14 @@ export class ServerGame {
       this.broadcastEmplacements();
       return;
     }
-    // A gunner inside a wrecked nest is put back on the ground, not trapped.
+    this.removeEmplacement(emplacement);
+  }
+
+  /** Take a structure off the map; a gunner inside it is put back on the ground. */
+  private removeEmplacement(emplacement: EmplacementSnapshot): void {
     if (emplacement.gunnerId) this.dismountEmplacement(emplacement.gunnerId, true);
-    this.emplacements.delete(emplacementId);
-    this.emplacementFireAt.delete(emplacementId);
+    this.emplacements.delete(emplacement.id);
+    this.emplacementFireAt.delete(emplacement.id);
     this.broadcastEmplacements();
   }
 
@@ -1203,7 +1299,40 @@ export class ServerGame {
     this.broadcastBlueprints(playerId);
   }
 
-  
+  /** Buy one magazine of the equipped gun at this team's bench, paid from the
+   *  workshop stock. Reach, stock and pouch space are checked before anything
+   *  is charged, so a refused purchase never costs the team blocks. */
+  private craftAmmo(playerId: string): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') {
+      return this.ammoMessage(playerId, 'Cannot buy ammo right now');
+    }
+    const stats = gunStats(player.equipment);
+    if (!stats) {
+      return this.ammoMessage(playerId, 'Equip a rifle or SMG to buy ammo');
+    }
+    const bench = benchPosition(this.getWorkshops()[player.team].position);
+    if (Math.hypot(player.position.x - bench.x, player.position.y - bench.y, player.position.z - bench.z) > BENCH_REACH) {
+      return this.ammoMessage(playerId, 'Stand at your blueprint bench to buy ammo');
+    }
+    if (player.reserveAmmo + stats.magazineSize > player.reserveCapacity()) {
+      return this.ammoMessage(playerId, 'Your ammo pouch is full');
+    }
+    if (this.workshopStock[player.team] < stats.ammoCost) {
+      return this.ammoMessage(playerId, 'Not enough workshop blocks for a magazine');
+    }
+
+    this.workshopStock[player.team] -= stats.ammoCost;
+    player.reserveAmmo += stats.magazineSize;
+    this.broadcastWorkshops();
+    this.sendToPlayer(playerId, { type: 'playerUpdated', playerId, state: player.getState() });
+    this.ammoMessage(playerId, `🔫 ${stats.name} magazine loaded into your pouch · -${stats.ammoCost} blocks`);
+  }
+
+  private ammoMessage(playerId: string, message: string): void {
+    this.sendToPlayer(playerId, { type: 'ammoMessage', message });
+  }
+
   private depositWorkshop(playerId: string, team: unknown): void {
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating || !isTeam(team) || player.team !== team) return;
@@ -1483,6 +1612,9 @@ export class ServerGame {
         this.botDig(bot.id, pos);
       },
       placeEmplacement: (bot, kind, position, yaw) => this.botPlaceEmplacement(bot, kind, position, yaw),
+      // Bots buy magazines from the same team stock at the same price, so a
+      // squad's ammo is paid for by its miners like the humans' is.
+      requestAmmo: (bot) => this.botBuyAmmo(bot),
       guns: this.botGunContext(),
       // Bots walk around built structures instead of grinding into them; a
       // manned nest especially must not be steppable, or a bot would stand
@@ -2595,6 +2727,7 @@ export class ServerGame {
         // while the respawn timer runs) and spectators (no world presence)
         if (message.input && typeof message.input === 'object'
           && !player.isDead && !player.isSpectating && !this.jeepOf(playerId)) {
+          const heldBefore = player.equipment;
           const pos = message.input.position;
           if (isVec3(pos) && [...this.jeeps.values()].some(jeep => {
             const spec = vehicleSpec(jeep.kind);
@@ -2604,12 +2737,20 @@ export class ServerGame {
             const { position: _blocked, ...input } = message.input;
             player.applyInput(input);
           } else player.applyInput(message.input);
+          // A swap refills the pouch for the new gun, and the client keeps no
+          // pouch of its own: without this its HUD and reload check go stale.
+          if (player.equipment !== heldBefore) {
+            this.sendToPlayer(playerId, { type: 'playerUpdated', playerId, state: player.getState() });
+          }
         }
         break;
       }
 
       case 'buildJeep':
         this.buildJeep(playerId);
+        break;
+      case 'scuttleJeep':
+        this.scuttleJeep(playerId, message.vehicleId);
         break;
       case 'placeEmplacement':
         this.placeEmplacement(playerId, message.kind, message.position, message.yaw, message.slot);
@@ -2623,6 +2764,10 @@ export class ServerGame {
       case 'mountEmplacement':
         this.mountEmplacement(playerId, message.emplacementId);
         break;
+      case 'dismantleEmplacement':
+        this.dismantleEmplacement(playerId, message.emplacementId);
+        break;
+
       case 'dismountEmplacement':
         this.dismountEmplacement(playerId);
         break;
@@ -2665,6 +2810,10 @@ export class ServerGame {
 
       case 'useSupplyCrate':
         this.useSupplyCrate(playerId, message.emplacementId, message.action);
+        break;
+
+      case 'craftAmmo':
+        this.craftAmmo(playerId);
         break;
 
       case 'reload':

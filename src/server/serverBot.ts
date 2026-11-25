@@ -27,7 +27,6 @@ import {
   PLAYER_SPEED,
   SPRINT_MULTIPLIER,
   WEAPONS,
-  type WeaponId,
   BLUE_FLAG_POS,
   RED_FLAG_POS,
   GROUND_LEVEL,
@@ -122,6 +121,9 @@ export interface BotContext {
   /** Optional: try to emplace a build for this bot. False means refused (cost,
    *  ground, team limit, another body in the way) and nothing was spent. */
   placeEmplacement?: (bot: ServerBot, kind: string, position: Position, yaw: number) => boolean;
+  /** Optional: buy one magazine out of team stock when the pouch runs empty
+   *  (bots do not walk to the bench; the armoury issues it at the same price). */
+  requestAmmo?: (bot: ServerBot) => boolean;
   /** Optional: guns left behind by engineers can be worked by nearby bots. */
   guns?: BotGunContext;
 }
@@ -294,12 +296,9 @@ export class ServerBot extends ServerPlayer {
     super(id, position, team);
     this.name = name;
     this.isBotFlag = true; // scoreboard: mark AI combatants as bots
-    this.equipment = Math.random() < 0.5 ? 'rifle' : 'smg';
-    // Magazine/reload come from the shared weapon table (no hardcoded 10/30).
-    const gun = WEAPONS[this.equipment as WeaponId];
-    this.magazineSize = gun ? gun.magazineSize : 0;
-    this.currentAmmo = this.magazineSize;
-    this.reloadTime = gun ? gun.reloadTime : 0;
+    // Take the pick through the shared swap path, so magazine, reload time and
+    // pouch all come from the weapon table instead of being set again here.
+    this.changeEquipment(Math.random() < 0.5 ? 'rifle' : 'smg');
     // Vicious: tougher than players (respawn() also honors maxHp)
     this.maxHp = BOT_MAX_HP;
     this.hp = BOT_MAX_HP;
@@ -382,8 +381,13 @@ export class ServerBot extends ServerPlayer {
     if (this.isDead) return;
     this.updateReload();
     // Keep the gun fed wherever we are: a dry magazine mid-run should cost a
-    // reload, not the objective.
-    if (this.currentAmmo <= 0 && !this.isReloading) this.startReload();
+    // reload, not the objective. With the pouch empty there is nothing to
+    // reload from, so ask the armoury for a magazine — it is paid for out of
+    // team stock, and a team that stops mining eventually goes quiet.
+    if (this.currentAmmo <= 0 && !this.isReloading) {
+      if (this.reserveAmmo <= 0) ctx.requestAmmo?.(this);
+      this.startReload();
+    }
     this.checkProgress(ctx);
 
     const t = ctx.serverTime;

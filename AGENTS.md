@@ -353,6 +353,15 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 - `shoot`: `{ type: 'shoot', origin: Position, direction: Position, targetId?: string, isHeadshot?: boolean }`
   (`targetId` is only a hint: the server re-raycasts and validates line of sight.)
 - `useTool`: `{ type: 'useTool', tool: 'pickaxe' | 'spade', target: Position }`
+- `dismantleEmplacement`: `{ type: 'dismantleEmplacement', emplacementId: string }` —
+  tears down a friendly build in reach and refunds its cost (plus any crate
+  contents) to the team stock; enemy and out-of-reach builds refuse. A crewed
+  build is not refused: its gunner (bot or player) is put out through the same
+  safe exit a wrecked build uses.
+- `scuttleJeep`: `{ type: 'scuttleJeep', vehicleId: string }` — scuttles a
+  friendly jeep in reach and refunds its cost to the team stock, capped by
+  capacity; enemy and out-of-reach jeeps refuse. A crewed jeep is not refused:
+  its driver and passenger are put out through the same safe jeep exit a wreck uses.
 - `build`: `{ type: 'build', position: Position }`
 - `reload`: `{ type: 'reload' }`
 - `pickupFlag`: `{ type: 'pickupFlag' }` (the server decides which flag by proximity)
@@ -370,7 +379,9 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
   full `flags` snapshot and the current `round` — so a late joiner is immediately
   in sync.
 - `playerJoined` / `playerUpdated` / `playerLeft`: roster and per-player state
-  (positions, rotation, HP, equipment, ammo, `carryingFlag`, `spawnProtected`, `isBot`).
+  (positions, rotation, HP, equipment, magazine + pouch ammo, `carryingFlag`,
+  `spawnProtected`, `isBot`). Reloads draw from `reserveAmmo`, which only bench
+  purchases (or the bot armoury, from the same team stock) refill.
 - `playerShot`: `{ playerId, origin, direction, weapon }` for tracers/muzzle flash.
 - `hitConfirmed`: `{ targetId, damage, isHeadshot }` sent to the **shooter** only.
 - `playerDamaged`: `{ playerId, damage, attackerId? }` — feedback only; clients do
@@ -396,7 +407,7 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 251 regression tests (voxel rules, bots, rounds,
+npm test            # node --test tests/ — 260 regression tests (voxel rules, bots, rounds,
                     # workshop/jeep/logistics, spawn shield/regen, feedback, integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):
