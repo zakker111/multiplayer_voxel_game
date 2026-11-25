@@ -528,6 +528,8 @@ export class Game {
   /** Brief white flash applied to a build right after it takes a hit. */
   private emplacementFlashes = new Map<string, { until: number; color: THREE.Color }>();
   private mountedEmplacementId: string | null = null;
+  /** Gunner zoom while manning a cannon/mortar (right-click). */
+  private manningZoom = false;
   private lastEmplacementFire = 0;
   /** Predicted shell path and landing ring for the manned cannon/mortar. */
   private shellPreviewLine: THREE.Line | null = null;
@@ -5150,6 +5152,14 @@ export class Game {
         this.isMouseDown = true;
         this.isLeftDown = true;
         this.fireMannedEmplacement();
+      } else if (e.button === 2) {
+        // Right-click is the gunner's zoom, like iron sights on a rifle. The
+        // mortar uses it too: its target is a point on the ground far away.
+        const kind = this.emplacedSnapshots.get(this.mountedEmplacementId)?.kind;
+        if (kind === 'cannon' || kind === 'mortar') {
+          this.manningZoom = !this.manningZoom;
+          this.showMessage(this.manningZoom ? '🔭 Zoomed in — right-click to zoom out' : '🔭 Zoom out');
+        }
       }
       return;
     }
@@ -6474,8 +6484,14 @@ export class Game {
     // One click places exactly one block; holding the button does nothing
     // extra. This prevents accidentally placing multiple blocks per click.
 
-    // ADS camera zoom
-    const targetFov = this.isAiming ? (this.equipment === 'rifle' ? 45 : 55) : 75;
+    // ADS camera zoom. A manned cannon or mortar gets a tighter gunner zoom so
+    // the fall of shot is readable at its 90-120m range.
+    if (!this.mountedEmplacementId) this.manningZoom = false;
+    let targetFov = 75;
+    if (this.manningZoom) targetFov = 40;
+    // A gun seat owns the view: a rifle ADS left on from before mounting must
+    // not shrink the gunner's field of view.
+    else if (this.isAiming && !this.mountedEmplacementId) targetFov = this.equipment === 'rifle' ? 45 : 55;
     if (Math.abs(this.player.camera.fov - targetFov) > 0.1) {
       this.player.camera.fov += (targetFov - this.player.camera.fov) * Math.min(dt * 12, 1);
       this.player.camera.updateProjectionMatrix();

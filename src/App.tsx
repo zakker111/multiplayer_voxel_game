@@ -1043,9 +1043,9 @@ function App() {
                 <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-sky-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
                   {(gameState.manningKind ? EMPLACEMENT_LABELS[gameState.manningKind] : 'GUN').toUpperCase()} · {gameState.manningAmmo ?? 0} rounds ·{' '}
                   {gameState.manningKind === 'mortar'
-                    ? 'aim the landing ring, click to fire · F to step out'
+                    ? 'aim the landing ring, click to fire · right-click zoom · F to step out'
                     : gameState.manningKind === 'cannon'
-                      ? 'look at the target, click to fire (heavy splash) · F to step out'
+                      ? 'look at the target, click to fire (heavy splash) · right-click zoom · F to step out'
                       : 'hold click to fire · move mouse to aim · F to step out'}
                   {gameState.manningKind === 'mortar' && gameState.manningAim && (
                     <div className="mt-0.5 font-mono text-xs text-sky-200">
