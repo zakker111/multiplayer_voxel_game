@@ -483,7 +483,10 @@ export class Game {
   depositable: number = 0;
   workshops: Workshops | null = null;
   private workshopMeshes: THREE.Group[] = [];
-  private jeeps = new Map<string, { state: JeepSnapshot; mesh: THREE.Group }>();
+  private jeeps = new Map<string, {
+    state: JeepSnapshot; mesh: THREE.Group;
+    seats: { driver: THREE.Object3D; passenger: THREE.Object3D };
+  }>();
   private drivingJeepId: string | null = null;
   /** The jeep whose second seat this player is riding in, online or offline. */
   private ridingJeepId: string | null = null;
@@ -984,12 +987,45 @@ export class Game {
         for (const x of [-1.15, 1.15]) for (const z of [-1.1, 1.1]) box(0.65, 0.85, 0.85, x, 0.5, z, 0x252930);
         box(0.45, 0.25, 0.12, -0.65, 1, -1.76, 0xffdf77);
         box(0.45, 0.25, 0.12, 0.65, 1, -1.76, 0xffdf77);
+        // Seated crew: a jeep reads as crewed even though the occupant's own
+        // body is hidden inside the vehicle. Team colours, helmet on top.
+        const seatFigure = (x: number, z: number) => {
+          const seat = new THREE.Group();
+          const torso = new THREE.Mesh(
+            new THREE.BoxGeometry(0.62, 0.72, 0.42),
+            // Lighter than the body paint so a seated crew reads against it.
+            new THREE.MeshStandardMaterial({ color: state.team === 'blue' ? 0x5b8ae8 : 0xd9635f, roughness: 0.85 }),
+          );
+          torso.position.y = 1.62;
+          const head = new THREE.Mesh(
+            new THREE.BoxGeometry(0.34, 0.34, 0.34),
+            new THREE.MeshStandardMaterial({ color: 0xe0b48c, roughness: 0.9 }),
+          );
+          head.position.y = 2.16;
+          const helmet = new THREE.Mesh(
+            new THREE.BoxGeometry(0.4, 0.16, 0.4),
+            new THREE.MeshStandardMaterial({ color: state.team === 'blue' ? 0x1d3f86 : 0x7d2424, roughness: 0.75 }),
+          );
+          helmet.position.y = 2.36;
+          seat.add(torso, head, helmet);
+          seat.position.set(x, 0, z);
+          seat.visible = false;
+          mesh.add(seat);
+          return seat;
+        };
+        // Side by side inside the cockpit: behind the windshield (z = -0.35)
+        // and in front of the rear deck (z = 0.65), not out on the hood.
+        const seats = { driver: seatFigure(-0.45, 0.15), passenger: seatFigure(0.45, 0.15) };
         mesh.position.set(state.position.x, state.position.y, state.position.z);
         mesh.rotation.y = state.yaw;
         this.scene.add(mesh);
-        jeep = { state, mesh }; this.jeeps.set(state.id, jeep);
+        jeep = { state, mesh, seats }; this.jeeps.set(state.id, jeep);
       }
       jeep.state = state;
+      // Crew figures follow the seats. Your own body is skipped: you are
+      // looking out from that seat, not at it.
+      jeep.seats.driver.visible = !!state.driverId && !state.wreck && state.driverId !== this.localPlayerId;
+      jeep.seats.passenger.visible = !!state.passengerId && !state.wreck && state.passengerId !== this.localPlayerId;
       jeep.mesh.traverse(object => {
         if (object instanceof THREE.Mesh && state.wreck) (object.material as THREE.MeshStandardMaterial).color.setHex(0x3b3b3b);
       });
@@ -3805,7 +3841,8 @@ export class Game {
           remote.mesh = mesh;
         }
         remote.state = msg.state;
-        remote.mesh.visible = !msg.state.isDead && ![...this.jeeps.values()].some(jeep => jeep.state.driverId === msg.playerId);
+        remote.mesh.visible = !msg.state.isDead && ![...this.jeeps.values()].some(jeep =>
+          jeep.state.driverId === msg.playerId || jeep.state.passengerId === msg.playerId);
         remote.targetPosition.set(msg.state.position.x, msg.state.position.y, msg.state.position.z);
         remote.targetRotation.set(0, msg.state.rotation.yaw, 0, 'YXZ');
       }
