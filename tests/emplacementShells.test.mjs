@@ -587,11 +587,12 @@ test('the mortar aim snaps to the ground under the mark, not the gun level', () 
   const base = groundTop(game, tx, tz);
   assert.ok(base !== null, 'the mark starts on solid ground');
 
-  // Raise a 3x3 pad six blocks tall on the mark: the round has to be solved
-  // for the raised surface, not for the gun's own height.
+  // Raise a 9x9 pad six blocks tall on the mark: the round has to be solved
+  // for the raised surface, not for the gun's own height. The pad is wider than
+  // the mortar's dispersion so the scattered burst still lands on it.
   const baseVoxel = Math.floor(base);
-  for (let ox = -1; ox <= 1; ox++) {
-    for (let oz = -1; oz <= 1; oz++) {
+  for (let ox = -4; ox <= 4; ox++) {
+    for (let oz = -4; oz <= 4; oz++) {
       for (let h = 1; h <= 6; h++) {
         game.world.setVoxel(tx + ox, baseVoxel + h, tz + oz, VOXEL_STONE, 3);
       }

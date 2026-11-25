@@ -38,7 +38,7 @@ function App() {
     blueprints: [null, null, null],
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
     benchMenuOpen: false, benchFeedback: '',
-    manningEmplacement: false, manningKind: null, manningAmmo: null, emplacementNearby: false,
+    manningEmplacement: false, manningKind: null, manningAmmo: null, manningAim: null, emplacementNearby: false,
     crateNearby: false, crateStock: null, dismantleTarget: null,
     jeepNearby: false, jeepDriving: false, jeepRiding: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
@@ -1047,6 +1047,11 @@ function App() {
                     : gameState.manningKind === 'cannon'
                       ? 'look at the target, click to fire (heavy splash) · F to step out'
                       : 'hold click to fire · move mouse to aim · F to step out'}
+                  {gameState.manningKind === 'mortar' && gameState.manningAim && (
+                    <div className="mt-0.5 font-mono text-xs text-sky-200">
+                      TARGET X {gameState.manningAim.x.toFixed(1)} · Z {gameState.manningAim.z.toFixed(1)} · {Math.round(gameState.manningAim.range)}m
+                    </div>
+                  )}
                 </div>
               )}
 

@@ -66,7 +66,7 @@ import {
   type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
-import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, blastBuildHits, blastFalloff, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
+import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, blastBuildHits, blastFalloff, mortarImpactPoint, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -654,7 +654,7 @@ export class ServerGame {
     if (emplacement.kind === 'cannon' || emplacement.kind === 'mortar') {
       // The mortar is indirect fire: the gunner names the ground point (their
       // crosshair) and the server solves the arc. No turret spinning, and the
-      // landing marker the client drew is exactly where this round goes.
+      // round bursts inside the landing ring the client drew.
       let aim: Position | null = null;
       if (emplacement.kind === 'mortar') {
         const solution = this.mortarAimPoint(emplacement, target);
@@ -749,9 +749,10 @@ export class ServerGame {
    * aimed at; without one (an old client, a bot that only aimed the seat) the
    * shot falls along the gun's facing at maximum range.
    *
-   * The shot is clamped into the mortar's range band and snapped to the ground,
-   * and the gun is turned to face it — a mortar is always pointed at the fight,
-   * so nobody has to spin the emplacement before firing.
+   * The shot is clamped into the mortar's range band, scattered inside the
+   * blast ring and snapped to the ground, and the gun is turned to face it — a
+   * mortar is always pointed at the fight, so nobody has to spin the emplacement
+   * before firing.
    */
   private mortarAimPoint(
     emplacement: EmplacementSnapshot, target: unknown,
@@ -782,15 +783,18 @@ export class ServerGame {
     const x = emplacement.position.x + dirX * capped;
     const z = emplacement.position.z + dirZ * capped;
     if (Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) return { reason: 'That is outside the map' };
-    // Snap to the ground actually under the marked point. Sampling a band high
-    // above the gun found nothing and fell back to the gun's own height, so on
-    // a slope the solved round crossed that level beyond the target and burst
-    // metres away from the landing ring the gunner aimed with.
-    const ground = this.world.getGroundHeight(x, z);
-
     // Face the shot: the model and every following round point at the fight.
     emplacement.yaw = Math.atan2(-dirX, -dirZ);
-    return { point: { x, y: ground, z } };
+    // Area fire: the round bursts inside the ring, clamped to the range band and
+    // snapped to the ground under the scattered point.
+    return {
+      point: mortarImpactPoint(
+        { x, z },
+        emplacement.position,
+        spec,
+        (ix, iz) => this.world.getGroundHeight(ix, iz),
+      ),
+    };
   }
 
   /** Put a shell in the air. Cannon rounds are flat and fast; mortar rounds are

@@ -13,6 +13,12 @@ export const CANNON_SHELL_SPEED = 85;
  *  mortar's 120 m max range: v² / g = 122 m at 45°. */
 export const MORTAR_SHELL_SPEED = 47;
 
+/** How far a mortar round may fall from the aimed point, in metres. A mortar is
+ *  area fire: the landing ring is the target, not a pinpoint, so a gunner who
+ *  holds one aim point still walks rounds across the ring instead of drilling
+ *  the same tile. Kept well inside `MORTAR_BLAST_RADIUS`. */
+export const MORTAR_DISPERSION = 2.5;
+
 /** `high` lobs over cover (mortar), `low` is the flat solution (cannon). */
 export type BallisticArc = 'high' | 'low';
 
@@ -69,6 +75,39 @@ export function ballisticVelocity(
 export function ballisticRange(speed: number, gravity: number): number {
   if (!Number.isFinite(speed) || !Number.isFinite(gravity) || gravity <= 0) return 0;
   return (speed * speed) / gravity;
+}
+
+/**
+ * Where a mortar round actually bursts: the aimed point scattered inside
+ * `MORTAR_DISPERSION`, clamped back into the gun's range band and snapped to
+ * the ground under the final point. The server and offline play both call this,
+ * so a round lands inside the ring the gunner aimed with in either mode.
+ *
+ * `aim` must already sit inside the range band (both callers clamp it there),
+ * so the scattered point is always at least `minRange - MORTAR_DISPERSION` from
+ * the gun and the clamp only has to correct the band edges.
+ */
+export function mortarImpactPoint(
+  aim: Pick<Position, 'x' | 'z'>,
+  from: Position,
+  spec: { minRange: number; maxRange: number },
+  groundAt: (x: number, z: number) => number,
+  random: () => number = Math.random,
+): Position {
+  const angle = random() * Math.PI * 2;
+  // sqrt keeps the scatter uniform over the disc instead of piling it up in
+  // the middle of the ring.
+  const radius = Math.sqrt(random()) * MORTAR_DISPERSION;
+  let x = aim.x + Math.cos(angle) * radius;
+  let z = aim.z + Math.sin(angle) * radius;
+
+  const dx = x - from.x;
+  const dz = z - from.z;
+  const flat = Math.hypot(dx, dz);
+  const capped = Math.min(Math.max(flat, spec.minRange), spec.maxRange);
+  x = from.x + (dx / flat) * capped;
+  z = from.z + (dz / flat) * capped;
+  return { x, y: groundAt(x, z), z };
 }
 
 export interface ShellArcOptions {

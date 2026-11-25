@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
-  ballisticVelocity, ballisticRange, shellArc, blastBuildHits, blastFalloff, MORTAR_SHELL_SPEED, CANNON_SHELL_SPEED,
+  ballisticVelocity, ballisticRange, shellArc, blastBuildHits, blastFalloff, mortarImpactPoint,
+  MORTAR_SHELL_SPEED, CANNON_SHELL_SPEED, MORTAR_DISPERSION,
 } = require('../dist/tests/ballistics.cjs');
 const { CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE } = require('../dist/tests/sharedTypes.cjs');
 
@@ -37,6 +38,41 @@ test('the mortar can reach its full range band and refuses the impossible', () =
     ballisticVelocity({ x: 0, y: 0, z: 0 }, { x: 400, y: 0, z: 0 }, MORTAR_SHELL_SPEED, GRAVITY),
     null,
     'a point past the muzzle speed is unreachable',
+  );
+});
+
+test('a mortar round scatters inside the ring instead of hitting one tile', () => {
+  const from = { x: 0, y: 10, z: 0 };
+  const aim = { x: 80, z: 0 };
+  const spec = { minRange: 25, maxRange: 120 };
+  const groundAt = () => 10;
+  const impacts = new Set();
+  for (let i = 0; i < 60; i++) {
+    const impact = mortarImpactPoint(aim, from, spec, groundAt);
+    const offset = Math.hypot(impact.x - aim.x, impact.z - aim.z);
+    assert.ok(offset <= MORTAR_DISPERSION + 1e-9, `scattered ${offset.toFixed(2)}m from the aim`);
+    impacts.add(`${impact.x.toFixed(2)},${impact.z.toFixed(2)}`);
+  }
+  assert.ok(impacts.size > 50, 'consecutive rounds do not all land on the same tile');
+});
+
+test('scatter stays inside the range band and snaps to the ground', () => {
+  const from = { x: 0, y: 0, z: 0 };
+  const spec = { minRange: 25, maxRange: 120 };
+  const groundAt = () => 7;
+  // Aim on each edge with a scatter that would leave the band.
+  const near = mortarImpactPoint({ x: 25, z: 0 }, from, spec, groundAt, () => 0.5);
+  const far = mortarImpactPoint({ x: 120, z: 0 }, from, spec, groundAt, () => 0.5);
+  for (const [label, impact] of [['near', near], ['far', far]]) {
+    const range = Math.hypot(impact.x - from.x, impact.z - from.z);
+    assert.ok(range >= spec.minRange - 1e-9 && range <= spec.maxRange + 1e-9, `${label} round left the band at ${range.toFixed(2)}m`);
+    assert.equal(impact.y, 7, `${label} round sits on the ground`);
+  }
+  const seeded = () => 0.42;
+  assert.deepEqual(
+    mortarImpactPoint({ x: 60, z: 0 }, from, spec, groundAt, seeded),
+    mortarImpactPoint({ x: 60, z: 0 }, from, spec, groundAt, seeded),
+    'a supplied random makes the burst reproducible for tests',
   );
 });
 

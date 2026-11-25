@@ -25,7 +25,7 @@ import {
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
   WORKSHOP_CENTERS, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec,
   VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
-  emplacementSpec, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
+  emplacementSpec, EMPLACEMENTS, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
   EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE, emplacedShotDirection,
   CANNON_BLAST_RADIUS, MORTAR_BLAST_RADIUS,
@@ -38,7 +38,7 @@ import {
   type RoundWinner,
 } from '../shared/types';
 import {
-  CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc,
+  CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc, mortarImpactPoint,
   shellStopsAt, type ShellObstacle,
 } from '../shared/ballistics';
 import { SHELL_STEP, stepOfflineShells } from './localShells';
@@ -220,6 +220,8 @@ export interface GameState {
   manningKind: EmplacementKind | null;
   /** Rounds left in the manned nest, or null when not manning one. */
   manningAmmo: number | null;
+  /** Aimed landing point of a manned mortar (the ring centre), or null. */
+  manningAim: { x: number; z: number; range: number } | null;
   /** A mannable nest of your own team is within reach. */
   emplacementNearby: boolean;
   /** A supply crate of your own team is within use reach. */
@@ -1695,9 +1697,14 @@ export class Game {
     if (emplacement.kind === 'cannon' || emplacement.kind === 'mortar') {
       const aim = emplacement.kind === 'mortar' ? this.shellAimPoint(spec, emplacement.position, emplacement.yaw) : null;
       if (emplacement.kind === 'mortar' && !aim) { this.showMessage('Aim the mortar at the ground ahead'); return; }
+      // Offline rounds scatter like the server's: inside the ring, not on its
+      // centre tile every shot.
+      const impact = aim
+        ? mortarImpactPoint(aim, emplacement.position, spec, (x, z) => this.world.getGroundHeight(x, z))
+        : null;
       this.localEmplacementFireAt.set(emplacement.id, this.localTime);
       emplacement.ammo -= 1;
-      this.fireLocalShell(emplacement, pitch, aim);
+      this.fireLocalShell(emplacement, pitch, impact);
       this.applyEmplacements(this.localEmplacements);
       return;
     }
@@ -4812,7 +4819,7 @@ export class Game {
     this.lastEmplacementFire = now;
     if (this.gameMode !== 'online') { this.fireLocalEmplacement(); return; }
     // The mortar is indirect fire: name the ground point under the crosshair so
-    // the server lands the round where the trajectory marker says it will.
+    // the server lands the round inside the ring the trajectory marker shows.
     const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : null;
     const spec = mounted ? emplacementSpec(mounted.kind) : undefined;
     if (mounted?.kind === 'mortar' && spec) {
@@ -4866,6 +4873,20 @@ export class Game {
     const z = from.z + (dz / flat) * capped;
     if (Math.abs(x) >= WORLD_HALF - 1 || Math.abs(z) >= WORLD_HALF - 1) return null;
     return { x, y: this.world.getGroundHeight(x, z), z };
+  }
+
+  /** The aimed landing point of the manned mortar, for the HUD coordinate
+   *  readout. This is the ring centre, before the round's own scatter. */
+  private mannedMortarAim(): { x: number; z: number; range: number } | null {
+    const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : undefined;
+    if (!mounted || mounted.kind !== 'mortar') return null;
+    const aim = this.shellAimPoint(EMPLACEMENTS.mortar, mounted.position, mounted.yaw);
+    if (!aim) return null;
+    return {
+      x: aim.x,
+      z: aim.z,
+      range: Math.hypot(aim.x - mounted.position.x, aim.z - mounted.position.z),
+    };
   }
 
   /** Bodies and hardware a shell stops on, in the exact shape the shared
@@ -4928,7 +4949,7 @@ export class Game {
     if (!velocity) { this.hideShellPreview(); return; }
 
     // Same integration and gravity the server steps shells with, so this line
-    // ends exactly where the round will land.
+    // ends on the aimed point; a mortar burst may scatter inside the ring.
     const obstacles = this.shellObstacles();
     const arc = shellArc(origin, velocity, {
       gravity: EMPLACEMENT_SHELL_GRAVITY,
@@ -8349,6 +8370,7 @@ export class Game {
         manningAmmo: this.mountedEmplacementId
           ? (this.emplacedSnapshots.get(this.mountedEmplacementId)?.ammo ?? null)
           : null,
+        manningAim: this.mannedMortarAim(),
         emplacementNearby: this.nearbyMannableEmplacement() !== null,
         crateNearby: crate !== null,
         crateStock: crate ? crate.stock : null,
