@@ -13,6 +13,8 @@ interface SpotPostLike {
   kind: string;
   team: 'red' | 'blue';
   position: Position;
+  /** Destroyed posts smoke but no longer spot. */
+  wreck?: boolean;
 }
 
 /**
@@ -27,7 +29,7 @@ export function spotPostCoverage(
   forward: { x: number; z: number },
 ): SpotPostCoverage | null {
   for (const post of posts) {
-    if (post.kind !== 'spottingPost' || post.team !== team) continue;
+    if (post.wreck || post.kind !== 'spottingPost' || post.team !== team) continue;
     return {
       distance: Math.round(Math.hypot(post.position.x - player.x, post.position.z - player.z)),
       bearing: Math.round(relativeBearingDegrees(player, forward, post.position)),

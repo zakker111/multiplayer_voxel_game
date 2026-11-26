@@ -183,7 +183,9 @@ test('a destroyed crate takes its stock with it', () => {
 
   crate.stock = 25;
   game.damageEmplacement(crate.id, 9999);
-  assert.equal(game.emplacements.size, 0, 'the wreck is gone');
+  assert.equal(game.emplacements.size, 1, 'the wreck stays on the map');
+  assert.equal(crate.wreck, true, 'the crate is a wreck');
+  assert.equal(crate.stock, 0, 'its cargo is lost with it');
 
   game.depositableBlocks.set(id, 3);
   const before = game.inventories.get(id);

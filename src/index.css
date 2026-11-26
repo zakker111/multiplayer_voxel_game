@@ -21,3 +21,15 @@ canvas {
   display: block;
   cursor: none;
 }
+
+/* Indeterminate loading bar: a short segment sweeps the track while the
+   synchronous Game constructor builds the world. */
+@keyframes loading-bar-slide {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+
+.loading-bar-indeterminate {
+  animation: loading-bar-slide 1.3s ease-in-out infinite;
+  will-change: transform;
+}

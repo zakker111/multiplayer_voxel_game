@@ -63,7 +63,7 @@ import {
   WORLD_HALF, vehicleSpec, emplacementSpec, EMPLACEMENTS, BENCH_REACH, benchPosition, EmplacementKind,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_USE_REACH,
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
-  SHELL_PACK_COST, SHELL_PACK_LIMIT, SHELL_PACK_ROUNDS,
+  SHELL_PACK_COST, SHELL_PACK_LIMIT, SHELL_PACK_ROUNDS, WRECK_LIFETIME_SECONDS,
   emplacementAmmoCap, emplacementDismantleRefund,
   EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH, emplacedShotDirection,
   EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
@@ -117,6 +117,8 @@ const BOT_LOGISTICS_CAPACITY = 12;
 // (cannon, cost 90). Lower values starve emplacements; higher values waste
 // mining trips on stock the bots cannot spend on their own.
 const BOT_LOGISTICS_MIN_STOCK = 90;
+/** A walking bot's footprint for vehicle avoidance: its 0.45m capsule. */
+const BOT_VEHICLE_FOOTPRINT: Footprint = { halfWidth: 0.45, halfLength: 0.45, height: 1.9 };
 const BOT_LOGISTICS_MINE_RADIUS = 8;
 
 // Emplacement placement rules (Phase 4). Your own base may be fortified, but
@@ -220,6 +222,8 @@ export class ServerGame {
   private jeeps = new Map<string, ServerJeep>();
   private jeepSequence = 0;
   private emplacements = new Map<string, EmplacementSnapshot>();
+  /** Server clock when each wrecked build stops smoking and leaves the map. */
+  private emplacementWreckUntil = new Map<string, number>();
   private emplacementSequence = 0;
   private emplacementPreviewAt = new Map<string, number>();
   /** Last round fired per emplacement, on the server clock. */
@@ -252,7 +256,11 @@ export class ServerGame {
   }
 
   private emplacementSnapshots(): EmplacementSnapshot[] {
-    return [...this.emplacements.values()].map(e => ({ ...e, position: { ...e.position } }));
+    return [...this.emplacements.values()].map(e => ({
+      ...e,
+      position: { ...e.position },
+      wreck: Boolean(e.wreck),
+    }));
   }
 
   private broadcastEmplacements(): void {
@@ -266,7 +274,7 @@ export class ServerGame {
   private broadcastSpotReports(): void {
     const posts: Record<'red' | 'blue', EmplacementSnapshot[]> = { red: [], blue: [] };
     for (const emplacement of this.emplacements.values()) {
-      if (emplacement.kind === 'spottingPost' && emplacement.hp > 0) posts[emplacement.team].push(emplacement);
+      if (emplacement.kind === 'spottingPost' && !emplacement.wreck) posts[emplacement.team].push(emplacement);
     }
     const hasPost = { red: posts.red.length > 0, blue: posts.blue.length > 0 };
 
@@ -333,6 +341,7 @@ export class ServerGame {
     if (!this.jeepClear(spot, rotation, spec)) return { ok: false, reason: 'No room there' };
     const padded = { ...spec, halfWidth: spec.halfWidth + EMPLACEMENT_SEPARATION, halfLength: spec.halfLength + EMPLACEMENT_SEPARATION };
     for (const other of this.emplacements.values()) {
+      if (other.wreck) continue;
       const otherSpec = emplacementSpec(other.kind) ?? spec;
       if (Math.abs(other.position.y - ground) >= (spec.height + otherSpec.height) / 2) continue;
       if (vehicleRectsOverlap(spot.x, spot.z, rotation, padded, other.position.x, other.position.z, other.yaw, otherSpec)) {
@@ -340,7 +349,7 @@ export class ServerGame {
       }
     }
 
-    const built = [...this.emplacements.values()].filter(e => e.team === player.team && e.kind === spec.kind).length;
+    const built = [...this.emplacements.values()].filter(e => e.team === player.team && e.kind === spec.kind && !e.wreck).length;
     if (built >= spec.teamLimit) return { ok: false, reason: 'Team limit for that build reached' };
 
     return { ok: true, spec, spot, rotation };
@@ -389,6 +398,7 @@ export class ServerGame {
       stock: 0,
       baseYaw: rotation,
       gunnerId: null,
+      wreck: false,
     };
     this.emplacements.set(emplacement.id, emplacement);
     this.broadcastEmplacements();
@@ -416,7 +426,7 @@ export class ServerGame {
     if (!player || player.isDead || player.isSpectating || typeof emplacementId !== 'string') return;
     if (this.jeepOf(playerId)) return;
     const emplacement = this.emplacements.get(emplacementId);
-    if (!emplacement) return;
+    if (!emplacement || emplacement.wreck) return;
     if (emplacement.team !== player.team) return this.emplacementMessage(playerId, 'Only your own team builds can be dismantled');
     // A crewed build is not refused: removeEmplacement puts the occupant out
     // through the same safe exit a wrecked build uses, so a bot parked on a
@@ -457,7 +467,7 @@ export class ServerGame {
       if (this.workshopStock[team] < spec.cost) continue;
       let standing = 0;
       for (const emplacement of this.emplacements.values()) {
-        if (emplacement.team === team && emplacement.kind === kind) standing++;
+        if (!emplacement.wreck && emplacement.team === team && emplacement.kind === kind) standing++;
       }
       if (standing >= spec.teamLimit) continue;
       options.push({ kind, standing });
@@ -542,7 +552,7 @@ export class ServerGame {
     let best: EmplacementSnapshot | undefined;
     let bestDistance = Infinity;
     for (const emplacement of this.emplacements.values()) {
-      if (!MANNED_EMPLACEMENTS.includes(emplacement.kind) || emplacement.team !== player.team) continue;
+      if (emplacement.wreck || !MANNED_EMPLACEMENTS.includes(emplacement.kind) || emplacement.team !== player.team) continue;
       const occupant = emplacement.gunnerId ? this.players.get(emplacement.gunnerId) : undefined;
       if (occupant && occupant.id !== playerId && !occupant.isDead && !occupant.isSpectating) continue;
       const distance = Math.hypot(
@@ -564,7 +574,7 @@ export class ServerGame {
     if (this.jeepOf(playerId) || this.gunnerEmplacement(playerId)) return;
     if (player.carryingFlag) return this.emplacementMessage(playerId, 'Drop the flag before manning a nest');
     const emplacement = this.emplacements.get(emplacementId);
-    if (!emplacement) return;
+    if (!emplacement || emplacement.wreck) return;
     if (!MANNED_EMPLACEMENTS.includes(emplacement.kind)) return this.emplacementMessage(playerId, 'That build cannot be manned');
     if (emplacement.team !== player.team) return this.emplacementMessage(playerId, 'That nest belongs to the other team');
     const occupant = emplacement.gunnerId ? this.players.get(emplacement.gunnerId) : undefined;
@@ -651,7 +661,7 @@ export class ServerGame {
   private fireEmplacement(playerId: string, target?: unknown): void {
     const emplacement = this.gunnerEmplacement(playerId);
     const player = this.players.get(playerId);
-    if (!emplacement || !player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
+    if (!emplacement || emplacement.wreck || !player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
     const spec = emplacementSpec(emplacement.kind);
     if (!spec) return;
     if (emplacement.ammo <= 0) return this.emplacementMessage(playerId, 'The nest is out of rounds');
@@ -921,6 +931,7 @@ export class ServerGame {
       obstacles.push({ kind: 'footprint', team: jeep.team, position: jeep.position, footprint: vehicleSpec(jeep.kind) });
     }
     for (const emplacement of this.emplacements.values()) {
+      if (emplacement.wreck) continue;
       const spec = emplacementSpec(emplacement.kind);
       if (!spec) continue;
       obstacles.push({ kind: 'footprint', team: emplacement.team, position: emplacement.position, footprint: spec });
@@ -951,7 +962,8 @@ export class ServerGame {
     }
     // One list of builds, each hit once and already at the shared falloff; a
     // build the shell struck directly is the full-power entry.
-    for (const { build, damage } of blastBuildHits(shell.team, position, radius, maxDamage, this.emplacements.values(), shell.velocity)) {
+    const standingBuilds = [...this.emplacements.values()].filter(e => !e.wreck);
+    for (const { build, damage } of blastBuildHits(shell.team, position, radius, maxDamage, standingBuilds, shell.velocity)) {
       this.damageEmplacement(build.id, damage);
     }
     // Terrain takes the blast by distance from the burst: blocks at the centre
@@ -996,6 +1008,7 @@ export class ServerGame {
       : this.players.values();
     return vehicleClear(this.world, position, yaw, spec, {
       vehicles: this.jeeps.values(),
+      structures: this.emplacements.values(),
       players,
       ignoreVehicleId: ignoreId ?? null,
       ignorePlayerId: null,
@@ -1175,17 +1188,19 @@ export class ServerGame {
     if (jeep.wreck || !(damage > 0)) return;
     jeep.hp = Math.max(0, jeep.hp - Math.max(1, Math.round(damage)));
     if (jeep.hp === 0) {
+      // The driver's exit also puts the passenger out: a jeep cannot carry a
+      // passenger without a driver.
       if (jeep.driverId) this.exitJeep(jeep.driverId, true);
-      else if (jeep.passengerId) this.exitJeep(jeep.passengerId, true);
-      jeep.wreck = true; jeep.speed = 0; jeep.wreckUntil = this.world.serverTime + 4;
+      jeep.wreck = true; jeep.speed = 0; jeep.wreckUntil = this.world.serverTime + WRECK_LIFETIME_SECONDS;
     }
     this.broadcastJeeps();
   }
 
-  /** Spent rounds hurt structures too; at zero hp the squad loses the build. */
+  /** Spent rounds hurt structures too; at zero hp the build becomes a smoking
+   *  wreck that no longer counts against its team's limit. */
   private damageEmplacement(emplacementId: string, damage: number): void {
     const emplacement = this.emplacements.get(emplacementId);
-    if (!emplacement || !(damage > 0)) return;
+    if (!emplacement || emplacement.wreck || !(damage > 0)) return;
     const maxHp = emplacementSpec(emplacement.kind)?.maxHp ?? 0;
     // Builds keep whole HP: round the hit once, here, so every caller (rounds,
     // blast splash) leaves the structure at an integer.
@@ -1205,13 +1220,44 @@ export class ServerGame {
       this.broadcastEmplacements();
       return;
     }
-    this.removeEmplacement(emplacement);
+    this.wreckEmplacement(emplacement);
+  }
+
+  /** Keep a destroyed build on the map as a smoking wreck for a few minutes.
+   *  Its gunner is set down, its ammo and cargo are lost, and it stops counting
+   *  toward the team limit immediately. */
+  private wreckEmplacement(emplacement: EmplacementSnapshot): void {
+    if (emplacement.wreck) return;
+    if (emplacement.gunnerId) this.dismountEmplacement(emplacement.gunnerId, true);
+    emplacement.wreck = true;
+    emplacement.gunnerId = null;
+    emplacement.ammo = 0;
+    emplacement.stock = 0;
+    this.emplacementFireAt.delete(emplacement.id);
+    this.emplacementWreckUntil.set(emplacement.id, this.world.serverTime + WRECK_LIFETIME_SECONDS);
+    this.broadcastEmplacements();
+  }
+
+  /** Drop wrecks whose smoke has burned out. */
+  private updateEmplacements(): void {
+    if (this.emplacementWreckUntil.size === 0) return;
+    let removed = false;
+    for (const [id, until] of this.emplacementWreckUntil) {
+      if (this.world.serverTime < until) continue;
+      // Wrecking a build already put its gunner out, so only the husk is left.
+      this.emplacementWreckUntil.delete(id);
+      this.emplacements.delete(id);
+      this.emplacementFireAt.delete(id);
+      removed = true;
+    }
+    if (removed) this.broadcastEmplacements();
   }
 
   /** Take a structure off the map; a gunner inside it is put back on the ground. */
   private removeEmplacement(emplacement: EmplacementSnapshot): void {
     if (emplacement.gunnerId) this.dismountEmplacement(emplacement.gunnerId, true);
     this.emplacements.delete(emplacement.id);
+    this.emplacementWreckUntil.delete(emplacement.id);
     this.emplacementFireAt.delete(emplacement.id);
     this.broadcastEmplacements();
   }
@@ -1220,7 +1266,7 @@ export class ServerGame {
   private hitEmplacement(origin: Position, direction: Position, maxDist: number, team: 'red' | 'blue'): { emplacement: EmplacementSnapshot; distance: number } | null {
     let best: { emplacement: EmplacementSnapshot; distance: number } | null = null;
     for (const emplacement of this.emplacements.values()) {
-      if (emplacement.team === team) continue;
+      if (emplacement.wreck || emplacement.team === team) continue;
       const spec = emplacementSpec(emplacement.kind);
       if (!spec) continue;
       let near = 0;
@@ -1410,7 +1456,7 @@ export class ServerGame {
     }
     if (typeof emplacementId !== 'string') return;
     const emplacement = this.emplacements.get(emplacementId);
-    if (!emplacement) return;
+    if (!emplacement || emplacement.wreck) return;
     if (emplacement.team !== player.team) return this.emplacementMessage(playerId, 'That gun belongs to the other team');
     const rounds = SHELL_PACK_ROUNDS[emplacement.kind];
     if (!rounds) return this.emplacementMessage(playerId, 'Only cannons and mortars take shell packs');
@@ -1484,7 +1530,7 @@ export class ServerGame {
     if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') return;
     if (typeof emplacementId !== 'string' || (action !== 'deposit' && action !== 'draw')) return;
     const crate = this.emplacements.get(emplacementId);
-    if (!crate || crate.kind !== 'supplyCrate') return this.emplacementMessage(playerId, 'That build is not a supply crate');
+    if (!crate || crate.wreck || crate.kind !== 'supplyCrate') return this.emplacementMessage(playerId, 'That build is not a supply crate');
     if (crate.team !== player.team) return this.emplacementMessage(playerId, 'That crate belongs to the other team');
     const distance = Math.hypot(
       player.position.x - crate.position.x,
@@ -1654,7 +1700,7 @@ export class ServerGame {
         let best: EmplacementSnapshot | undefined;
         let bestDistance = radius;
         for (const emplacement of this.emplacements.values()) {
-          if (emplacement.team !== bot.team || !crewable(emplacement) || emplacement.ammo <= 0) continue;
+          if (emplacement.wreck || emplacement.team !== bot.team || !crewable(emplacement) || emplacement.ammo <= 0) continue;
           if (emplacement.gunnerId && emplacement.gunnerId !== bot.id) continue;
           const distance = Math.hypot(
             emplacement.position.x - bot.position.x,
@@ -1704,6 +1750,7 @@ export class ServerGame {
     // particular must be fightable, not invisible. Both teams' builds are listed
     // and each bot filters its own side out in perception (same as players).
     for (const e of this.emplacements.values()) {
+      if (e.wreck) continue;
       targets.push({
         id: e.id,
         position: { ...e.position },
@@ -1749,7 +1796,7 @@ export class ServerGame {
       // Bots walk around built structures instead of grinding into them; a
       // manned nest especially must not be steppable, or a bot would stand
       // inside a gun that is shooting at its friends.
-      blockedBy: (x, z) => {
+      blockedBy: (x, z, y) => {
         for (const emplacement of this.emplacements.values()) {
           const spec = emplacementSpec(emplacement.kind);
           if (!spec) continue;
@@ -1760,6 +1807,15 @@ export class ServerGame {
           const localX = cos * dx - sin * dz;
           const localZ = sin * dx + cos * dz;
           if (Math.abs(localX) <= spec.halfWidth + 0.5 && Math.abs(localZ) <= spec.halfLength + 0.5) return true;
+        }
+        // A vehicle is terrain to a walking bot too: probe its rotated
+        // footprint so the AI routes around a parked or moving jeep instead of
+        // grinding into its side and calling itself stuck.
+        for (const jeep of this.jeeps.values()) {
+          const spec = vehicleSpec(jeep.kind);
+          if (Math.abs(jeep.position.y - y) >= spec.height) continue;
+          if (vehicleRectsOverlap(x, z, 0, BOT_VEHICLE_FOOTPRINT,
+            jeep.position.x, jeep.position.z, jeep.yaw, spec)) return true;
         }
         return false;
       },
@@ -1805,7 +1861,7 @@ export class ServerGame {
     // every bot round aimed at a nest into a no-op.
     const emplacement = this.emplacements.get(targetId);
     if (emplacement) {
-      if (emplacement.team === bot.team) return;
+      if (emplacement.wreck || emplacement.team === bot.team) return;
       const aimPoint = { x: emplacement.position.x, y: emplacement.position.y + 0.8, z: emplacement.position.z };
       if (!this.hasLineOfSight(origin, aimPoint)) {
         const hit = this.world.raycast(origin, direction, 350);
@@ -2098,6 +2154,7 @@ export class ServerGame {
         if (emplacement.gunnerId) this.dismountEmplacement(emplacement.gunnerId, true);
       }
       this.emplacements.clear();
+      this.emplacementWreckUntil.clear();
       this.emplacementFireAt.clear();
       this.shells.clear();
       this.broadcastEmplacements();
@@ -2555,8 +2612,31 @@ export class ServerGame {
       const enemyDrop = this.droppedFlags.find((f) => f.team === enemyTeam);
       ctx.enemyFlagDropPos = enemyDrop ? enemyDrop.position : null;
       player.botUpdate(this.tickDt, ctx);
+      // Direct movements (strafe, break-contact) bypass the probe list; keep a
+      // walking bot from ending a tick inside a vehicle's body.
+      if (!this.jeepOf(player.id)) this.pushBotOutOfVehicles(player);
       ctx.friendlyDroppedFlagPos = null;
       ctx.enemyFlagDropPos = null;
+    }
+  }
+
+  /** Shortest push out of any vehicle body a walking bot overlaps. */
+  private pushBotOutOfVehicles(bot: ServerBot): void {
+    for (const jeep of this.jeeps.values()) {
+      if (jeep.driverId === bot.id || jeep.passengerId === bot.id) continue;
+      const spec = vehicleSpec(jeep.kind);
+      if (Math.abs(jeep.position.y - bot.position.y) >= spec.height) continue;
+      const cos = Math.cos(jeep.yaw), sin = Math.sin(jeep.yaw);
+      const dx = bot.position.x - jeep.position.x, dz = bot.position.z - jeep.position.z;
+      let localX = cos * dx - sin * dz, localZ = sin * dx + cos * dz;
+      const radius = 0.45;
+      if (Math.abs(localX) >= spec.halfWidth + radius || Math.abs(localZ) >= spec.halfLength + radius) continue;
+      const pushX = spec.halfWidth + radius - Math.abs(localX);
+      const pushZ = spec.halfLength + radius - Math.abs(localZ);
+      if (pushX < pushZ) localX += (localX < 0 ? -1 : 1) * pushX;
+      else localZ += (localZ < 0 ? -1 : 1) * pushZ;
+      bot.position.x = jeep.position.x + cos * localX + sin * localZ;
+      bot.position.z = jeep.position.z - sin * localX + cos * localZ;
     }
   }
 
@@ -3701,6 +3781,7 @@ export class ServerGame {
     // Round clock + phase transitions (live -> intermission -> next round)
     this.updateRound(dt);
     this.updateJeeps(dt);
+    this.updateEmplacements();
     this.updateShells(dt);
     // A manned nest turns with its gunner; 10Hz is enough to read as smooth and
     // keeps aim updates off the per-message broadcast path.

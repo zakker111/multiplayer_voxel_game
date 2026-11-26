@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
 import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SHELL_PACK_COST, SHELL_PACK_LIMIT, emplacementSpec, type EmplacementKind } from './shared/types';
-import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower } from 'lucide-react';
+import { Globe, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower } from 'lucide-react';
 
 /** HUD names for the bench blueprints; the shared table only carries numbers. */
 const EMPLACEMENT_LABELS: Record<EmplacementKind, string> = {
@@ -28,9 +28,53 @@ function formatRoundClock(seconds: number): string {
   return `${mins}:${String(total % 60).padStart(2, '0')}`;
 }
 
+type StartMode = 'multiplayer' | 'singleplayer' | 'online' | 'beta';
+
+/** Loading-screen copy for each start mode. The tips are the first things a
+ *  player needs in that mode, so the screen teaches while the arena builds. */
+const MODE_LOADING: Record<StartMode, { name: string; blurb: string; tips: string[] }> = {
+  beta: {
+    name: 'Beta Development',
+    blurb: 'Workshop and vehicle proving grounds',
+    tips: [
+      'Press G at your team workshop to build a jeep.',
+      'Press F to board a jeep or man a blueprint gun.',
+      'Mine with the pickaxe and deposit blocks at the workshop.',
+    ],
+  },
+  online: {
+    name: 'Online Multiplayer',
+    blurb: 'Server-authoritative 10v10 CTF',
+    tips: [
+      'The HUD shows LIVE once the server match is connected.',
+      'Press F to man a crew-served gun; right-click zooms a cannon or mortar.',
+      'Deposit harvested blocks at your workshop to fund vehicles.',
+    ],
+  },
+  multiplayer: {
+    name: 'Bot Match',
+    blurb: 'Offline CTF against tactical bots',
+    tips: [
+      'Grab the enemy flag and carry it back to your own stand.',
+      'One headshot kills; body shots take three.',
+      'Right-click places a block instantly after harvesting.',
+    ],
+  },
+  singleplayer: {
+    name: 'Free Sandbox',
+    blurb: 'Build, drive, and test without bots',
+    tips: [
+      'There are no bots here — test building and combat at your own pace.',
+      'Pickaxe harvests, spade digs, right-click places.',
+      'Press 1–4 or use the mouse wheel to switch equipment.',
+    ],
+  },
+};
+
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const gameRef = useRef<Game | null>(null);
+  const pendingSpectatorRef = useRef(false);
   const [gameState, setGameState] = useState<GameState>({
     hp: 100, maxHp: 100, equipment: 'rifle', inventory: 0,
     depositable: 0, workshopStock: 0, workshopCapacity: 0, workshopDistance: null,
@@ -67,7 +111,9 @@ function App() {
     audioVolume: 1,
   });
   const [started, setStarted] = useState(false);
-  const [gameMode, setGameMode] = useState<'multiplayer' | 'singleplayer' | 'online' | 'beta' | null>(null);
+  const [gameMode, setGameMode] = useState<StartMode | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [bootAttempt, setBootAttempt] = useState(0);
   const [selectedTeam, setSelectedTeam] = useState<'red' | 'blue'>('blue');
   const [isPointerLocked, setIsPointerLocked] = useState(false);
 
@@ -90,10 +136,10 @@ function App() {
       const serverParam = params.get('server');
       if (serverParam) setServerUrl(serverParam);
 
+      pendingSpectatorRef.current = modeParam === 'spectator';
       if (modeParam === 'spectator') {
         setSelectedTeam(teamParam);
         setGameMode('multiplayer');
-        setTimeout(() => gameRef.current?.toggleSpectator(), 400);
       } else if (modeParam === 'bots' || modeParam === 'multiplayer') {
         setSelectedTeam(teamParam);
         setGameMode('multiplayer');
@@ -130,31 +176,63 @@ function App() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
     }
-    
-    // Create game after a small delay to ensure canvas is ready
-    setTimeout(() => {
-      if (!canvasRef.current || gameRef.current) return;
-      
-      const game = new Game(canvasRef.current, gameMode, selectedTeam, serverUrl, playerName);
-      game.onStateChange = (state) => setGameState(state);
-      
-      game.start();
-      gameRef.current = game;
-      
-      // Auto-start when game is created
-      game.requestPointerLock(canvasRef.current);
-      setStarted(true);
-    }, 100);
-    
-    return () => { 
-      if (gameRef.current) {
-        gameRef.current.destroy(); 
-        gameRef.current = null;
+
+    let cancelled = false;
+    // Two frames let the loading screen paint before the synchronous Game
+    // constructor runs. The timeout is a watchdog for hidden or throttled
+    // tabs, not a progress stage.
+    const nextPaint = () => new Promise<void>((resolve) => {
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      requestAnimationFrame(() => requestAnimationFrame(settle));
+      window.setTimeout(settle, 250);
+    });
+
+    const boot = async () => {
+      try {
+        setLoadError('');
+        await nextPaint();
+        if (cancelled) return;
+
+        const game = new Game(canvas, gameMode, selectedTeam, serverUrl, playerName);
+        game.onStateChange = (state) => setGameState(state);
+        gameRef.current = game;
+        // start() renders the first frame synchronously, so readiness is tied
+        // to the actual first frame rather than a simulated percentage.
+        game.start();
+
+        if (pendingSpectatorRef.current) {
+          game.toggleSpectator();
+          pendingSpectatorRef.current = false;
+        } else {
+          game.requestPointerLock(canvas);
+        }
+        setStarted(true);
+      } catch (error) {
+        console.error('Failed to start the match', error);
+        setLoadError('The match could not start. Try again or return to the menu.');
       }
     };
-  }, [gameMode, selectedTeam, serverUrl, playerName]);
+    void boot();
+    
+    return () => { 
+      cancelled = true;
+      const game = gameRef.current;
+      gameRef.current = null;
+      try {
+        game?.destroy();
+      } catch (error) {
+        console.error('Failed to shut down the previous game', error);
+      }
+    };
+  }, [gameMode, selectedTeam, serverUrl, playerName, bootAttempt]);
 
-  const handleStart = (mode: 'multiplayer' | 'singleplayer' | 'online' | 'beta', team: 'red' | 'blue' = 'blue', targetServer?: string) => {
+  const handleStart = (mode: StartMode, team: 'red' | 'blue' = 'blue', targetServer?: string, spectate = false) => {
+    pendingSpectatorRef.current = spectate;
     setSelectedTeam(team);
     setServerUrl(targetServer);
     setGameMode(mode);
@@ -164,6 +242,14 @@ function App() {
     const target = serverType === 'custom' && customServerUrl.trim() ? customServerUrl.trim() : undefined;
     handleStart('online', modalTeam, target);
     setShowMultiplayerModal(false);
+  };
+
+  const retryLoad = () => setBootAttempt((attempt) => attempt + 1);
+
+  const backToMenu = () => {
+    setLoadError('');
+    setGameMode(null);
+    pendingSpectatorRef.current = false;
   };
 
   const copyInviteLink = (targetTeam?: 'red' | 'blue') => {
@@ -215,7 +301,7 @@ function App() {
     <div className="relative w-screen h-screen overflow-hidden bg-black">
       <canvas ref={canvasRef} className="w-full h-full block" onClick={handleCanvasClick} onContextMenu={handleRightClick} />
 
-      {!started && (
+      {!started && !gameMode && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-50">
           <div className="text-center max-w-3xl px-4">
             <h1 className="text-5xl font-bold text-white mb-1">🎮 Voxel FPS</h1>
@@ -237,26 +323,13 @@ function App() {
                 🧪 Beta Development Mode
               </button>
               <button
-                onClick={() => {
-                  handleStart('online', 'blue');
-                  setTimeout(() => {
-                    const opposite = 'red';
-                    window.open(window.location.origin + window.location.pathname + `?mode=online&team=${opposite}`, '_blank');
-                  }, 400);
-                }}
-                className="px-5 py-3.5 bg-purple-600 hover:bg-purple-500 text-white font-bold text-base rounded-xl transition-all shadow-lg shadow-purple-600/30 cursor-pointer flex items-center gap-2"
-                title="Launches this tab as Blue and opens a 2nd tab as Red to test 2-player multiplayer instantly!"
-              >
-                <Users className="w-5 h-5" /> <span>👥 Test 2-Player Match</span>
-              </button>
-              <button
                 onClick={() => handleStart('multiplayer', 'blue')}
                 className="px-6 py-3.5 bg-[#00ff88] text-black font-bold text-lg rounded-xl hover:bg-[#00cc66] transition-colors shadow-lg cursor-pointer"
               >
                 🤖 Play vs Bots
               </button>
               <button
-                onClick={() => { handleStart('multiplayer'); setTimeout(() => gameRef.current?.toggleSpectator(), 300); }}
+                onClick={() => handleStart('multiplayer', 'blue', undefined, true)}
                 className="px-6 py-3.5 bg-indigo-600 text-white font-bold text-lg rounded-xl hover:bg-indigo-500 transition-colors shadow-lg cursor-pointer flex items-center gap-2"
               >
                 <span>🎥</span> AI Spectator
@@ -306,6 +379,74 @@ function App() {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {!started && gameMode && (
+        <div className="absolute inset-0 z-[70] flex items-center justify-center bg-gray-950/95 p-4">
+          <div className="w-full max-w-lg">
+            <div className="text-center mb-6">
+              <div className="text-[11px] font-bold uppercase tracking-[0.3em] text-emerald-400 mb-2">Deploying</div>
+              <h1 className="text-3xl font-black text-white">{MODE_LOADING[gameMode].name}</h1>
+              <p className="text-sm text-gray-400 mt-1">{MODE_LOADING[gameMode].blurb}</p>
+            </div>
+
+            <div className="mb-2 text-xs font-semibold">
+              <span className={loadError ? 'text-red-300' : 'text-gray-200'}>
+                {loadError || 'Loading the arena — this can take a moment on slower devices.'}
+              </span>
+            </div>
+            {!loadError && (
+              <div
+                className="relative h-3 overflow-hidden rounded-full border border-gray-700 bg-gray-800"
+                role="progressbar"
+                aria-label="Match loading"
+                aria-busy
+              >
+                <div className="loading-bar-indeterminate absolute inset-y-0 left-0 w-1/3 rounded-full bg-gradient-to-r from-blue-500 via-emerald-400 to-[#00ff88]" />
+              </div>
+            )}
+
+            {loadError && (
+              <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={retryLoad}
+                  className="flex-1 rounded-xl bg-emerald-500 px-4 py-3 font-bold text-black transition-colors hover:bg-emerald-400 cursor-pointer"
+                >
+                  Try again
+                </button>
+                <button
+                  type="button"
+                  onClick={backToMenu}
+                  className="flex-1 rounded-xl border border-gray-700 bg-gray-800 px-4 py-3 font-bold text-gray-200 transition-colors hover:bg-gray-700 cursor-pointer inline-flex items-center justify-center gap-2"
+                >
+                  <ArrowLeft className="w-4 h-4" /> Back to menu
+                </button>
+              </div>
+            )}
+
+            <div className="mt-6 rounded-2xl border border-gray-800 bg-gray-900/80 p-5">
+              <div className="mb-3 flex items-center gap-2">
+                <span className="text-base">💡</span>
+                <h2 className="text-[11px] font-bold uppercase tracking-wider text-[#00ff88]">Field tips</h2>
+              </div>
+              <ul className="space-y-2 text-sm text-gray-300">
+                {MODE_LOADING[gameMode].tips.map((tip) => (
+                  <li key={tip} className="flex gap-2">
+                    <span className="text-emerald-400">▸</span>
+                    <span>{tip}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {!loadError && (
+              <p className="mt-4 text-center text-[11px] text-gray-500">
+                Click the game view after loading to lock your aim.
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -479,26 +620,8 @@ function App() {
                 </button>
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-gray-800/80">
-                <div className="flex items-center gap-2 text-xs text-emerald-300 font-semibold">
-                  <Users className="w-4 h-4 text-emerald-400" />
-                  <span>Test on this device (Instant 2-Player)</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const otherTeam = modalTeam === 'blue' ? 'red' : 'blue';
-                    window.open(window.location.origin + window.location.pathname + `?mode=online&team=${otherTeam}`, '_blank');
-                  }}
-                  className="px-3 py-1.5 bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-200 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Users className="w-3.5 h-3.5" />
-                  <span>Open 2nd Player Tab ({modalTeam === 'blue' ? 'RED' : 'BLUE'})</span>
-                </button>
-              </div>
-
               <p className="text-[11px] text-gray-400">
-                Supports real-time WebSocket, HTTP SSE fallback, and browser mesh sync. Open two tabs side-by-side to watch players shoot, build, and capture flags in real-time!
+                Supports real-time WebSocket, HTTP SSE fallback, and browser mesh sync. Share the invite link with a friend to play together.
               </p>
             </div>
 
@@ -678,18 +801,6 @@ function App() {
                   {selectedTeam} Team
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  const opposite = selectedTeam === 'blue' ? 'red' : 'blue';
-                  window.open(window.location.origin + window.location.pathname + `?mode=online&team=${opposite}`, '_blank');
-                }}
-                className="px-3 py-1.5 bg-indigo-600/90 hover:bg-indigo-600 text-white rounded-lg border border-indigo-400/50 text-xs font-semibold shadow-lg transition-all flex items-center gap-1.5 cursor-pointer"
-                title="Launch a 2nd player tab on this device to test Red vs Blue live multiplayer"
-              >
-                <Users className="w-3.5 h-3.5" />
-                <span>👥 Open 2nd Player Tab ({selectedTeam === 'blue' ? 'RED' : 'BLUE'})</span>
-              </button>
             </div>
           )}
           {/* Scoreboard - only in multiplayer */}

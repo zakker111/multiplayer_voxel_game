@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { VoxelWorld, VOXEL_BUILT, VOXEL_SIZE, WORLD_SIZE, CHUNK_SIZE } from './world';
 import { Player } from './player';
-import { vehicleClear, vehicleExitSpot, vehicleGround, type ClearanceBodies } from '../shared/vehiclePhysics';
+import { vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap, type ClearanceBodies } from '../shared/vehiclePhysics';
 import { SoundManager } from './sounds';
 import { NetworkClient } from './networkClient';
 import { spotPostCoverage, type SpotPostCoverage } from '../shared/spotting';
@@ -23,7 +23,7 @@ import {
   INTERMISSION_SECONDS,
   relativeBearingDegrees,
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
-  WORKSHOP_CENTERS, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec,
+  WORKSHOP_CENTERS, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec, WRECK_LIFETIME_SECONDS,
   VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
   VOXEL_MAX_DURABILITY, VOXEL_SHOT_DAMAGE,
   emplacementSpec, EMPLACEMENTS, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
@@ -44,8 +44,23 @@ import {
 } from '../shared/ballistics';
 import { SHELL_STEP, stepOfflineShells } from './localShells';
 
+/** A walking bot's footprint for vehicle avoidance: its 0.4m movement cylinder. */
+const BOT_VEHICLE_FOOTPRINT: Footprint = { halfWidth: 0.4, halfLength: 0.4, height: 1.9 };
+
+/**
+ * Draw a seat's stand-in figure only for someone else's body, never your own
+ * (the first-person camera is in that seat) and never on a wreck.
+ */
+function showSeatFigure(id: string | null | undefined, localId: string, wreck: boolean): boolean {
+  return !!id && !wreck && id !== localId;
+}
+import { WreckSmoke } from './wreckSmoke';
+
 /** How long a killfeed row stays on screen. */
 const KILLFEED_SECONDS = 8;
+/** Paint burned off a destroyed vehicle or build. Dark enough to read as
+ *  charcoal, light enough that the facets still catch the light. */
+const WRECK_CHAR_COLOR = 0x57514a;
 /** How long a damage-direction arc lingers after you are hit. */
 const DAMAGE_INDICATOR_SECONDS = 2;
 /** Latency probe interval (ms, measured every N seconds). */
@@ -483,6 +498,10 @@ export class Game {
   world: VoxelWorld;
   player: Player;
   bots: Bot[] = [];
+  /** The render loop, stoppable on destroy so a retry cannot leave the old
+   *  match running behind the new one. */
+  private running = false;
+  private animationFrame: number | null = null;
   equipment: EquipmentType = 'rifle';
   inventory: number = 0;
   depositable: number = 0;
@@ -491,6 +510,7 @@ export class Game {
   private jeeps = new Map<string, {
     state: JeepSnapshot; mesh: THREE.Group;
     seats: { driver: THREE.Object3D; passenger: THREE.Object3D };
+    charred: boolean;
   }>();
   private drivingJeepId: string | null = null;
   /** The jeep whose second seat this player is riding in, online or offline. */
@@ -499,6 +519,11 @@ export class Game {
    *  instead; offline Beta keeps the vehicle roadmap playable on the client with
    *  the same build/board/drive rules the server applies. */
   private localJeeps: JeepSnapshot[] = [];
+  /** Local clock when each offline wreck should vanish, keyed `jeep:<id>` or
+   *  `build:<id>`. Online wrecks are removed by the server. */
+  private localWreckExpiry = new Map<string, number>();
+  /** Rising smoke over every wreck currently on the map. */
+  private wreckSmoke = new Map<string, WreckSmoke>();
   private localJeepSeq = 0;
   private localJeepSync = 0;
   /** Offline Beta builds and their shells, owned by the client like the jeeps. */
@@ -731,6 +756,10 @@ export class Game {
   private boundBlur: () => void;
   private boundContextMenu: (e: Event) => void;
   localPlayerId: string | null = null;
+  /** The seat id local play uses before (or without) a server assignment. */
+  private get localPlayerKey(): string {
+    return this.localPlayerId ?? 'local-player';
+  }
   lastInputSendTime: number = 0;
   inputSendRate: number = 50;
 
@@ -965,8 +994,10 @@ export class Game {
 
   private applyJeeps(states: JeepSnapshot[]): void {
     const ids = new Set(states.map(state => state.id));
+    const localId = this.localPlayerKey;
     for (const [id, jeep] of this.jeeps) {
       if (!ids.has(id)) {
+        this.syncWreckSmoke(`jeep:${id}`, null);
         this.scene.remove(jeep.mesh);
         jeep.mesh.traverse(object => {
           if (object instanceof THREE.Mesh) {
@@ -998,22 +1029,24 @@ export class Game {
         // body is hidden inside the vehicle. Team colours, helmet on top.
         const seatFigure = (x: number, z: number) => {
           const seat = new THREE.Group();
+          // Raised so the shoulders clear the tub and the rear deck: a crew
+          // reads as two bodies, not two helmets behind the bodywork.
           const torso = new THREE.Mesh(
-            new THREE.BoxGeometry(0.62, 0.72, 0.42),
+            new THREE.BoxGeometry(0.62, 0.8, 0.42),
             // Lighter than the body paint so a seated crew reads against it.
             new THREE.MeshStandardMaterial({ color: state.team === 'blue' ? 0x5b8ae8 : 0xd9635f, roughness: 0.85 }),
           );
-          torso.position.y = 1.62;
+          torso.position.y = 1.8;
           const head = new THREE.Mesh(
             new THREE.BoxGeometry(0.34, 0.34, 0.34),
             new THREE.MeshStandardMaterial({ color: 0xe0b48c, roughness: 0.9 }),
           );
-          head.position.y = 2.16;
+          head.position.y = 2.36;
           const helmet = new THREE.Mesh(
             new THREE.BoxGeometry(0.4, 0.16, 0.4),
             new THREE.MeshStandardMaterial({ color: state.team === 'blue' ? 0x1d3f86 : 0x7d2424, roughness: 0.75 }),
           );
-          helmet.position.y = 2.36;
+          helmet.position.y = 2.56;
           seat.add(torso, head, helmet);
           seat.position.set(x, 0, z);
           seat.visible = false;
@@ -1026,21 +1059,20 @@ export class Game {
         mesh.position.set(state.position.x, state.position.y, state.position.z);
         mesh.rotation.y = state.yaw;
         this.scene.add(mesh);
-        jeep = { state, mesh, seats }; this.jeeps.set(state.id, jeep);
+        jeep = { state, mesh, seats, charred: false }; this.jeeps.set(state.id, jeep);
       }
       jeep.state = state;
-      // Crew figures follow the seats. Your own body is skipped: you are
-      // looking out from that seat, not at it.
-      jeep.seats.driver.visible = !!state.driverId && !state.wreck && state.driverId !== this.localPlayerId;
-      jeep.seats.passenger.visible = !!state.passengerId && !state.wreck && state.passengerId !== this.localPlayerId;
-      jeep.mesh.traverse(object => {
-        if (object instanceof THREE.Mesh && state.wreck) (object.material as THREE.MeshStandardMaterial).color.setHex(0x3b3b3b);
-      });
+      jeep.seats.driver.visible = showSeatFigure(state.driverId, localId, state.wreck);
+      jeep.seats.passenger.visible = showSeatFigure(state.passengerId, localId, state.wreck);
+      if (state.wreck) {
+        this.syncWreckSmoke(`jeep:${state.id}`, state.position);
+        if (!jeep.charred) { jeep.charred = true; this.charMesh(jeep.mesh); }
+      }
     }
     const occupied = new Set([...states.map(state => state.driverId), ...states.map(state => state.passengerId)]
       .filter((id): id is string => !!id));
     for (const [id, remote] of this.remotePlayers) remote.mesh.visible = !remote.state.isDead && !occupied.has(id);
-    const driving = states.find(state => state.driverId === this.localPlayerId && !state.wreck);
+    const driving = states.find(state => state.driverId === localId && !state.wreck);
     if (driving && this.drivingJeepId !== driving.id) {
       this.drivingJeepId = driving.id;
       this.player.clearKeys(); this.jeepBrake = false;
@@ -1052,23 +1084,48 @@ export class Game {
       this.player.clearKeys();
       this.weaponContainer.visible = !this.isSpectating;
     }
-    const riding = states.find(state => state.passengerId === this.localPlayerId && !state.wreck);
+    const riding = states.find(state => state.passengerId === localId && !state.wreck);
     if (riding && this.ridingJeepId !== riding.id) {
       this.ridingJeepId = riding.id;
       this.player.clearKeys(); this.jeepBrake = false;
       this.isLeftDown = false; this.isRightDown = false;
+      // The passenger keeps their weapon: only the driver's hands are on the wheel.
+      this.weaponContainer.visible = !this.isSpectating;
     }
     if (!riding && this.ridingJeepId) this.ridingJeepId = null;
+  }
+
+  /** Charcoal every painted part of a wreck once, when it is first seen. */
+  private charMesh(root: THREE.Object3D): void {
+    root.traverse((object) => {
+      if (object instanceof THREE.Mesh && object.material instanceof THREE.MeshStandardMaterial) {
+        object.material.color.setHex(WRECK_CHAR_COLOR);
+      }
+    });
+  }
+
+  /** Keep one smoke column per wreck, built at its death position, and drop it
+   *  when the server removes the vehicle or build. */
+  private syncWreckSmoke(key: string, position: Position | null): void {
+    if (position) {
+      if (!this.wreckSmoke.has(key)) this.wreckSmoke.set(key, new WreckSmoke(this.scene, position));
+      return;
+    }
+    const existing = this.wreckSmoke.get(key);
+    if (!existing) return;
+    existing.dispose();
+    this.wreckSmoke.delete(key);
   }
 
   private nearestJeep(): JeepSnapshot | null {
     let closest: JeepSnapshot | null = null;
     let distance = JEEP_ENTER_REACH;
+    const localId = this.localPlayerKey;
     for (const { state } of this.jeeps.values()) {
       if (state.team !== this.playerTeam || state.wreck) continue;
       // A driven jeep offers its free second seat; a full one offers nothing.
       if (state.driverId && state.passengerId) continue;
-      if (state.driverId === this.localPlayerId || state.passengerId === this.localPlayerId) continue;
+      if (state.driverId === localId || state.passengerId === localId) continue;
       const d = this.player.position.distanceTo(new THREE.Vector3(state.position.x, state.position.y, state.position.z));
       if (d < distance) { distance = d; closest = state; }
     }
@@ -1164,10 +1221,10 @@ export class Game {
     const ignored = new Set<string>(ignorePlayerIds);
     if (ignorePlayerId) ignored.add(ignorePlayerId);
     const players = [
-      { id: this.localPlayerId ?? 'local-player', position: this.player.position, isDead: this.player.isDead, isSpectating: this.isSpectating },
+      { id: this.localPlayerKey, position: this.player.position, isDead: this.player.isDead, isSpectating: this.isSpectating },
       ...this.bots.map(bot => ({ id: bot.name, position: bot.position, isDead: bot.isDead })),
     ].filter(p => !ignored.has(p.id));
-    return { vehicles: this.localJeeps, players, ignoreVehicleId, ignorePlayerId: null };
+    return { vehicles: this.localJeeps, structures: this.localEmplacements, players, ignoreVehicleId, ignorePlayerId: null };
   }
 
   /** Ground and footprint tests come from the shared vehicle rules, so the
@@ -1182,7 +1239,7 @@ export class Game {
 
   /** Which seat, if any, the local player holds in a Beta jeep. */
   private localSeat(): { jeep: JeepSnapshot; seat: 'driver' | 'passenger' } | null {
-    const id = this.localPlayerId ?? 'local-player';
+    const id = this.localPlayerKey;
     for (const jeep of this.localJeeps) {
       if (jeep.wreck) continue;
       if (jeep.driverId === id) return { jeep, seat: 'driver' };
@@ -1195,7 +1252,9 @@ export class Game {
    *  so a stall can tell a wall it must back away from from a bot that will
    *  simply walk on. */
   private localJeepRockClear(position: Position, yaw: number, spec: Footprint, ignoreId: string | null): boolean {
-    return vehicleClear(this.world, position, yaw, spec, { vehicles: this.localJeeps, ignoreVehicleId: ignoreId });
+    return vehicleClear(this.world, position, yaw, spec, {
+      vehicles: this.localJeeps, structures: this.localEmplacements, ignoreVehicleId: ignoreId,
+    });
   }
 
   private enterLocalJeep(jeep: JeepSnapshot): void {
@@ -1209,7 +1268,7 @@ export class Game {
       this.player.position.y - jeep.position.y,
       this.player.position.z - jeep.position.z,
     ) > spec.enterReach) return;
-    const playerId = this.localPlayerId ?? 'local-player';
+    const playerId = this.localPlayerKey;
     if (!jeep.driverId) {
       jeep.driverId = playerId;
       jeep.speed = 0;
@@ -1280,6 +1339,16 @@ export class Game {
    *  bots' errands, and the mesh sync. */
   private updateLocalVehicles(dt: number): void {
     this.localTime += dt;
+    let wreckRemoved = false;
+    for (const jeep of [...this.localJeeps]) {
+      if (!jeep.wreck) continue;
+      const key = `jeep:${jeep.id}`;
+      if (this.localTime < (this.localWreckExpiry.get(key) ?? Infinity)) continue;
+      this.localJeeps = this.localJeeps.filter(v => v.id !== jeep.id);
+      this.localWreckExpiry.delete(key);
+      wreckRemoved = true;
+    }
+    if (wreckRemoved) this.applyJeeps(this.localJeeps);
     const seat = this.localSeat();
     if (seat && seat.seat === 'driver') {
       const jeep = seat.jeep;
@@ -1346,10 +1415,22 @@ export class Game {
   /** Per-frame work for offline builds: swing the manned gun with the look
    *  direction inside its arc, and step every shell in the air. */
   private updateLocalEmplacements(dt: number): void {
+    let wreckRemoved = false;
+    for (const emplacement of [...this.localEmplacements]) {
+      if (!emplacement.wreck) continue;
+      const key = `build:${emplacement.id}`;
+      if (this.localTime < (this.localWreckExpiry.get(key) ?? Infinity)) continue;
+      // Its gunner was put out when the build was wrecked; only the husk is left.
+      this.localEmplacements = this.localEmplacements.filter(e => e.id !== emplacement.id);
+      this.localEmplacementFireAt.delete(emplacement.id);
+      this.localWreckExpiry.delete(key);
+      wreckRemoved = true;
+    }
+    if (wreckRemoved) this.applyEmplacements(this.localEmplacements);
     if (this.mountedEmplacementId) {
       const nest = this.localEmplacements.find(e => e.id === this.mountedEmplacementId);
       const spec = nest ? emplacementSpec(nest.kind) : undefined;
-      if (this.player.isDead || this.isSpectating || !nest || !spec) {
+      if (this.player.isDead || this.isSpectating || !nest || !spec || nest.wreck) {
         this.dismountLocalEmplacement(true);
       } else {
         const half = spec.arc / 2;
@@ -1383,6 +1464,7 @@ export class Game {
       ammo: verdict.spec.ammo,
       stock: 0,
       gunnerId: null,
+      wreck: false,
     };
     this.localEmplacements.push(snapshot);
     this.applyEmplacements(this.localEmplacements);
@@ -1421,6 +1503,7 @@ export class Game {
 
     const padded = { ...spec, halfWidth: spec.halfWidth + LOCAL_EMPLACEMENT_SEPARATION, halfLength: spec.halfLength + LOCAL_EMPLACEMENT_SEPARATION };
     for (const other of this.localEmplacements) {
+      if (other.wreck) continue;
       const otherSpec = emplacementSpec(other.kind) ?? spec;
       if (Math.abs(other.position.y - ground) >= (spec.height + otherSpec.height) / 2) continue;
       if (localRectsOverlap(spot.x, spot.z, rotation, padded, other.position.x, other.position.z, other.baseYaw, otherSpec)) {
@@ -1428,7 +1511,7 @@ export class Game {
       }
     }
 
-    const built = this.localEmplacements.filter(e => e.team === team && e.kind === kind).length;
+    const built = this.localEmplacements.filter(e => !e.wreck && e.team === team && e.kind === kind).length;
     if (built >= spec.teamLimit) return { ok: false, reason: 'Team limit for that build reached' };
     return { ok: true, spec, spot, rotation };
   }
@@ -1479,6 +1562,7 @@ export class Game {
   /** Climb into one of your own nests offline: reach, team, occupancy and the
    *  flag rule are all checked here, exactly as the server checks them. */
   private mountLocalEmplacement(emplacement: EmplacementSnapshot): void {
+    if (emplacement.wreck) return;
     if (!MANNED_EMPLACEMENTS.includes(emplacement.kind)) { this.showMessage('That build cannot be manned'); return; }
     if (emplacement.team !== this.playerTeam) { this.showMessage('That nest belongs to the other team'); return; }
     if (emplacement.gunnerId) { this.showMessage('That nest is already manned'); return; }
@@ -1682,7 +1766,7 @@ export class Game {
     if (bot.isDead || bot.carryingFlag || bot.nestCooldown > 0) return false;
 
     // A free friendly nest within a few strides is worth climbing into.
-    const free = this.localEmplacements.find(e => e.kind === 'mgNest' && e.team === bot.team && !e.gunnerId && e.ammo > 0
+    const free = this.localEmplacements.find(e => !e.wreck && e.kind === 'mgNest' && e.team === bot.team && !e.gunnerId && e.ammo > 0
       && Math.abs(e.position.y - bot.position.y) < 2
       && Math.hypot(e.position.x - bot.position.x, e.position.z - bot.position.z) < 10);
     if (free) { this.mountBotNest(bot, free); return true; }
@@ -1698,7 +1782,7 @@ export class Game {
     // never sees a fight.
     if (Math.hypot(bot.position.x - enemyFlag.x, bot.position.z - enemyFlag.z)
       > Math.hypot(bot.position.x - ownFlag.x, bot.position.z - ownFlag.z) - 40) return false;
-    if (this.localEmplacements.some(e => e.kind === 'mgNest' && e.team === bot.team
+    if (this.localEmplacements.some(e => !e.wreck && e.kind === 'mgNest' && e.team === bot.team
       && Math.hypot(e.position.x - bot.position.x, e.position.z - bot.position.z) < 60)) return false;
     const spec = emplacementSpec('mgNest');
     const workshop = this.workshops[bot.team];
@@ -1719,6 +1803,7 @@ export class Game {
       ammo: spec.ammo,
       stock: 0,
       gunnerId: null,
+      wreck: false,
     };
     this.localEmplacements.push(built);
     this.applyEmplacements(this.localEmplacements);
@@ -1731,7 +1816,7 @@ export class Game {
    *  clamped gun, pitch from the gunner's look, never from a client ray. */
   private fireLocalEmplacement(): void {
     const emplacement = this.localEmplacements.find(e => e.id === this.mountedEmplacementId);
-    if (!emplacement || this.player.isDead || this.isSpectating) return;
+    if (!emplacement || emplacement.wreck || this.player.isDead || this.isSpectating) return;
     const spec = emplacementSpec(emplacement.kind);
     if (!spec || !spec.fireInterval) return;
     if (emplacement.ammo <= 0) { this.showMessage('The nest is out of rounds'); return; }
@@ -1971,6 +2056,20 @@ export class Game {
     }
   }
 
+  /** Start a wreck's three-minute clock at the moment it is destroyed, not when
+   *  the next vehicle tick first notices it. */
+  private markLocalJeepWreck(jeep: JeepSnapshot): void {
+    this.localWreckExpiry.set(`jeep:${jeep.id}`, this.localTime + WRECK_LIFETIME_SECONDS);
+  }
+
+  /** Put a bot crew back on its feet and end its errand. The local player's seat
+   *  is the caller's business: it owns the camera and weapon visibility. */
+  private releaseLocalJeepCrew(jeep: JeepSnapshot): void {
+    const driver = jeep.driverId ? this.bots.find(bot => bot.name === jeep.driverId) : undefined;
+    if (driver) this.abandonBotJeepMission(driver);
+    this.releaseLocalBotPassenger(jeep);
+  }
+
   /** Damage a client-owned jeep. At zero HP it wrecks and puts its crew out. */
   private damageLocalJeep(jeep: JeepSnapshot, damage: number): void {
     if (jeep.wreck || !(damage > 0)) return;
@@ -1980,6 +2079,10 @@ export class Game {
 
     jeep.wreck = true;
     jeep.speed = 0;
+    this.markLocalJeepWreck(jeep);
+    // Before the seats are cleared: a riding bot is hidden, so releasing it is
+    // the only way its body comes back and its errand ends.
+    this.releaseLocalJeepCrew(jeep);
     if (this.drivingJeepId === jeep.id) {
       this.drivingJeepId = null;
       this.player.clearKeys();
@@ -1999,7 +2102,7 @@ export class Game {
   /** Damage a build offline; a wrecked one takes its gunner down with it. */
   private damageLocalEmplacement(id: string, damage: number): void {
     const emplacement = this.localEmplacements.find(e => e.id === id);
-    if (!emplacement) return;
+    if (!emplacement || emplacement.wreck) return;
     const spec = emplacementSpec(emplacement.kind);
     if (!spec || !(damage > 0)) return;
     // Builds keep whole HP, so a fractional hit is rounded once here.
@@ -2012,10 +2115,14 @@ export class Game {
     if (this.mountedEmplacementId === id) this.dismountLocalEmplacement(true);
     const botGunner = emplacement.gunnerId ? this.bots.find(b => b.name === emplacement.gunnerId) : undefined;
     if (botGunner) { botGunner.nestId = null; botGunner.nestIdleTimer = 0; botGunner.nestCooldown = 8; }
-    this.localEmplacements = this.localEmplacements.filter(e => e.id !== id);
+    emplacement.wreck = true;
+    emplacement.gunnerId = null;
+    emplacement.ammo = 0;
+    emplacement.stock = 0;
     this.localEmplacementFireAt.delete(id);
+    this.localWreckExpiry.set(`build:${id}`, this.localTime + WRECK_LIFETIME_SECONDS);
     this.applyEmplacements(this.localEmplacements);
-    this.showMessage(`💥 Your ${emplacement.kind} was destroyed`);
+    this.showMessage(`💥 Your ${emplacement.kind} was destroyed — it is smoking out`);
   }
 
   /** Shots from a build land like player shots: hp, flinch, hit marker, and the
@@ -2479,8 +2586,9 @@ export class Game {
     if (jeep.hp <= 0) {
       jeep.wreck = true;
       jeep.speed = 0;
+      this.markLocalJeepWreck(jeep);
       this.showMessage(`💥 ${bot.team === 'blue' ? 'Blue' : 'Red'} jeep destroyed by enemy fire!`);
-      this.abandonBotJeepMission(bot);
+      this.releaseLocalJeepCrew(jeep);
     }
     this.applyJeeps(this.localJeeps);
     return 0;
@@ -4521,7 +4629,8 @@ export class Game {
     if (weaponType === 'mgNest' || weaponType === 'cannon' || weaponType === 'mortar') {
       // The gun is the build, not the gunner's rifle: fire the flash out of the
       // barrel marker of the emplacement standing at the reported origin.
-      const build = [...this.emplacedSnapshots.values()].find((candidate) => candidate.kind === weaponType
+      const build = [...this.emplacedSnapshots.values()].find((candidate) => !candidate.wreck
+        && candidate.kind === weaponType
         && Math.hypot(candidate.position.x - origin.x, candidate.position.z - origin.z) < 3.5
         && Math.abs(candidate.position.y - origin.y) < 3.5);
       const buildMesh = build ? this.emplacementMeshes.get(build.id) : undefined;
@@ -4654,7 +4763,7 @@ export class Game {
    *  the nearest one inside use reach. */
   private shellPackCandidate(): EmplacementSnapshot | null {
     const isShellGun = (gun: EmplacementSnapshot) =>
-      (gun.kind === 'cannon' || gun.kind === 'mortar') && gun.team === this.playerTeam;
+      !gun.wreck && (gun.kind === 'cannon' || gun.kind === 'mortar') && gun.team === this.playerTeam;
     if (this.mountedEmplacementId) {
       const mounted = this.emplacedSnapshots.get(this.mountedEmplacementId);
       return mounted && isShellGun(mounted) ? mounted : null;
@@ -4795,7 +4904,7 @@ export class Game {
     let best: EmplacementSnapshot | null = null;
     let bestDistanceSq = Infinity;
     for (const snapshot of this.emplacedSnapshots.values()) {
-      if (!MANNED_EMPLACEMENTS.includes(snapshot.kind)) continue;
+      if (snapshot.wreck || !MANNED_EMPLACEMENTS.includes(snapshot.kind)) continue;
       if (snapshot.team !== this.playerTeam || snapshot.gunnerId) continue;
       const distanceSq = distanceSquared(this.player.position, snapshot.position);
       if (distanceSq <= reachSq && distanceSq < bestDistanceSq) {
@@ -4813,7 +4922,7 @@ export class Game {
     let best: { type: 'build' | 'jeep'; id: string } | null = null;
     let bestDistanceSq = EMPLACEMENT_USE_REACH * EMPLACEMENT_USE_REACH;
     for (const snapshot of this.emplacedSnapshots.values()) {
-      if (snapshot.team !== this.playerTeam) continue;
+      if (snapshot.team !== this.playerTeam || snapshot.wreck) continue;
       const distanceSq = distanceSquared(this.player.position, snapshot.position);
       if (distanceSq <= bestDistanceSq) { best = { type: 'build', id: snapshot.id }; bestDistanceSq = distanceSq; }
     }
@@ -4832,7 +4941,7 @@ export class Game {
     let best: EmplacementSnapshot | null = null;
     let bestDistanceSq = Infinity;
     for (const snapshot of this.emplacedSnapshots.values()) {
-      if (snapshot.kind !== 'supplyCrate' || snapshot.team !== this.playerTeam) continue;
+      if (snapshot.wreck || snapshot.kind !== 'supplyCrate' || snapshot.team !== this.playerTeam) continue;
       const distanceSq = distanceSquared(this.player.position, snapshot.position);
       if (distanceSq <= reachSq && distanceSq < bestDistanceSq) {
         best = snapshot;
@@ -4868,11 +4977,25 @@ export class Game {
       mesh.rotation.y = snapshot.baseYaw;
       const pivot = mesh.getObjectByName('gunPivot');
       if (pivot) pivot.rotation.y = snapshot.yaw - snapshot.baseYaw;
-      this.updateHealthBarVisibility(snapshot.id, snapshot.hp, emplacementSpec(snapshot.kind)?.maxHp ?? 0);
+      // The server also sends an explicit exit, but never leave the camera
+      // seated in a build that is now only a smoking husk.
+      if (snapshot.wreck && snapshot.id === this.mountedEmplacementId) {
+        this.mountedEmplacementId = null;
+        this.weaponContainer.visible = !this.isSpectating;
+      }
+      if (snapshot.wreck && mesh.userData.charred !== true) {
+        mesh.userData.charred = true;
+        this.charMesh(mesh);
+      }
+      // A wreck has no health bar: it is already past zero and only smoking out.
+      const maxHp = emplacementSpec(snapshot.kind)?.maxHp ?? 0;
+      this.updateHealthBarVisibility(snapshot.id, snapshot.wreck ? maxHp : snapshot.hp, maxHp);
+      if (snapshot.wreck) this.syncWreckSmoke(`build:${snapshot.id}`, snapshot.position);
     }
 
     for (const [id, mesh] of this.emplacementMeshes) {
       if (seen.has(id)) continue;
+      this.syncWreckSmoke(`build:${id}`, null);
       // Destroyed or cleared with the round: the seat goes with it.
       if (id === this.mountedEmplacementId) {
         this.mountedEmplacementId = null;
@@ -4901,7 +5024,8 @@ export class Game {
     if (this.gameMode !== 'online') { this.fireLocalEmplacement(); return; }
     // The mortar is indirect fire: name the ground point under the crosshair so
     // the server lands the round inside the ring the trajectory marker shows.
-    const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : null;
+        const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : null;
+    if (mounted?.wreck) return;
     const spec = mounted ? emplacementSpec(mounted.kind) : undefined;
     if (mounted?.kind === 'mortar' && spec) {
       const target = this.shellAimPoint(spec, mounted.position, mounted.yaw);
@@ -4960,7 +5084,7 @@ export class Game {
    *  readout. This is the ring centre, before the round's own scatter. */
   private mannedMortarAim(): { x: number; z: number; range: number } | null {
     const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : undefined;
-    if (!mounted || mounted.kind !== 'mortar') return null;
+    if (!mounted || mounted.wreck || mounted.kind !== 'mortar') return null;
     const aim = this.shellAimPoint(EMPLACEMENTS.mortar, mounted.position, mounted.yaw);
     if (!aim) return null;
     return {
@@ -4993,6 +5117,7 @@ export class Game {
       obstacles.push({ kind: 'body', team: remote.state.team, position: remote.mesh.position });
     }
     for (const emplacement of this.emplacedSnapshots.values()) {
+      if (emplacement.wreck) continue;
       const spec = emplacementSpec(emplacement.kind);
       if (!spec) continue;
       obstacles.push({ kind: 'footprint', team: emplacement.team, position: emplacement.position, footprint: spec });
@@ -5004,7 +5129,7 @@ export class Game {
   private updateShellPreview(): void {
     const mounted = this.mountedEmplacementId ? this.emplacedSnapshots.get(this.mountedEmplacementId) : null;
     const kind = mounted?.kind;
-    const spec = mounted && (kind === 'cannon' || kind === 'mortar') ? emplacementSpec(kind) : undefined;
+    const spec = mounted && !mounted.wreck && (kind === 'cannon' || kind === 'mortar') ? emplacementSpec(kind) : undefined;
     if (!mounted || !spec || !kind) { this.hideShellPreview(); return; }
 
     const isMortar = kind === 'mortar';
@@ -5138,14 +5263,16 @@ export class Game {
         this.emplacementFlashes.delete(id);
         const mesh = this.emplacementMeshes.get(id);
         if (!mesh) continue;
-        // Reset each part to the paint it was built with (team base, bare gun).
+        // Reset each part to the paint it was built with (team base, bare gun),
+        // or keep a destroyed build charred once its death flash fades.
+        const wrecked = Boolean(this.emplacedSnapshots.get(id)?.wreck);
         mesh.traverse((object) => {
           const part = object as THREE.Mesh;
           if (!part.isMesh) return;
           const mats = Array.isArray(part.material) ? part.material : [part.material];
           for (const m of mats) {
             if (m instanceof THREE.MeshStandardMaterial) {
-              m.color.setHex(typeof part.userData.baseColor === 'number' ? part.userData.baseColor : 0x9a9a9a);
+              m.color.setHex(wrecked ? WRECK_CHAR_COLOR : (typeof part.userData.baseColor === 'number' ? part.userData.baseColor : 0x9a9a9a));
               m.emissive.setHex(0x000000);
             }
           }
@@ -6017,7 +6144,7 @@ export class Game {
   }
 
   // 3D Voxel Collision check for bot movement cylinder
-  private checkBotVoxelCollision(x: number, y: number, z: number, radius = 0.38): boolean {
+  private checkBotVoxelCollision(x: number, y: number, z: number, botName?: string, radius = 0.38): boolean {
     const yChecks = [
       y + 0.45, // Shin/lower body - strictly above the floor voxel
       y + 1.05, // Torso
@@ -6045,6 +6172,16 @@ export class Game {
           return true;
         }
       }
+    }
+    // Live vehicles are solid to a walking bot: probe the same cylinder against
+    // each jeep footprint so the AI walks around the bodywork instead of
+    // grinding into it (its own seat is excluded).
+    for (const { state } of this.jeeps.values()) {
+      if (botName && (state.driverId === botName || state.passengerId === botName)) continue;
+      const spec = vehicleSpec(state.kind);
+      if (Math.abs(state.position.y - y) >= spec.height) continue;
+      if (vehicleRectsOverlap(x, z, 0, BOT_VEHICLE_FOOTPRINT,
+        state.position.x, state.position.z, state.yaw, spec)) return true;
     }
     return false;
   }
@@ -6448,11 +6585,14 @@ export class Game {
   }
 
   start(): void {
+    if (this.running) return;
+    this.running = true;
     this.animate();
   }
 
   private animate = (): void => {
-    requestAnimationFrame(this.animate);
+    if (!this.running) return;
+    this.animationFrame = requestAnimationFrame(this.animate);
     const dt = Math.min(this.clock.getDelta(), 0.05);
 
     // Online safety net: if the local player is stuck dead for >6s while
@@ -6526,6 +6666,7 @@ export class Game {
     // arc and landing ring stay in view.
     for (const [id, mesh] of this.emplacementMeshes) mesh.visible = id !== this.mountedEmplacementId;
     this.world.update();
+    for (const smoke of this.wreckSmoke.values()) smoke.update(dt);
 
     // Continuous fire for SMG and tools while holding the LEFT mouse button.
     // Rifle fires exactly once per click (no burst). Right-click never fires —
@@ -7806,14 +7947,14 @@ export class Game {
         // Try movement along X axis
         if (Math.abs(moveStepX) > 0.0001) {
           const tryX = bot.position.x + moveStepX;
-          if (!this.checkBotVoxelCollision(tryX, bot.position.y, bot.position.z)) {
+          if (!this.checkBotVoxelCollision(tryX, bot.position.y, bot.position.z, bot.name)) {
             bot.position.x = tryX;
           } else if (bot.grounded && !bot.isCrouching && maxClimb > 0.5) {
             // Foot obstacle: step-up onto target obstacle surface with headroom check
             const targetGroundY = this.world.getGroundHeight(tryX, bot.position.z);
             const climb = targetGroundY - bot.position.y;
             if (climb > 0.05 && climb <= maxClimb) {
-              if (!this.checkBotVoxelCollision(tryX, targetGroundY, bot.position.z)) {
+              if (!this.checkBotVoxelCollision(tryX, targetGroundY, bot.position.z, bot.name)) {
                 bot.position.x = tryX;
                 bot.position.y = targetGroundY;
               }
@@ -7824,14 +7965,14 @@ export class Game {
         // Try movement along Z axis
         if (Math.abs(moveStepZ) > 0.0001) {
           const tryZ = bot.position.z + moveStepZ;
-          if (!this.checkBotVoxelCollision(bot.position.x, bot.position.y, tryZ)) {
+          if (!this.checkBotVoxelCollision(bot.position.x, bot.position.y, tryZ, bot.name)) {
             bot.position.z = tryZ;
           } else if (bot.grounded && !bot.isCrouching && maxClimb > 0.5) {
             // Foot obstacle: step-up onto target obstacle surface with headroom check
             const targetGroundY = this.world.getGroundHeight(bot.position.x, tryZ);
             const climb = targetGroundY - bot.position.y;
             if (climb > 0.05 && climb <= maxClimb) {
-              if (!this.checkBotVoxelCollision(bot.position.x, targetGroundY, tryZ)) {
+              if (!this.checkBotVoxelCollision(bot.position.x, targetGroundY, tryZ, bot.name)) {
                 bot.position.z = tryZ;
                 bot.position.y = targetGroundY;
               }
@@ -7892,7 +8033,7 @@ export class Game {
             const testX = bot.position.x + perpX * 1.5;
             const testZ = bot.position.z + perpZ * 1.5;
             const testY = this.world.getGroundHeight(testX, testZ);
-            if (!this.checkBotVoxelCollision(testX, testY, testZ)) {
+            if (!this.checkBotVoxelCollision(testX, testY, testZ, bot.name)) {
               bot.position.set(testX, testY, testZ);
             } else {
               bot.velocity.y = 8.0;
@@ -8324,7 +8465,7 @@ export class Game {
    *  and Beta; online play uses the server's authoritative report instead. */
   private localSpotContacts(): SpotContact[] {
     const posts = this.localEmplacements.filter((e) =>
-      e.kind === 'spottingPost' && e.team === this.playerTeam && e.hp > 0);
+      !e.wreck && e.kind === 'spottingPost' && e.team === this.playerTeam && e.hp > 0);
     if (posts.length === 0) return [];
     const seen = (x: number, z: number) => posts.some((post) =>
       Math.hypot(x - post.position.x, z - post.position.z) <= SPOTTING_POST_RADIUS);
@@ -8545,7 +8686,14 @@ export class Game {
   }
 
   destroy(): void {
+    this.running = false;
+    if (this.animationFrame !== null) {
+      cancelAnimationFrame(this.animationFrame);
+      this.animationFrame = null;
+    }
     this.clearGhost();
+    for (const smoke of this.wreckSmoke.values()) smoke.dispose();
+    this.wreckSmoke.clear();
     if (this.networkClient) {
       this.networkClient.disconnect();
     }

@@ -1,4 +1,4 @@
-import { WORLD_HALF, vehicleSpec, type Footprint, type Position, type VehicleKind } from './types';
+import { WORLD_HALF, vehicleSpec, emplacementSpec, type Footprint, type Position, type VehicleKind } from './types';
 
 /**
  * Vehicle physics shared by the authoritative server and the offline client:
@@ -28,12 +28,24 @@ export interface InfantryBody {
   isSpectating?: boolean;
 }
 
+/** A placed build taking part in a clearance test. A wreck is debris: callers
+ *  that only want live structures to stop traffic leave `wreck` set. */
+export interface StructureBody {
+  id: string;
+  kind: string;
+  position: Position;
+  yaw: number;
+  wreck?: boolean;
+}
+
 /** Everything a clearance test may collide with, and who to ignore. */
 export interface ClearanceBodies {
   vehicles?: Iterable<VehicleBody>;
   players?: Iterable<InfantryBody>;
+  structures?: Iterable<StructureBody>;
   ignoreVehicleId?: string | null;
   ignorePlayerId?: string | null;
+  ignoreStructureId?: string | null;
 }
 
 /** One 1×1 voxel cell as a footprint, for the grid scans below. */
@@ -128,8 +140,8 @@ export function surfaceGround(sampler: SolidSampler, x: number, z: number, curre
 /**
  * Exact oriented-box footprint: movement collision uses the vehicle's real
  * rectangle rather than a circumscribed circle that rejected gaps it physically
- * fits through. No solid voxel may sit inside the body, no other vehicle may
- * overlap it, and no live infantry capsule may be inside it.
+ * fits through. No solid voxel may sit inside the body, no other vehicle or
+ * live structure may overlap it, and no live infantry capsule may be inside it.
  */
 export function vehicleClear(
   sampler: SolidSampler, position: Position, yaw: number, spec: Footprint, bodies: ClearanceBodies = {},
@@ -151,6 +163,14 @@ export function vehicleClear(
     if (other.id === bodies.ignoreVehicleId) continue;
     if (Math.abs(other.position.y - position.y) >= (spec.height + otherSpec.height) / 2) continue;
     if (vehicleRectsOverlap(position.x, position.z, yaw, spec, other.position.x, other.position.z, other.yaw, otherSpec)) return false;
+  }
+  for (const structure of bodies.structures ?? []) {
+    if (structure.id === bodies.ignoreStructureId || structure.wreck) continue;
+    const structureSpec = emplacementSpec(structure.kind);
+    if (!structureSpec) continue;
+    if (Math.abs(structure.position.y - position.y) >= (spec.height + structureSpec.height) / 2) continue;
+    if (vehicleRectsOverlap(position.x, position.z, yaw, spec,
+      structure.position.x, structure.position.z, structure.yaw, structureSpec)) return false;
   }
   for (const body of bodies.players ?? []) {
     if (body.id === bodies.ignorePlayerId || body.isDead || body.isSpectating) continue;
@@ -178,6 +198,8 @@ export function vehicleExitSpot(
   const spec = vehicleSpec(vehicle.kind);
   const players = [...(bodies.players ?? [])];
   const vehicles = [...(bodies.vehicles ?? [])];
+  const structures = [...(bodies.structures ?? [])]
+    .filter(s => !s.wreck && s.id !== bodies.ignoreStructureId);
   // Step out sideways, then further: the first ring clears the body itself.
   for (const radius of [spec.halfLength + 1.5, spec.halfLength + 2.5, spec.halfLength + 4]) {
     for (let i = 0; i < 8; i++) {
@@ -194,6 +216,8 @@ export function vehicleExitSpot(
         Math.abs(p.position.y - y) < 2 && Math.hypot(p.position.x - x, p.position.z - z) < 1)) continue;
       if (vehicles.some(v => v.id !== vehicle.id && v.id !== bodies.ignoreVehicleId &&
         Math.abs(v.position.y - y) < 2 && Math.hypot(v.position.x - x, v.position.z - z) < 3)) continue;
+      if (structures.some(s => Math.abs(s.position.y - y) < 2 &&
+        Math.hypot(s.position.x - x, s.position.z - z) < 3)) continue;
       return { x, y, z };
     }
   }

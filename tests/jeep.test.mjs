@@ -5,7 +5,7 @@ const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
 const {
   JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, JEEP_ENTER_REACH,
-  VEHICLES, RED_FLAG_POS, VOXEL_BUILT,
+  VEHICLES, RED_FLAG_POS, VOXEL_BUILT, WRECK_LIFETIME_SECONDS,
 } = require('../dist/tests/sharedTypes.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 const conn = frames => ({ send: data => frames.push(JSON.parse(data)), isOpen: () => true });
@@ -17,7 +17,7 @@ test('the VEHICLES table is the single source of the jeep numbers', () => {
     kind: 'jeep',
     cost: 40,
     maxHp: 250,
-    teamLimit: 2,
+    teamLimit: 15,
     halfWidth: 1.3,
     halfLength: 2,
     height: 2,
@@ -163,11 +163,19 @@ test('jeep construction, authority, terrain, exits, damage and lifecycle', () =>
   assert.equal(jeep.driverId, null);
   assert.equal(p.isDead, false);
   game.update(4.1);
-  assert.equal(game.jeeps.size, 0, 'wreck expires');
+  assert.equal(game.jeeps.size, 1, 'the wreck is still smoking after four seconds');
+
+  // The wreck no longer counts against the two-jeep team limit, so a
+  // replacement can roll off the pad immediately.
   game.workshopStock.blue = 200;
   p.position = { ...workshop };
   game.handleMessage(id, { type: 'buildJeep' });
-  const next = [...game.jeeps.values()][0];
+  assert.equal(game.jeeps.size, 2, 'a replacement jeep is allowed while the wreck smokes');
+  const next = [...game.jeeps.values()].find((v) => !v.wreck);
+  assert.ok(next, 'the replacement is the live jeep');
+  game.update(WRECK_LIFETIME_SECONDS);
+  assert.equal(game.jeeps.size, 1, 'the old wreck expires after three minutes');
+  assert.equal(game.jeeps.has(next.id), true, 'the live replacement stays');
   p.position = { ...next.position, x: next.position.x - 3 };
   game.handleMessage(id, { type: 'enterJeep', vehicleId: next.id });
   game.handleMessage(id, { type: 'toggleSpectator' });
@@ -273,6 +281,46 @@ test('the second seat is server-authoritative and keeps flag rules intact', () =
   assert.ok(passengerFrames.filter(frame => frame.type === 'jeepExited').length >= 2);
 });
 
+test('the passenger can fire from the second seat; the driver cannot', () => {
+  const game = new ServerGame();
+  const frames = [], passengerFrames = [], enemyFrames = [];
+  const driverId = game.addPlayer(conn(frames));
+  const passengerId = game.addPlayer(conn(passengerFrames));
+  const enemyId = game.addPlayer(conn(enemyFrames));
+  game.handleMessage(driverId, { type: 'join', team: 'blue' });
+  game.handleMessage(passengerId, { type: 'join', team: 'blue' });
+  game.handleMessage(enemyId, { type: 'join', team: 'red' });
+  const driver = game.players.get(driverId), passenger = game.players.get(passengerId);
+  const enemy = game.players.get(enemyId);
+  driver.position = { ...game.getWorkshops().blue.position };
+  game.workshopStock.blue = 200;
+  game.handleMessage(driverId, { type: 'buildJeep' });
+  const jeep = [...game.jeeps.values()][0];
+  driver.position = { ...jeep.position, x: jeep.position.x - 3 };
+  game.handleMessage(driverId, { type: 'enterJeep', vehicleId: jeep.id });
+  passenger.position = { ...jeep.position, x: jeep.position.x + 3 };
+  game.handleMessage(passengerId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.passengerId, passengerId);
+
+  // A target straight off the jeep's nose (+z for the blue build yaw).
+  enemy.position = { x: jeep.position.x, y: jeep.position.y, z: jeep.position.z + 12 };
+  game.clearSpawnProtection(enemyId);
+  const origin = { x: passenger.position.x, y: passenger.position.y + 1.6, z: passenger.position.z };
+  const raw = { x: 0, y: enemy.position.y + 1 - origin.y, z: 12 };
+  const len = Math.hypot(raw.x, raw.y, raw.z);
+  const dir = { x: raw.x / len, y: raw.y / len, z: raw.z / len };
+
+  const hp = enemy.hp;
+  game.handleShoot(passengerId, origin, dir);
+  assert.ok(enemy.hp < hp, 'the passenger\'s round damages the enemy');
+
+  // Only the driver's trigger is refused: the wheel owns those hands.
+  const driverOrigin = { x: driver.position.x, y: driver.position.y + 1.6, z: driver.position.z };
+  enemy.hp = enemy.maxHp;
+  game.handleShoot(driverId, driverOrigin, dir);
+  assert.equal(enemy.hp, enemy.maxHp, 'the driver still cannot fire');
+});
+
 test('bots can take the passenger seat and leave with the driver', () => {
   const game = new ServerGame();
   const frames = [];
@@ -361,4 +409,37 @@ test('scuttling a friendly jeep returns its cost and puts the crew out', () => {
   assert.equal(game.jeeps.size, 0);
   assert.equal(game.workshopStock.blue, 200, 'a full stock takes nothing');
   assert.ok(frames.some((f) => f.type === 'jeepMessage' && f.message === 'Scuttled jeep (workshop full)'));
+});
+
+test('wrecking a crewed jeep puts the driver and the passenger out', () => {
+  const game = new ServerGame();
+  const frames = [], passengerFrames = [];
+  const id = game.addPlayer(conn(frames));
+  const passengerId = game.addPlayer(conn(passengerFrames));
+  game.handleMessage(id, { type: 'join', team: 'blue' });
+  game.handleMessage(passengerId, { type: 'join', team: 'blue' });
+  const driver = game.players.get(id);
+  const passenger = game.players.get(passengerId);
+  driver.position = { ...game.getWorkshops().blue.position };
+  game.workshopStock.blue = 200;
+  game.handleMessage(id, { type: 'buildJeep' });
+  const jeep = [...game.jeeps.values()][0];
+  assert.ok(jeep, 'jeep built');
+  driver.position = { x: jeep.position.x - 3, y: jeep.position.y, z: jeep.position.z };
+  game.handleMessage(id, { type: 'enterJeep', vehicleId: jeep.id });
+  passenger.position = { ...driver.position };
+  game.handleMessage(passengerId, { type: 'enterJeep', vehicleId: jeep.id });
+  assert.equal(jeep.driverId, id);
+  assert.equal(jeep.passengerId, passengerId, 'a second teammate rides shotgun');
+
+  game.damageJeep(jeep, JEEP_MAX_HP);
+
+  assert.equal(jeep.wreck, true);
+  assert.equal(jeep.driverId, null);
+  assert.equal(jeep.passengerId, null, 'the passenger leaves the wreck too');
+  assert.ok(passengerFrames.some((f) => f.type === 'jeepExited'), 'the passenger is told to step out');
+  assert.ok(
+    Math.hypot(passenger.position.x - jeep.position.x, passenger.position.z - jeep.position.z) > 1,
+    'the passenger is placed clear of the wreck',
+  );
 });

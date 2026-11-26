@@ -224,7 +224,7 @@ test('a bot gunner is ejected when its nest is destroyed', () => {
       direction: aim,
     });
     game.update(1 / 20);
-    if (!game.emplacements.has(gun.id)) destroyed = true;
+    if (gun.wreck) destroyed = true;
   }
 
   assert.ok(destroyed, 'the nest was wrecked by rifle fire');

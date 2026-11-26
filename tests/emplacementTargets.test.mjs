@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const { ServerGame } = require('../dist/tests/serverGame.cjs');
 const { ServerWorld } = require('../dist/tests/serverWorld.cjs');
 const { ServerBot } = require('../dist/tests/serverBot.cjs');
-const { emplacementSpec, WEAPONS, GROUND_LEVEL } = require('../dist/tests/sharedTypes.cjs');
+const { emplacementSpec, WEAPONS, GROUND_LEVEL, WRECK_LIFETIME_SECONDS } = require('../dist/tests/sharedTypes.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 
 const SAMPLES = [[0, 0], [-1, -1], [-1, 1], [1, -1], [1, 1], [-2, 0], [2, 0], [0, -2], [0, 2]];
@@ -123,7 +123,7 @@ test('a rifle round aimed at your own build leaves it alone', () => {
   assert.equal(nest.hp, before, 'no friendly structure damage');
 });
 
-test('a wrecked nest is removed and its gunner is set down', () => {
+test('a wrecked nest smokes, releases its gunner and frees the slot', () => {
   const game = new ServerGame();
   const [spot] = findSpots(game, 1);
   const { emplacement: nest, owner } = build(game, 'blue', 'mgNest', spot);
@@ -133,10 +133,38 @@ test('a wrecked nest is removed and its gunner is set down', () => {
 
   game.damageEmplacement(nest.id, emplacementSpec('mgNest').maxHp + 50);
 
-  assert.equal(game.emplacements.size, 0, 'the wreck is gone');
+  const wreck = game.emplacements.get(nest.id);
+  assert.ok(wreck, 'the wreck stays on the map');
+  assert.equal(wreck.wreck, true, 'it is marked as a wreck');
+  assert.equal(wreck.hp, 0, 'it has no health left');
+  assert.equal(wreck.ammo, 0, 'its belt is gone');
+  assert.equal(wreck.gunnerId, null, 'nobody is seated');
   assert.equal(game.gunnerEmplacement(owner.id), undefined, 'the gunner is no longer mounted');
-  assert.ok(owner.frames.some((f) => f.type === 'emplacementsUpdated' && f.emplacements.length === 0),
-    'clients are told the build is gone');
+  assert.ok(owner.frames.some((f) => f.type === 'emplacementsUpdated'
+    && f.emplacements.length === 1 && f.emplacements[0].wreck === true),
+    'clients are told to draw a smoking wreck');
+
+  game.update(WRECK_LIFETIME_SECONDS - 1);
+  assert.equal(game.emplacements.has(nest.id), true, 'the wreck is still there just before three minutes');
+  game.update(1.1);
+  assert.equal(game.emplacements.has(nest.id), false, 'the wreck disappears after three minutes');
+});
+
+test('a smoking wreck no longer counts against the team limit', () => {
+  const game = new ServerGame();
+  const [first, second] = findSpots(game, 2);
+  const { emplacement: cannon } = build(game, 'blue', 'cannon', first);
+  game.damageEmplacement(cannon.id, 99999);
+  assert.equal(cannon.wreck, true, 'the cannon is a wreck');
+
+  const owner = join(game, 'blue');
+  game.workshopStock.blue = 400;
+  game.handleMessage(owner.id, { type: 'craftBlueprint', kind: 'cannon', slot: 0 });
+  game.handleMessage(owner.id, { type: 'placeEmplacement', kind: 'cannon', position: second, yaw: 0, slot: 0 });
+
+  const live = [...game.emplacements.values()].filter((e) => e.kind === 'cannon' && !e.wreck);
+  assert.equal(live.length, 1, 'a replacement cannon can be placed while the old one smokes');
+  assert.equal(game.emplacements.size, 2, 'both the wreck and the new gun are on the map');
 });
 
 test('rifle fire that wrecks a nest ejects the gunner standing in it', () => {
@@ -157,7 +185,7 @@ test('rifle fire that wrecks a nest ejects the gunner standing in it', () => {
     shootAt(game, shooter, aim);
   }
 
-  assert.equal(game.emplacements.has(nest.id), false, 'the nest is destroyed by gunfire');
+  assert.equal(game.emplacements.get(nest.id)?.wreck, true, 'the nest is a smoking wreck');
   assert.equal(game.gunnerEmplacement(gunner.id), undefined, 'the gunner was freed');
   assert.ok(gunner.frames.some((f) => f.type === 'emplacementExited'), 'the gunner is told they are out');
   assert.ok(Math.hypot(
@@ -187,15 +215,15 @@ test('a manned nest wrecks an enemy build and ejects its gunner', () => {
   assert.equal(blueGunner.player.hp, gunnerHp, 'the round stops at the build, not the gunner behind it');
 
   // Ten 30-damage rounds finish the 300 hp nest.
-  for (let i = 0; i < 9 && game.emplacements.has(blueNest.id); i++) {
+  for (let i = 0; i < 9 && !game.emplacements.get(blueNest.id)?.wreck; i++) {
     game.update(0.1);
     game.handleMessage(redGunner.id, { type: 'fireEmplacement' });
   }
 
-  assert.equal(game.emplacements.has(blueNest.id), false, 'the enemy nest is destroyed');
+  assert.equal(game.emplacements.get(blueNest.id)?.wreck, true, 'the enemy nest is a smoking wreck');
   assert.equal(game.gunnerEmplacement(blueGunner.id), undefined, 'its gunner is no longer seated');
   assert.ok(blueGunner.frames.some((f) => f.type === 'emplacementExited'), 'the gunner is told they are out');
-  assert.ok(game.emplacements.has(redNest.id), 'the firing nest survived');
+  assert.equal(game.emplacements.get(redNest.id)?.wreck, false, 'the firing nest survived');
 });
 
 test('shell splash wrecks enemy structures and spares friendly ones', () => {

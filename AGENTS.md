@@ -41,7 +41,8 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
 ├── tsconfig.json             # TypeScript compiler options
 ├── vite.config.js            # Vite bundler configuration with Tailwind CSS plugin
 └── src/
-    ├── App.tsx               # Primary React HUD UI, start menu, scoreboard, ammo counters
+    ├── App.tsx               # Primary React HUD UI, start menu, mode-aware loading screen
+    │                         #   (tips + indeterminate bar + retry), scoreboard, ammo counters
     ├── index.css             # Global CSS with Tailwind CSS import (@import "tailwindcss";)
     ├── main.tsx              # React DOM bootstrap entry point
     ├── game/
@@ -99,7 +100,7 @@ When evaluating, previewing, or debugging this application within automated AI h
 
 ### URL Query Parameters for Automated Launch
 The application supports direct URL launch parameters:
-- `?mode=spectator`: Automatically starts a bot match and enters the cinematic AI tracking spectator camera.
+- `?mode=spectator`: Starts a bot match with spectator intent and enters the cinematic AI tracking spectator camera as soon as the first frame renders.
 - `?mode=bots`: Automatically starts a local bot match on the Blue team.
 - `?mode=online`: Automatically connects to the local WebSocket multiplayer server.
 - `?mode=beta`: Connects to the same authoritative server with the Beta (development) HUD badge.
@@ -116,6 +117,28 @@ Because browser iframe sandboxes often restrict the HTML5 Pointer Lock API:
 - **Spectator Controls**:
   - `P`: Toggles Spectator Mode on/off.
   - `C`: Toggles between **Action Combat Cam** (auto-orbits active firefights and flag carriers) and **Free-Fly Drone Cam** (WASD + Space/Shift to fly).
+
+### Boot & Loading Screen (`src/App.tsx`)
+Starting any mode (`handleStart`) sets `gameMode`; while `!started && gameMode` a
+full-screen deployment overlay shows the mode's `MODE_LOADING` name, blurb and
+three field tips plus an indeterminate bar (`.loading-bar-indeterminate`,
+`@keyframes loading-bar-slide` in `src/index.css`). There are no simulated
+percentages and no staged timers: the overlay clears only after
+`Game.start()` has rendered the first frame synchronously.
+- `nextPaint()` waits two animation frames so the overlay paints before the
+  synchronous `Game` constructor blocks the thread, with a 250 ms watchdog for
+  hidden/throttled tabs. Do not turn this into a progress stage.
+- A failed construction or first frame lands in the overlay's error state: the
+  bar hides, the tips stay, and **Try again** (`bootAttempt` re-runs the boot
+  effect) / **Back to menu** (`gameMode` back to `null`) are offered.
+- Auto-spectate is intent-based: `pendingSpectatorRef` is set by the AI
+  Spectator button or `?mode=spectator`, applied after `start()`, and cleared
+  only once `toggleSpectator()` succeeds.
+- `Game.start()` is idempotent and `Game.destroy()` stops and cancels the render
+  loop, so a retry cannot leave the previous match ticking behind the new one.
+- There is no 2-player test launcher any more. To test two clients, open a
+  second tab or device with `?mode=online&team=red` (or use the in-game invite
+  link).
 
 ---
 

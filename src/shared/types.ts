@@ -285,6 +285,11 @@ export const WORKSHOP_START_STOCK = 50;
 export const WORKSHOP_CAPACITY = 200;
 export const WORKSHOP_REACH = 8;
 
+/** A destroyed vehicle or build keeps smoking for this long before it is
+ *  removed. The wreck no longer counts against its team's limit, so a squad can
+ *  replace it immediately. */
+export const WRECK_LIFETIME_SECONDS = 180;
+
 /** The blueprint bench sits inside the workshop's protected cells (clear of the
  *  jeep pad at x+11), so a bench can never be dug out or built over. */
 export const BENCH_OFFSET = { x: -3, z: 5 } as const;
@@ -331,7 +336,7 @@ export interface VehicleSpec extends Footprint {
 
 export const VEHICLES: Record<VehicleKind, VehicleSpec> = {
   jeep: {
-    kind: 'jeep', cost: 40, maxHp: 250, teamLimit: 2,
+    kind: 'jeep', cost: 40, maxHp: 250, teamLimit: 15,
     halfWidth: 1.3, halfLength: 2, height: 2, enterReach: 4,
     topSpeed: 12, reverseSpeed: 5, acceleration: 10, turnRate: 1.4, fullTurnSpeed: 4,
   },
@@ -444,6 +449,9 @@ export interface EmplacementSnapshot {
   stock: number;
   /** Player manning it, or null. Only MANNED_EMPLACEMENTS can be manned. */
   gunnerId: string | null;
+  /** True once hp reached zero: the build smokes, cannot be used, and is
+   *  removed after WRECK_LIFETIME_SECONDS. */
+  wreck?: boolean;
 }
 
 /** One enemy a friendly spotting post currently sees, for the team HUD. */

@@ -117,7 +117,8 @@ test('a post marks bots and its markers clear when it is destroyed', () => {
   bot.isDead = false;
 
   game.damageEmplacement(post.id, 9999);
-  assert.equal([...game.emplacements.values()].some((e) => e.kind === 'spottingPost'), false, 'the post was destroyed');
+  const wreck = game.emplacements.get(post.id);
+  assert.equal(wreck.wreck, true, 'the post is a smoking wreck');
   game.update(0.3);
-  assert.deepEqual(lastReport(blue.frames).contacts, [], 'destroying the post clears its markers');
+  assert.deepEqual(lastReport(blue.frames).contacts, [], 'a wrecked post spots nothing');
 });

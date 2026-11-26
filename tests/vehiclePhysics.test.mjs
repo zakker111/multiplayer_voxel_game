@@ -64,6 +64,13 @@ test('vehicleClear ignores a solid block outside the footprint', () => {
   assert.equal(vehicleClear(terrain(0, [[3, 1, 0]]), at(0, 0.5, 0), 0, JEEP), true);
 });
 
+test('vehicleClear blocks a live structure but not its wreck', () => {
+  const nest = { id: 'nest-1', kind: 'mgNest', position: at(0, 0.5, 0), yaw: 0 };
+  assert.equal(vehicleClear(terrain(0), at(0, 0.5, 0), 0, JEEP, { structures: [nest] }), false);
+  assert.equal(vehicleClear(terrain(0), at(0, 0.5, 0), 0, JEEP, { structures: [{ ...nest, wreck: true }] }), true);
+  assert.equal(vehicleClear(terrain(0), at(0, 0.5, 0), 0, JEEP, { structures: [{ ...nest, position: at(8, 0.5, 0) }] }), true);
+});
+
 test('vehicleClear rejects a standing infantry body inside the footprint', () => {
   const infantry = [{ id: 'inf-1', position: at(0, 0.5, 0) }];
   assert.equal(vehicleClear(terrain(0), at(0, 0.5, 0), 0, JEEP, { players: infantry }), false);

@@ -53,3 +53,17 @@ test('only the first own spotting post is used; enemies and other builds are ign
     'no own spotting post means no HUD coverage',
   );
 });
+
+test('a wrecked spotting post no longer gives HUD coverage', () => {
+  const wrecked = { ...post('blue', 30, 0), wreck: true };
+  assert.equal(
+    spotPostCoverage([wrecked], 'blue', at(0, 6.5, 0), FORWARD),
+    null,
+    'a smoking post spots nothing',
+  );
+  assert.deepEqual(
+    spotPostCoverage([wrecked, post('blue', 10, 0)], 'blue', at(0, 6.5, 0), FORWARD),
+    { distance: 10, bearing: 90 },
+    'a live replacement still provides coverage',
+  );
+});

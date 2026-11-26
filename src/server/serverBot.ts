@@ -116,8 +116,8 @@ export interface BotContext {
   buildBlock: (bot: ServerBot, pos: Position) => void;
   /** Optional: clear a blocking voxel (used by stuck recovery when available). */
   digBlock?: (bot: ServerBot, pos: Position) => void;
-  /** Optional: is this ground point inside a built structure (nest, crate)? */
-  blockedBy?: (x: number, z: number) => boolean;
+  /** Optional: is this ground point inside a built structure or a vehicle? */
+  blockedBy?: (x: number, z: number, y: number) => boolean;
   /** Optional: try to emplace a build for this bot. False means refused (cost,
    *  ground, team limit, another body in the way) and nothing was spent. */
   placeEmplacement?: (bot: ServerBot, kind: string, position: Position, yaw: number) => boolean;
@@ -1853,35 +1853,53 @@ export class ServerBot extends ServerPlayer {
     let chosen: [number, number] | null = null;
     let chosenSide = 0; // -1/+1 while the step is sideways rather than progress
     for (const [px, pz] of probes) {
-      const tx = this.position.x + px * lookAhead;
-      const tz = this.position.z + pz * lookAhead;
-      if (ctx.blockedBy?.(tx, tz)) continue; // structures are not steppable
-      if (this.stepClear(ctx, tx, tz)) {
-        // A pure sideways step is a detour, not progress. Commit to one side
-        // for a moment: without the hold, the next tick's mirror probe wins,
-        // the two steps cancel out and the bot paces in front of a crate or
-        // emplacement forever (measured: a flag carrier held for 623s).
-        const along = px * nx + pz * nz;
-        if (along < 0.25) {
-          const side = px * -nz + pz * nx > 0 ? 1 : -1;
-          if (pacing && now < this.detourUntil && side !== this.detourDir) continue;
-          chosenSide = side;
-        }
-        chosen = [px, pz];
-        break;
+      if (this.stepBlocked(ctx, [px, pz], lookAhead)) continue; // structures and vehicles are not steppable
+      // A pure sideways step is a detour, not progress. Commit to one side
+      // for a moment: without the hold, the next tick's mirror probe wins,
+      // the two steps cancel out and the bot paces in front of a crate or
+      // emplacement forever (measured: a flag carrier held for 623s).
+      const along = px * nx + pz * nz;
+      if (along < 0.25) {
+        const side = px * -nz + pz * nx > 0 ? 1 : -1;
+        if (pacing && now < this.detourUntil && side !== this.detourDir) continue;
+        chosenSide = side;
       }
+      chosen = [px, pz];
+      break;
     }
     if (!chosen) {
-      // Fully blocked (wall / trench line). Pressing straight into it just pins
-      // the bot against the block, so slide along it and look for a gap. The
-      // side is held for a beat even when the bot is not pacing: re-rolling
-      // every tick turns the slide into a jitter on the spot.
+      // Fully blocked (wall / trench / vehicle). Pressing straight into it just
+      // pins the bot against the body, so slide along it and look for a gap.
+      // The side is held for a beat even when the bot is not pacing: re-rolling
+      // every tick turns the slide into a jitter on the spot. The slide itself
+      // must be clear too, or a jeep's long side becomes a wall the bot keeps
+      // walking into.
       if (now >= this.detourUntil) {
         this.detourDir = Math.random() < 0.5 ? -1 : 1;
         this.detourUntil = now + 0.8;
       }
-      chosen = [-nz * this.detourDir, nx * this.detourDir];
-      chosenSide = this.detourDir;
+      // Check the slide at the distance this tick will actually cover, not the
+      // 1.4m anticipation probe: a bot a step away from a jeep or wall is not
+      // blocked, and stopping there is what turned a graze into a stuck sample.
+      const slideAhead = Math.min(lookAhead, Math.max(0.35, speed * dt));
+      const slide: [number, number] = [-nz * this.detourDir, nx * this.detourDir];
+      if (!this.stepBlocked(ctx, slide, slideAhead)) {
+        chosen = slide;
+        chosenSide = this.detourDir;
+      } else {
+        const mirror: [number, number] = [nz * this.detourDir, -nx * this.detourDir];
+        if (!this.stepBlocked(ctx, mirror, slideAhead)) {
+          chosen = mirror;
+          chosenSide = -this.detourDir;
+          this.detourDir = -this.detourDir;
+        }
+      }
+      if (!chosen) {
+        this.velocity.x = 0;
+        this.velocity.z = 0;
+        this.snapToGround(ctx);
+        return;
+      }
     }
     if (chosenSide !== 0 && pacing) {
       this.detourDir = chosenSide;
@@ -1894,6 +1912,13 @@ export class ServerBot extends ServerPlayer {
     this.position.z += this.velocity.z * dt;
     this.snapToGround(ctx);
     this.faceToward(target.x, target.z);
+  }
+
+  /** Is the step at this heading blocked by voxels, a build or a vehicle? */
+  private stepBlocked(ctx: BotContext, [dx, dz]: [number, number], lookAhead: number): boolean {
+    const x = this.position.x + dx * lookAhead;
+    const z = this.position.z + dz * lookAhead;
+    return !!ctx.blockedBy?.(x, z, this.position.y) || !this.stepClear(ctx, x, z);
   }
 
   private strafeAround(enemyPos: Position, dt: number, ctx: BotContext, dist: number): void {
