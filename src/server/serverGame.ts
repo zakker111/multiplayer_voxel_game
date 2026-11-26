@@ -435,7 +435,7 @@ export class ServerGame {
     // be torn down and rebuilt for full value, refilling its belt for free.
     const refund = this.refundWorkshop(
       player.team,
-      emplacementDismantleRefund(spec, emplacement.ammo, emplacement.stock),
+      emplacementDismantleRefund(spec, emplacement.ammo, emplacement.stock, emplacement.hp),
     );
     this.removeEmplacement(emplacement);
     const label = emplacement.kind === 'mgNest' ? 'MG nest' : emplacement.kind;
@@ -753,9 +753,7 @@ export class ServerGame {
     );
     if (terrainHit && terrainHit.distance < blockerDistance) {
       const { x, y, z } = terrainHit.voxelPos;
-      if (this.world.damageVoxel(x, y, z, VOXEL_SHOT_DAMAGE)) {
-        this.broadcast({ type: 'voxelChanged', change: { x, y, z, type: VOXEL_AIR, durability: 0 } });
-      }
+      this.damageVoxelAndBroadcast(x, y, z, VOXEL_SHOT_DAMAGE);
     }
   }
 
@@ -1403,8 +1401,8 @@ export class ServerGame {
 
   /** Load one shell pack into a friendly cannon or mortar. A pack in hand is
    *  spent first; beside the gun, blocks can buy one directly so a gunner does
-   *  not have to walk back to the bench. The belt caps instead of overflowing;
-   *  the last pack may only partly fit. */
+   *  not have to walk back to the bench. A pack only loads when it fits whole,
+   *  so no shell is ever paid for and discarded. */
   private loadShellPack(playerId: string, emplacementId: unknown): void {
     const player = this.players.get(playerId);
     if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') {
@@ -1418,6 +1416,15 @@ export class ServerGame {
     if (!rounds) return this.emplacementMessage(playerId, 'Only cannons and mortars take shell packs');
     const cap = emplacementAmmoCap(emplacement.kind);
     if (emplacement.ammo >= cap) return this.emplacementMessage(playerId, 'That gun is already full');
+    // A pack is only loaded when it fits whole: charging 30 blocks for one
+    // shell because the belt was nearly full is a bad deal, and silently
+    // discarding the rest is worse.
+    if (emplacement.ammo + rounds > cap) {
+      return this.emplacementMessage(
+        playerId,
+        `No room for a full pack — ${emplacement.ammo}/${cap} rounds. Fire some first`,
+      );
+    }
 
     // The gunner is already at the seat; anyone else must walk up to the gun.
     const manning = emplacement.gunnerId === playerId;
@@ -1445,7 +1452,7 @@ export class ServerGame {
       this.broadcastWorkshops();
     }
 
-    const loaded = Math.min(rounds, cap - emplacement.ammo);
+    const loaded = rounds; // the room check above guarantees a whole pack fits
     emplacement.ammo += loaded;
     this.broadcastEmplacements();
     this.sendToPlayer(playerId, { type: 'playerUpdated', playerId, state: player.getState() });
@@ -1848,20 +1855,35 @@ export class ServerGame {
   }
 
 
-  private damageAndBroadcastVoxel(pos: Position): void {
-    const { x, y, z } = pos;
-    const destroyed = this.world.damageVoxel(x, y, z, VOXEL_SHOT_DAMAGE);
-    const voxel = this.world.getVoxel(x, y, z);
+  /** Damage a block and sync the result (a chip or a break) to every client.
+   *  A protected cell is left untouched and not broadcast; `false` is returned
+   *  when nothing changed. */
+  private damageVoxelAndBroadcast(x: number, y: number, z: number, damage: number): boolean {
+    const before = this.world.getVoxel(x, y, z);
+    if (!before) return false;
+    // `getVoxel` returns the live chunk object, which `damageVoxel` mutates in
+    // place, so snapshot the old values before the hit rather than the object.
+    const beforeType = before.type;
+    const beforeDurability = before.durability;
+    const destroyed = this.world.damageVoxel(x, y, z, damage);
+    const after = this.world.getVoxel(x, y, z);
+    if (!destroyed && (!after || (after.type === beforeType && after.durability === beforeDurability))) {
+      return false;
+    }
     this.broadcast({
       type: 'voxelChanged',
-      change: { x, y, z, type: voxel ? voxel.type : VOXEL_AIR, durability: voxel ? voxel.durability : 0 },
+      change: { x, y, z, type: after ? after.type : VOXEL_AIR, durability: after ? after.durability : 0 },
     });
     if (destroyed) {
-      const collapsed = this.world.collapseDisconnected(x, y, z);
-      for (const change of collapsed) {
+      for (const change of this.world.collapseDisconnected(x, y, z)) {
         this.broadcast({ type: 'voxelChanged', change });
       }
     }
+    return destroyed;
+  }
+
+  private damageAndBroadcastVoxel(pos: Position): void {
+    this.damageVoxelAndBroadcast(pos.x, pos.y, pos.z, VOXEL_SHOT_DAMAGE);
   }
 
   /** Centralized damage application (used by bot shots). Human shots keep

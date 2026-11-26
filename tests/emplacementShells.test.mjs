@@ -571,6 +571,11 @@ test('the cannon preview ring bursts on the jeep it draws the arc through', () =
   });
   const ringToJeep = Math.hypot(preview.impact.x - jeep.position.x, preview.impact.z - jeep.position.z);
   assert.ok(ringToJeep < Math.hypot(1.3, 2) + 0.01, `the marker stops on the jeep (${ringToJeep.toFixed(2)}m)`);
+  const last = preview.points[preview.points.length - 1];
+  assert.ok(
+    Math.hypot(last.x - preview.impact.x, last.y - preview.impact.y, last.z - preview.impact.z) < 1e-9,
+    'the preview line ends at the cover it stops on, not through it',
+  );
 
   gunner.frames.length = 0;
   game.handleMessage(gunner.id, { type: 'fireEmplacement' });
@@ -643,6 +648,43 @@ test('an MG nest chips the terrain it hits', () => {
     gunner.frames.some((f) => f.type === 'voxelChanged' && f.change.x === holes[0].x && f.change.y === holes[0].y && f.change.z === holes[0].z),
     'clients are told the block broke',
   );
+});
+
+test('an MG nest tells clients about chip damage before the block breaks', () => {
+  const game = new ServerGame();
+  const { gun, gunner } = manGun(game, 'mgNest');
+  const dir = { x: -Math.sin(gun.yaw), z: -Math.cos(gun.yaw) };
+  const fromX = gun.position.x + dir.x * 0.9;
+  const fromZ = gun.position.z + dir.z * 0.9;
+  const wallX = Math.round(fromX + dir.x * 2.5);
+  const wallZ = Math.round(fromZ + dir.z * 2.5);
+  const baseY = Math.floor(gun.position.y + 1);
+  const wall = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dy = 0; dy < 3; dy++) {
+        const x = wallX + dx, y = baseY + dy, z = wallZ + dz;
+        game.world.setVoxel(x, y, z, VOXEL_STONE, VOXEL_MAX_DURABILITY);
+        wall.push({ x, y, z });
+      }
+    }
+  }
+
+  gunner.frames.length = 0;
+  game.handleMessage(gunner.id, { type: 'fireEmplacement' });
+
+  const chipped = wall.filter((v) => {
+    const voxel = game.world.getVoxel(v.x, v.y, v.z);
+    return voxel && voxel.durability < VOXEL_MAX_DURABILITY;
+  });
+  assert.equal(chipped.length, 1, 'one round chips exactly the block it hit');
+  assert.ok(
+    gunner.frames.some((f) => f.type === 'voxelChanged'
+      && f.change.x === chipped[0].x && f.change.y === chipped[0].y && f.change.z === chipped[0].z
+      && f.change.durability > 0 && f.change.durability < VOXEL_MAX_DURABILITY),
+    'the chip reaches clients with its fractional durability',
+  );
+  assert.equal(game.world.isSolid(chipped[0].x, chipped[0].y, chipped[0].z), true, 'the block is still standing');
 });
 
 test('a mortar shell damages bots caught in the blast', () => {

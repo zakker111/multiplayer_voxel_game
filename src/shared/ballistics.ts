@@ -162,11 +162,10 @@ export function shellArc(
     point.x += velocityX * step;
     point.y += velocityY.value * step;
     point.z += velocityZ * step;
-    points.push({ ...point });
-
     // Walk the stretch just flown in short samples, as the server and offline
     // shells do: an endpoint-only test at cannon speed can skip a wall and put
-    // the ring on the far side of cover.
+    // the ring on the far side of cover. Record the hit point as the line's last
+    // point, so the preview never draws through the wall it just stopped on.
     const dx = point.x - from.x;
     const dy = point.y - from.y;
     const dz = point.z - from.z;
@@ -175,9 +174,12 @@ export function shellArc(
     for (let i = 1; i <= samples; i++) {
       const f = i / samples;
       const sample = { x: from.x + dx * f, y: from.y + dy * f, z: from.z + dz * f };
-      if (options.solidAt?.(sample)) return { points, impact: { ...sample } };
-      if (options.stopAt?.(sample)) return { points, impact: { ...sample } };
+      if (options.solidAt?.(sample) || options.stopAt?.(sample)) {
+        points.push({ ...sample });
+        return { points, impact: { ...sample } };
+      }
     }
+    points.push({ ...point });
     // Ground keeps its integration-point test: the arc is solved for the step
     // grid, and refining this crossing would change where a lofted shot is
     // reported to land relative to the grid it was solved on.

@@ -173,6 +173,45 @@ test('shell packs are for cannons and mortars only, and friendlies only', () => 
   assert.ok(message(frames, /other team/), 'ownership is explained');
 });
 
+test('a pack that does not fit whole is refused and kept', () => {
+  const { game, id, player, frames } = benchSetup(200);
+  game.handleMessage(id, { type: 'craftShellPack' });
+  const gun = gunAt(game, 'cannon');
+  player.position = { ...gun.position };
+  gun.ammo = 27; // room for only three of the five shells
+
+  game.handleMessage(id, { type: 'loadShellPack', emplacementId: gun.id });
+
+  assert.equal(gun.ammo, 27, 'the belt is untouched');
+  assert.equal(player.shellPacks, 1, 'the carried pack is not spent');
+  assert.equal(game.workshopStock.blue, 200 - SHELL_PACK_COST, 'nothing is charged again');
+  assert.ok(message(frames, /No room for a full pack/), 'the reason is shown');
+
+  gun.ammo = 25; // exactly one pack of room
+  game.handleMessage(id, { type: 'loadShellPack', emplacementId: gun.id });
+  assert.equal(gun.ammo, 30);
+  assert.equal(player.shellPacks, 0);
+});
+
+test('a damaged gun refunds less, so rebuilding is not a free repair', () => {
+  const { game, id, player } = benchSetup(0);
+  const spec = emplacementSpec('cannon');
+  const gun = gunAt(game, 'cannon');
+  player.position = { ...gun.position };
+  gun.hp = spec.maxHp / 2;
+
+  game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: gun.id });
+
+  // Half the 30-block hardware value plus the full 60-block belt.
+  assert.equal(game.workshopStock.blue, 75, 'damage is not refunded');
+  assert.equal(emplacementDismantleRefund(spec, spec.ammo, 0, spec.maxHp / 2), 75);
+  assert.ok(
+    emplacementDismantleRefund(spec, spec.ammo, 0, spec.maxHp / 2)
+      < emplacementDismantleRefund(spec, spec.ammo),
+    'a damaged refund is worth less than a pristine one',
+  );
+});
+
 test('dismantling refunds the rounds still in the belt, not the whole build', () => {
   const { game, id, player } = benchSetup(0);
   const spec = emplacementSpec('cannon');

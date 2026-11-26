@@ -404,13 +404,22 @@ export function emplacementAmmoCap(kind: EmplacementKind): number {
   return EMPLACEMENT_AMMO_CAP[kind] ?? EMPLACEMENTS[kind].ammo;
 }
 
-/** Blocks returned when a build is dismantled: its cost minus the rounds it
- *  has already fired, plus whatever a supply crate still holds. Purchased
- *  rounds beyond the starting belt are not refunded. */
-export function emplacementDismantleRefund(spec: EmplacementSpec, ammo: number, stock = 0): number {
+/** Blocks returned when a build is dismantled: its hardware scaled by remaining
+ *  health, plus the rounds still in the belt, plus whatever a supply crate still
+ *  holds. Fired rounds and damage are not refunded, so tearing down and
+ *  rebuilding cannot reset either for free. Purchased rounds beyond the starting
+ *  belt are not refunded. */
+export function emplacementDismantleRefund(
+  spec: EmplacementSpec,
+  ammo: number,
+  stock = 0,
+  hp = spec.maxHp,
+): number {
   const value = EMPLACEMENT_ROUND_VALUE[spec.kind] ?? 0;
-  const fired = Math.max(0, spec.ammo - Math.min(ammo, spec.ammo));
-  return Math.max(0, Math.round(spec.cost - fired * value)) + stock;
+  const health = spec.maxHp > 0 ? Math.max(0, Math.min(1, hp / spec.maxHp)) : 1;
+  const hardware = Math.max(0, spec.cost - spec.ammo * value);
+  const rounds = Math.min(ammo, spec.ammo) * value;
+  return Math.max(0, Math.round(hardware * health + rounds)) + stock;
 }
 
 /** Unknown kinds come straight from the wire, so this is a lookup, not a cast. */
