@@ -16,7 +16,7 @@ const {
 } = require('../dist/tests/sharedTypes.cjs');
 
 /** Join at the bench with a full team stock and every message recorded. */
-function benchSetup(stock = 300) {
+function benchSetup(stock = 200) {
   const frames = [];
   const game = new ServerGame();
   game.roundPhase = 'live';
@@ -39,27 +39,27 @@ function gunAt(game, kind, x = 10, z = 10) {
 }
 
 test('a shell pack is bought at the bench and capped per player', () => {
-  const { game, id, player, frames } = benchSetup(300);
+  const { game, id, player, frames } = benchSetup(200);
 
   for (let i = 0; i < SHELL_PACK_LIMIT; i++) game.handleMessage(id, { type: 'craftShellPack' });
 
   assert.equal(player.shellPacks, SHELL_PACK_LIMIT, 'the player carries the packs');
-  assert.equal(game.workshopStock.blue, 300 - SHELL_PACK_COST * SHELL_PACK_LIMIT, 'each pack is paid for');
+  assert.equal(game.workshopStock.blue, 200 - SHELL_PACK_COST * SHELL_PACK_LIMIT, 'each pack is paid for');
   assert.equal(player.getState().shellPacks, SHELL_PACK_LIMIT, 'the HUD is told about the packs');
 
   game.handleMessage(id, { type: 'craftShellPack' });
   assert.equal(player.shellPacks, SHELL_PACK_LIMIT, 'the limit holds');
-  assert.equal(game.workshopStock.blue, 300 - SHELL_PACK_COST * SHELL_PACK_LIMIT, 'a refused pack costs nothing');
+  assert.equal(game.workshopStock.blue, 200 - SHELL_PACK_COST * SHELL_PACK_LIMIT, 'a refused pack costs nothing');
   assert.ok(message(frames, /already carry/), 'the refusal explains the limit');
 });
 
 test('a pack cannot be bought away from the bench or without blocks', () => {
-  const { game, id, player, frames } = benchSetup(300);
+  const { game, id, player, frames } = benchSetup(200);
   player.position = { x: 90, y: 9, z: 90 };
 
   game.handleMessage(id, { type: 'craftShellPack' });
   assert.equal(player.shellPacks, 0);
-  assert.equal(game.workshopStock.blue, 300, 'no stock is charged');
+  assert.equal(game.workshopStock.blue, 200, 'no stock is charged');
   assert.ok(message(frames, /Stand at your blueprint bench/), 'reach is enforced');
 
   player.position = { ...benchPosition(game.getWorkshops().blue.position) };
@@ -71,7 +71,7 @@ test('a pack cannot be bought away from the bench or without blocks', () => {
 });
 
 test('beside a cannon, blocks buy a pack and load it in one action', () => {
-  const { game, id, player } = benchSetup(300);
+  const { game, id, player } = benchSetup(200);
   const gun = gunAt(game, 'cannon');
   player.position = { ...gun.position };
   const start = gun.ammo;
@@ -79,26 +79,26 @@ test('beside a cannon, blocks buy a pack and load it in one action', () => {
   game.handleMessage(id, { type: 'loadShellPack', emplacementId: gun.id });
 
   assert.equal(gun.ammo, start + SHELL_PACK_ROUNDS.cannon, 'five shells go into the belt');
-  assert.equal(game.workshopStock.blue, 300 - SHELL_PACK_COST, 'the gun purchase is paid for');
+  assert.equal(game.workshopStock.blue, 200 - SHELL_PACK_COST, 'the gun purchase is paid for');
   assert.equal(player.shellPacks, 0, 'no carried pack was involved');
 });
 
 test('a carried pack loads beside the gun without a second charge', () => {
-  const { game, id, player } = benchSetup(300);
+  const { game, id, player } = benchSetup(200);
   game.handleMessage(id, { type: 'craftShellPack' });
-  assert.equal(game.workshopStock.blue, 300 - SHELL_PACK_COST);
+  assert.equal(game.workshopStock.blue, 200 - SHELL_PACK_COST);
 
   const gun = gunAt(game, 'cannon');
   player.position = { ...gun.position };
   game.handleMessage(id, { type: 'loadShellPack', emplacementId: gun.id });
 
   assert.equal(gun.ammo, 15);
-  assert.equal(game.workshopStock.blue, 300 - SHELL_PACK_COST, 'carrying the pack was the only charge');
+  assert.equal(game.workshopStock.blue, 200 - SHELL_PACK_COST, 'carrying the pack was the only charge');
   assert.equal(player.shellPacks, 0, 'the pack is spent');
 });
 
 test('a mortar loads three bombs, caps at three belts, and refuses a full gun', () => {
-  const { game, id, player, frames } = benchSetup(300);
+  const { game, id, player, frames } = benchSetup(200);
   const gun = gunAt(game, 'mortar', 20, 20);
   player.position = { ...gun.position };
   const cap = emplacementAmmoCap('mortar');
@@ -108,18 +108,18 @@ test('a mortar loads three bombs, caps at three belts, and refuses a full gun', 
   assert.equal(gun.ammo, cap, 'the belt stops at its cap');
   assert.equal(
     game.workshopStock.blue,
-    300 - SHELL_PACK_COST * 4,
+    200 - SHELL_PACK_COST * 4,
     'each pack is paid for',
   );
 
   game.handleMessage(id, { type: 'loadShellPack', emplacementId: gun.id });
   assert.equal(gun.ammo, cap);
-  assert.equal(game.workshopStock.blue, 300 - SHELL_PACK_COST * 4, 'a full gun costs nothing');
+  assert.equal(game.workshopStock.blue, 200 - SHELL_PACK_COST * 4, 'a full gun costs nothing');
   assert.ok(message(frames, /already full/), 'the full gun says so');
 });
 
 test('a resupplied cannon can fire every round it bought', () => {
-  const { game, id, player } = benchSetup(300);
+  const { game, id, player } = benchSetup(200);
   const gun = gunAt(game, 'cannon');
   player.position = { ...gun.position };
   gun.gunnerId = id;
@@ -141,7 +141,7 @@ test('a resupplied cannon can fire every round it bought', () => {
 });
 
 test('the gunner can load while manning, but not from across the map', () => {
-  const { game, id, player, frames } = benchSetup(300);
+  const { game, id, player, frames } = benchSetup(200);
   const cannon = gunAt(game, 'cannon', 10, 10);
   player.position = { x: 90, y: 9, z: 90 };
 
@@ -155,7 +155,7 @@ test('the gunner can load while manning, but not from across the map', () => {
 });
 
 test('shell packs are for cannons and mortars only, and friendlies only', () => {
-  const { game, id, player, frames } = benchSetup(300);
+  const { game, id, player, frames } = benchSetup(200);
   const nest = gunAt(game, 'mgNest', 30, 30);
   const crate = gunAt(game, 'supplyCrate', 40, 40);
   const enemyCannon = game.createEmplacement('red', emplacementSpec('cannon'), { x: 50, y: 20, z: 50 }, 0);
@@ -168,7 +168,7 @@ test('shell packs are for cannons and mortars only, and friendlies only', () => 
   assert.equal(nest.ammo, 200, 'the nest belt is untouched');
   assert.equal(crate.ammo, 0);
   assert.equal(enemyCannon.ammo, 10);
-  assert.equal(game.workshopStock.blue, 300, 'no refused load is charged');
+  assert.equal(game.workshopStock.blue, 200, 'no refused load is charged');
   assert.ok(message(frames, /Only cannons and mortars/), 'the kind is explained');
   assert.ok(message(frames, /other team/), 'ownership is explained');
 });
@@ -193,6 +193,37 @@ test('dismantling refunds the rounds still in the belt, not the whole build', ()
   player.position = { ...empty.position };
   game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: empty.id });
   assert.equal(game.workshopStock.blue, expected + spec.cost - spec.ammo * (SHELL_PACK_COST / 5));
+});
+
+test('firing a gun dry and rebuilding it costs the belt instead of reloading free', () => {
+  const { game, id, player } = benchSetup(200);
+  const spec = emplacementSpec('cannon');
+
+  // The build price is paid when the blueprint is crafted, not on placement.
+  game.handleMessage(id, { type: 'craftBlueprint', kind: 'cannon', slot: 0 });
+  assert.equal(game.workshopStock.blue, 200 - spec.cost, 'the first cannon is paid for');
+
+  const gun = gunAt(game, 'cannon');
+  player.position = { ...gun.position };
+  gun.gunnerId = id;
+  player.rotation.pitch = 0;
+  for (let i = 0; i < spec.ammo; i++) {
+    game.handleMessage(id, { type: 'fireEmplacement' });
+    game.world.serverTime += 2.5;
+  }
+  assert.equal(gun.ammo, 0, 'the belt is empty');
+
+  game.handleMessage(id, { type: 'dismantleEmplacement', emplacementId: gun.id });
+  const afterDismantle = 200 - spec.cost + 30;
+  assert.equal(game.workshopStock.blue, afterDismantle, 'an empty gun refunds only its hardware');
+
+  // Rebuilding means paying the build price again. The old full refund left
+  // the stock exactly where it started, which is the free reload.
+  player.position = { ...benchPosition(game.getWorkshops().blue.position) };
+  game.handleMessage(id, { type: 'craftBlueprint', kind: 'cannon', slot: 1 });
+  assert.equal(game.workshopStock.blue, afterDismantle - spec.cost, 'the rebuild is paid for');
+  assert.equal(game.workshopStock.blue, 200 - 2 * spec.cost + 30, 'the fired belt cost 60 blocks');
+  assert.ok(game.workshopStock.blue < 200, 'the loop is not free');
 });
 
 test('an empty gun costs more to rebuild than its refund, closing the free reload', () => {

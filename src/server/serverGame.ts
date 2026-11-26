@@ -398,7 +398,9 @@ export class ServerGame {
   /** Put blocks back into a team's stock, capped by its capacity, and sync the
    *  HUD. Dismantling and scuttling share this refund rule. */
   private refundWorkshop(team: 'red' | 'blue', blocks: number): number {
-    const refund = Math.min(blocks, WORKSHOP_CAPACITY - this.workshopStock[team]);
+    // Stock above capacity (an admin or an old round) must not make a refund
+    // negative: the workshop simply has no room and returns nothing.
+    const refund = Math.max(0, Math.min(blocks, WORKSHOP_CAPACITY - this.workshopStock[team]));
     this.workshopStock[team] += refund;
     this.broadcastWorkshops();
     return refund;
