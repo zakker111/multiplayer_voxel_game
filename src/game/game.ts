@@ -26,7 +26,7 @@ import {
   WORKSHOP_CENTERS, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec, WRECK_LIFETIME_SECONDS,
   VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
   VOXEL_MAX_DURABILITY, VOXEL_SHOT_DAMAGE,
-  emplacementSpec, EMPLACEMENTS, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
+  emplacementSpec, emplacementDismantleRefund, EMPLACEMENTS, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
   EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE, emplacedShotDirection,
   CANNON_BLAST_RADIUS, MORTAR_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_DAMAGE,
@@ -1427,6 +1427,17 @@ export class Game {
       wreckRemoved = true;
     }
     if (wreckRemoved) this.applyEmplacements(this.localEmplacements);
+    // A seat lasts only as long as the gunner holds it. A bot that dies or is
+    // pulled away elsewhere can leave its name on a nest, and because an
+    // occupied seat refuses every mount, that nest would stay unmannable for
+    // the rest of the round. The player's own seat belongs to the mount block
+    // below, not to this sweep.
+    for (const emplacement of this.localEmplacements) {
+      const gunner = emplacement.gunnerId;
+      if (emplacement.wreck || !gunner || gunner === this.localPlayerId) continue;
+      const bot = this.bots.find(candidate => candidate.name === gunner);
+      if (!bot || bot.isDead || bot.nestId !== emplacement.id) this.clearNestSeat(emplacement);
+    }
     if (this.mountedEmplacementId) {
       const nest = this.localEmplacements.find(e => e.id === this.mountedEmplacementId);
       const spec = nest ? emplacementSpec(nest.kind) : undefined;
@@ -1470,6 +1481,62 @@ export class Game {
     this.applyEmplacements(this.localEmplacements);
     this.cancelBlueprint();
     this.showMessage(`🏗️ ${kind} placed · slot ${slot + 1} spent`);
+  }
+
+  /** Put blocks back into a team's local workshop, capped like the server's
+   *  refund so a full stockpile never overflows. Returns what actually fit. */
+  private refundLocalWorkshop(team: Team, amount: number): number {
+    if (!this.workshops) return 0;
+    const workshop = this.workshops[team];
+    const refund = Math.min(amount, Math.max(0, workshop.capacity - workshop.stock));
+    if (refund <= 0) return 0;
+    workshop.stock += refund;
+    return refund;
+  }
+
+  /** X offline: the server's dismantle, run here. Every rule — own team, in
+   *  reach, not a wreck — is already applied by `dismantleCandidate`, the same
+   *  test the HUD hint uses, so this only has to pay out and remove. The refund
+   *  is the shared one, less the rounds a gun has fired and anything a crate
+   *  still holds. */
+  private dismantleLocalEmplacement(id: string): void {
+    const emplacement = this.localEmplacements.find(e => e.id === id);
+    if (!emplacement) return;
+
+    // A crewed build comes down too: the gunner steps out the way a wrecked
+    // nest puts them out, so a bot parked on it cannot make it permanent. A
+    // bot's body is pinned to the seat while it mans the gun, so it has to be
+    // moved beside the build before the build goes, or the crew would be left
+    // standing inside thin air where the nest used to be.
+    const botGunner = emplacement.gunnerId ? this.bots.find(b => b.name === emplacement.gunnerId) : undefined;
+    if (botGunner) this.releaseBotNest(botGunner, true);
+
+    const refund = this.refundLocalWorkshop(
+      emplacement.team,
+      emplacementDismantleRefund(EMPLACEMENTS[emplacement.kind], emplacement.ammo, emplacement.stock, emplacement.hp),
+    );
+    this.localEmplacements = this.localEmplacements.filter(e => e.id !== id);
+    this.localEmplacementFireAt.delete(id);
+    this.applyEmplacements(this.localEmplacements);
+    const label = emplacement.kind === 'mgNest' ? 'MG nest' : emplacement.kind;
+    this.showMessage(refund > 0 ? `Dismantled ${label} (+${refund} blocks)` : `Dismantled ${label} (workshop full)`);
+  }
+
+  /** X offline: the server's scuttle, run here. `dismantleCandidate` has already
+   *  applied the rules, so the hull just leaves the map and its full cost goes
+   *  back to the workshop, capped like a dismantled build. A bot crew is put out
+   *  through the same safe exit a wreck uses, so a bot-driven jeep cannot make
+   *  it permanent. */
+  private scuttleLocalJeep(id: string): void {
+    const jeep = this.localJeeps.find(vehicle => vehicle.id === id);
+    if (!jeep) return;
+    const refund = this.refundLocalWorkshop(jeep.team, vehicleSpec(jeep.kind).cost);
+    // The driver's release puts the passenger out too, and ends the errand so
+    // the bot walks back to the fight instead of driving a ghost.
+    this.releaseLocalJeepCrew(jeep);
+    this.localJeeps = this.localJeeps.filter(vehicle => vehicle.id !== id);
+    this.applyJeeps(this.localJeeps);
+    this.showMessage(refund > 0 ? `Scuttled jeep (+${refund} blocks)` : 'Scuttled jeep (workshop full)');
   }
 
   /** The server's spot rules, mirrored: map bounds, base and pad clearance,
@@ -1665,15 +1732,22 @@ export class Game {
     this.updateBotNameTag(bot, '🔫 MANNING MG NEST', '#ffd166');
   }
 
+  /** Free a build's gunner seat, whoever the name on it is. An occupied seat
+   *  refuses every mount, so a name that no longer has a body behind it has to
+   *  be cleared rather than trusted. */
+  private clearNestSeat(nest: EmplacementSnapshot): void {
+    nest.gunnerId = null;
+    nest.yaw = nest.baseYaw;
+    this.localEmplacementFireAt.delete(nest.id);
+    const pivot = this.emplacementMeshes.get(nest.id)?.getObjectByName('gunPivot');
+    if (pivot) pivot.rotation.y = 0;
+  }
+
   /** Give up a nest seat; a living bot steps out beside the nest. */
   private releaseBotNest(bot: Bot, stepOut: boolean): void {
-    const nest = this.localEmplacements.find(e => e.id === bot.nestId);
-    if (nest && nest.gunnerId === bot.name) {
-      nest.gunnerId = null;
-      nest.yaw = nest.baseYaw;
-      this.localEmplacementFireAt.delete(nest.id);
-      const pivot = this.emplacementMeshes.get(nest.id)?.getObjectByName('gunPivot');
-      if (pivot) pivot.rotation.y = 0;
+    const nest = this.localEmplacements.find(e => e.id === bot.nestId && e.gunnerId === bot.name);
+    if (nest) {
+      this.clearNestSeat(nest);
       if (stepOut && !bot.isDead) {
         const exit = this.localEmplacementExitSpot(nest);
         if (exit) {
@@ -4916,22 +4990,30 @@ export class Game {
   }
 
   /** The friendly build or jeep the dismantle key would tear down, or null. The
-   *  key and the HUD hint share this so they always agree on the target. */
+   *  key and the HUD hint share this so they always agree on the target.
+   *
+   *  A build in reach always wins over a jeep, even a nearer one. The key used
+   *  to take whichever was closest, so a jeep parked beside a nest swallowed
+   *  the press meant for the nest and the squad lost its gun instead. */
   private dismantleCandidate(): { type: 'build' | 'jeep'; id: string } | null {
     if (!this.benchEnabled || this.player.isDead || this.mountedEmplacementId || this.drivingJeepId || this.ridingJeepId) return null;
-    let best: { type: 'build' | 'jeep'; id: string } | null = null;
-    let bestDistanceSq = EMPLACEMENT_USE_REACH * EMPLACEMENT_USE_REACH;
+    const reachSq = EMPLACEMENT_USE_REACH * EMPLACEMENT_USE_REACH;
+    let bestBuild: string | null = null;
+    let bestBuildDistanceSq = reachSq;
     for (const snapshot of this.emplacedSnapshots.values()) {
       if (snapshot.team !== this.playerTeam || snapshot.wreck) continue;
       const distanceSq = distanceSquared(this.player.position, snapshot.position);
-      if (distanceSq <= bestDistanceSq) { best = { type: 'build', id: snapshot.id }; bestDistanceSq = distanceSq; }
+      if (distanceSq <= bestBuildDistanceSq) { bestBuild = snapshot.id; bestBuildDistanceSq = distanceSq; }
     }
+    if (bestBuild) return { type: 'build', id: bestBuild };
+    let bestJeep: string | null = null;
+    let bestJeepDistanceSq = reachSq;
     for (const { state } of this.jeeps.values()) {
       if (state.team !== this.playerTeam || state.wreck) continue;
       const distanceSq = distanceSquared(this.player.position, state.position);
-      if (distanceSq <= bestDistanceSq) { best = { type: 'jeep', id: state.id }; bestDistanceSq = distanceSq; }
+      if (distanceSq <= bestJeepDistanceSq) { bestJeep = state.id; bestJeepDistanceSq = distanceSq; }
     }
-    return best;
+    return bestJeep ? { type: 'jeep', id: bestJeep } : null;
   }
 
   /** An own-team supply crate within reach, or null. */
@@ -5534,8 +5616,13 @@ export class Game {
     // until an enemy removes it.
     if (!e.repeat && e.code === 'KeyX') {
       const target = this.dismantleCandidate();
-      if (target?.type === 'build') this.networkClient?.send({ type: 'dismantleEmplacement', emplacementId: target.id });
-      else if (target?.type === 'jeep') this.networkClient?.send({ type: 'scuttleJeep', vehicleId: target.id });
+      if (target?.type === 'build') {
+        if (this.gameMode === 'online') this.networkClient?.send({ type: 'dismantleEmplacement', emplacementId: target.id });
+        else this.dismantleLocalEmplacement(target.id);
+      } else if (target?.type === 'jeep') {
+        if (this.gameMode === 'online') this.networkClient?.send({ type: 'scuttleJeep', vehicleId: target.id });
+        else this.scuttleLocalJeep(target.id);
+      }
       return;
     }
     if (this.drivingJeepId) {
