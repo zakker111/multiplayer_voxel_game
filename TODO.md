@@ -161,4 +161,4 @@ Complete **Phase 4**: three blueprint slots, five emplacement kinds and the ghos
 ## Known issues (November 2026 verification)
 
 - **Bot-only matches can stall before the first flag pickup.** In a paired 20-seed sweep of full 30-minute 10v10 matches, 9 seeds produced zero captures and 2 seeds produced no pickups at all. The same pattern occurs on the pre-blueprint-AI baseline, so this is a break-through/balance problem, not a metric bug. Reproduce with `node scripts/beta-simulate.mjs 30 30 1 10 101`; fix before tuning vehicles against bot matches.
-- **Verification snapshot:** `npm run lint`, `npm run build`, `npm test` (263/263) and `npm run smoke` (against `dist/server.cjs`) all pass on `main`.
+- **Verification snapshot:** `npm run lint`, `npm run build`, `npm test` (294/294) and `npm run smoke` (against `dist/server.cjs`) all pass on `main`.

@@ -5,7 +5,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 ![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
-![Tests](https://img.shields.io/badge/tests-263%2F263%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-294%2F294%20passing-brightgreen.svg)
 
 ---
 
@@ -74,7 +74,7 @@ npm run dev
 
 # Full verification pipeline (used by CI)
 npm run lint      # tsc --noEmit
-npm test          # node --test tests/  (263 regression tests)
+npm test          # node --test tests/  (294 regression tests)
 npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)
@@ -140,7 +140,7 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
 
 ## 🧪 Testing & Playtesting
 
-- **Automated**: `npm test` runs 263 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
+- **Automated**: `npm test` runs 294 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
 - **Bot simulation**: `npm run measure:bots -- 30` runs a headless 30-minute bot-only round against the real server. It reports pickups, captures, deaths, structure starts and completions, blocks placed and stuck recoveries. On the old 448m layout (±160 stands with the spawn band only 32m behind them) runs produced 0–12 captures and 12–63 pickups; on the current 512m layout (±140 stands, ±210–240 spawns) two 30-minute runs produced 17 and 33 captures with 38 and 88 pickups, 381–411 deaths, 1428–3284 blocks and completed structures of every kind. Two samples per layout, so read the direction as measured and the exact numbers as noisy.
 - **Beta battle simulation**: `node scripts/beta-simulate.mjs 30 30 3 10 12345` runs three full 30-minute 10v10 matches on the real server tick loop (rounds, blueprints, jeeps, workshops and bots), reporting round-scoped captures, pickups, returns, flag droughts, hardware by kind, jeeps and stalls. The last argument is a seed, so the same command reproduces the report exactly (run *i* uses `seed + i - 1`); every run prints its seed and the banner prints the rerun command. The harness checks its own counters and throws instead of reporting an impossible number.
 - **Live smoke test**: with a server running on `SMOKE_PORT` (default 3110), `npm run smoke` drives WS join/input/respawn, malformed frames, the HTTP token auth path and the SSE init stream.
