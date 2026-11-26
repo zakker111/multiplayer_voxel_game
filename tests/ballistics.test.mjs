@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
-  ballisticVelocity, ballisticRange, shellArc, blastBuildHits, blastFalloff, mortarImpactPoint,
+  ballisticVelocity, ballisticRange, shellArc, blastBuildHits, blastDistance, blastFalloff, mortarImpactPoint,
   MORTAR_SHELL_SPEED, CANNON_SHELL_SPEED, MORTAR_DISPERSION,
 } = require('../dist/tests/ballistics.cjs');
 const { CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE } = require('../dist/tests/sharedTypes.cjs');
@@ -109,7 +109,20 @@ test('one blast damages a directly hit build exactly once at full power', () => 
   assert.equal(hits.filter((hit) => hit.build.id === 'far').length, 0, 'builds outside the radius are spared');
   const near = hits.find((hit) => hit.build.id === 'near');
   assert.ok(near && near.damage > 0 && near.damage < CANNON_BLAST_DAMAGE, 'splash falls off with distance');
-  assert.equal(near.damage, blastFalloff(CANNON_BLAST_DAMAGE, CANNON_BLAST_RADIUS, 3), 'the list uses the shared falloff');
+  assert.equal(
+    near.damage,
+    blastFalloff(CANNON_BLAST_DAMAGE, CANNON_BLAST_RADIUS, blastDistance(impact, { x: 7, y: 10.6, z: 0 })),
+    'the list uses the shared oval falloff',
+  );
+
+  // The burst is an oval: the same gap hurts less straight up than it does
+  // along the ground, and less to the side than it does down the round's path.
+  const flat = blastDistance({ x: 0, y: 0, z: 0 }, { x: 2, y: 0, z: 0 });
+  assert.ok(flat < 2, 'a gap along the ground counts as less than its length');
+  assert.equal(blastDistance({ x: 0, y: 0, z: 0 }, { x: 0, y: 2, z: 0 }), 2, 'height is measured as-is');
+  const ahead = blastDistance({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 2 }, { x: 0, y: 0, z: 1 });
+  const aside = blastDistance({ x: 0, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }, { x: 0, y: 0, z: 1 });
+  assert.ok(ahead < aside, 'the oval reaches further along the round than across it');
 
   // One falloff rule for both callers: full at the centre, a 1-point minimum
   // anywhere inside the radius, and nothing outside it.

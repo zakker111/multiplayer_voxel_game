@@ -930,7 +930,8 @@ function App() {
                         background: gameState.hp > 50 ? '#00ff88' : gameState.hp > 25 ? '#ffcc00' : '#ff3366',
                       }}></div>
                     </div>
-                    <span className="text-white font-bold text-lg">{gameState.hp}</span>
+                    {/* HP is a float pool; round only what the player reads. */}
+                    <span className="text-white font-bold text-lg">{Math.ceil(gameState.hp)}</span>
                   </div>
                   {gameState.spawnProtected && (
                     <div className="mt-1.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-cyan-300">

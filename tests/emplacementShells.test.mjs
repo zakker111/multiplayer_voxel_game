@@ -10,9 +10,11 @@ const { ServerBot } = require('../dist/tests/serverBot.cjs');
 const {
   emplacementSpec, EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE,
   MORTAR_BLAST_RADIUS, MANNED_EMPLACEMENTS, EMPLACEMENT_MG_SPREAD, emplacedShotDirection,
-  WEAPONS, vehicleSpec, VOXEL_STONE,
+  WEAPONS, vehicleSpec, VOXEL_STONE, VOXEL_SHOT_DAMAGE, VOXEL_MAX_DURABILITY,
 } = require('../dist/tests/sharedTypes.cjs');
-const { shellArc, shellStopsAt, CANNON_SHELL_SPEED } = require('../dist/tests/ballistics.cjs');
+const {
+  shellArc, shellStopsAt, CANNON_SHELL_SPEED, MORTAR_DISPERSION,
+} = require('../dist/tests/ballistics.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 
 const SAMPLES = [[0, 0], [-1, -1], [-1, 1], [1, -1], [1, 1], [-2, 0], [2, 0], [0, -2], [0, 2]];
@@ -624,7 +626,9 @@ test('an MG nest chips the terrain it hits', () => {
     for (let dz = -1; dz <= 1; dz++) {
       for (let dy = 0; dy < 3; dy++) {
         const x = wallX + dx, y = baseY + dy, z = wallZ + dz;
-        game.world.setVoxel(x, y, z, VOXEL_STONE, 1);
+        // One round's worth of pool: this test is about a round carving exactly
+        // the block it struck, not about how many rounds a full block takes.
+        game.world.setVoxel(x, y, z, VOXEL_STONE, VOXEL_SHOT_DAMAGE);
         wall.push({ x, y, z });
       }
     }
@@ -657,4 +661,80 @@ test('a mortar shell damages bots caught in the blast', () => {
   run(game, 8);
 
   assert.ok(bot.hp < before, `the blast hurt the bot (${before} -> ${bot.hp})`);
+});
+
+test('a mortar scatters around the mark while a cannon fires exactly where aimed', () => {
+  // Mortar: indirect fire is area fire, so repeated rounds at one mark walk
+  // around it instead of drilling the centre tile.
+  const mortarGame = new ServerGame();
+  const { gun } = manGun(mortarGame, 'mortar');
+  const target = { x: gun.position.x, y: gun.position.y, z: gun.position.z - 60 };
+
+  const points = [];
+  for (let i = 0; i < 40; i++) {
+    const solution = mortarGame.mortarAimPoint(gun, target);
+    assert.ok('point' in solution, 'the mortar can solve the mark');
+    points.push(solution.point);
+  }
+  const misses = points.map((p) => Math.hypot(p.x - target.x, p.z - target.z));
+  assert.ok(
+    Math.max(...misses) <= MORTAR_DISPERSION + 1e-6,
+    `every round stays inside the landing ring (${Math.max(...misses).toFixed(2)}m)`,
+  );
+  assert.ok(Math.min(...misses) > 0.05, 'a mortar round is never a laser on the exact mark');
+  assert.ok(
+    new Set(points.map((p) => `${p.x.toFixed(2)},${p.z.toFixed(2)}`)).size >= 30,
+    'consecutive rounds land in different spots',
+  );
+
+  // Cannon: direct fire has no dispersion. The same aim and pitch give the
+  // identical shot every time, so a good gunner puts rounds on the same spot.
+  const cannonGame = new ServerGame();
+  const cannon = manGun(cannonGame, 'cannon');
+  const fire = () => cannonGame.fireShell(cannon.gun, cannon.gunner.player, cannon.gun.yaw, 0.15, null);
+  fire();
+  fire();
+  const [first, second] = [...cannonGame.shells.values()];
+  assert.deepEqual(first.velocity, second.velocity, 'identical cannon shots have identical velocity');
+  assert.deepEqual(first.position, second.position, 'and leave from the same muzzle point');
+  assert.ok(Math.abs(first.velocity.x) < 1e-9, 'the round leaves down the gun line, not off to a side');
+  assert.ok(first.velocity.z < 0, 'yaw 0 fires down -z');
+});
+
+test('cannon and mortar blasts damage players, vehicles, structures and voxels', () => {
+  for (const kind of ['cannon', 'mortar']) {
+    const game = new ServerGame();
+    const blue = join(game, 'blue');
+    const red = join(game, 'red');
+    game.spawnProtectedUntil.delete(red.id);
+    blue.player.position = { x: -80, y: 9, z: -80 }; // clear of the blast
+
+    // One of each target, all inside the burst: a body at the centre, a jeep
+    // and a structure just off it, and a block exactly at the impact.
+    const impact = { x: 10, y: 30, z: 10 };
+    red.player.position = { x: 10, y: 29, z: 10 };
+
+    const jeepSpec = vehicleSpec('jeep');
+    const jeep = {
+      id: 'blast-jeep', kind: 'jeep', team: 'red', position: { x: 11, y: 29, z: 10 }, yaw: 0,
+      speed: 0, hp: jeepSpec.maxHp, driverId: null, passengerId: null, wreck: false,
+      throttle: 0, steering: 0, brake: false, lastInput: 0, wreckUntil: 0,
+    };
+    game.jeeps.set(jeep.id, jeep);
+
+    const nestSpec = emplacementSpec('mgNest');
+    const structure = game.createEmplacement('red', nestSpec, { x: 12, y: 29, z: 10 }, 0);
+    game.world.setVoxel(10, 30, 10, VOXEL_STONE, VOXEL_MAX_DURABILITY);
+
+    const playerHp = red.player.hp;
+    game.explodeShell({
+      id: `blast-${kind}`, kind, team: 'blue', ownerId: blue.id,
+      position: { ...impact }, velocity: { x: 0, y: 0, z: 1 }, firedAt: 0,
+    }, impact);
+
+    assert.ok(red.player.hp < playerHp || red.player.isDead, `${kind} hurts a player`);
+    assert.ok(jeep.wreck || jeep.hp < jeepSpec.maxHp, `${kind} hurts a vehicle`);
+    assert.ok(structure.hp < nestSpec.maxHp, `${kind} hurts a structure`);
+    assert.equal(game.world.isSolid(10, 30, 10), false, `${kind} breaks a voxel`);
+  }
 });

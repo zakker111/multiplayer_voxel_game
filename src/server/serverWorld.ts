@@ -9,6 +9,8 @@ import {
   VOXEL_STONE,
   VOXEL_GRASS,
   VOXEL_BUILT,
+  VOXEL_MAX_DURABILITY,
+  VOXEL_DURABILITY_EPSILON,
   Position,
   VoxelChange,
   isWorkshopProtectedCell,
@@ -80,7 +82,7 @@ export class ServerWorld {
           if (y === height) type = VOXEL_GRASS;
           else if (y < height - 2) type = VOXEL_STONE;
           
-          this.setVoxel(x, y, z, type, 3);
+          this.setVoxel(x, y, z, type, VOXEL_MAX_DURABILITY);
         }
       }
     }
@@ -98,7 +100,7 @@ export class ServerWorld {
             const desired = y < GROUND_LEVEL ? VOXEL_DIRT : y === GROUND_LEVEL ? VOXEL_GRASS : VOXEL_AIR;
             const existing = this.getVoxel(x, y, z);
             if ((existing?.type ?? VOXEL_AIR) === desired) continue;
-            const durability = desired === VOXEL_AIR ? 0 : 3;
+            const durability = desired === VOXEL_AIR ? 0 : VOXEL_MAX_DURABILITY;
             this.setVoxel(x, y, z, desired, durability);
             this.modifiedVoxels.set(this.getVoxelKey(x, y, z), { x, y, z, type: desired, durability });
           }
@@ -115,7 +117,7 @@ export class ServerWorld {
     return chunk.voxels.get(this.getVoxelKey(x, y, z)) || null;
   }
 
-  setVoxel(x: number, y: number, z: number, type: number, durability: number = 3): void {
+  setVoxel(x: number, y: number, z: number, type: number, durability: number = VOXEL_MAX_DURABILITY): void {
     if (!this.isGeneratingTerrain && isWorkshopProtectedCell(x, z)) return;
     const { chunkX, chunkZ } = this.getChunkCoords(x, z);
     const chunk = this.getOrCreateChunk(chunkX, chunkZ);
@@ -225,7 +227,7 @@ export class ServerWorld {
       const { chunkX, chunkZ } = this.getChunkCoords(x, z);
       const chunk = this.getOrCreateChunk(chunkX, chunkZ);
       const vkey = this.getVoxelKey(x, y, z);
-      chunk.voxels.set(vkey, { type: VOXEL_BUILT, durability: 3 });
+      chunk.voxels.set(vkey, { type: VOXEL_BUILT, durability: VOXEL_MAX_DURABILITY });
       const supported = this.hasSupport(x, y, z, 12);
       chunk.voxels.delete(vkey);
       if (!supported) return false;
@@ -241,7 +243,7 @@ export class ServerWorld {
     
     voxel.durability -= damage;
     
-    if (voxel.durability <= 0) {
+    if (voxel.durability <= VOXEL_DURABILITY_EPSILON) {
       this.setVoxel(x, y, z, VOXEL_AIR, 0);
       return true;
     }

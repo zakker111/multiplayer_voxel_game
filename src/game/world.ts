@@ -10,6 +10,8 @@ import {
   VOXEL_STONE,
   VOXEL_GRASS,
   VOXEL_BUILT,
+  VOXEL_MAX_DURABILITY,
+  VOXEL_DURABILITY_EPSILON,
 } from '../shared/types';
 
 export { WORLD_SIZE, GROUND_LEVEL, MAX_BUILD_UP, MAX_DIG_DOWN, CHUNK_SIZE, VOXEL_AIR, VOXEL_DIRT, VOXEL_STONE, VOXEL_GRASS, VOXEL_BUILT };
@@ -116,7 +118,7 @@ export class VoxelWorld {
     return chunk.voxels.get(this.key(x, y, z)) || null;
   }
 
-  setVoxel(x: number, y: number, z: number, type: number, durability: number = 3): void {
+  setVoxel(x: number, y: number, z: number, type: number, durability: number = VOXEL_MAX_DURABILITY): void {
     const chunk = this.getOrCreateChunk(x, z);
     const key = this.key(x, y, z);
     
@@ -159,7 +161,7 @@ export class VoxelWorld {
           let type = VOXEL_DIRT;
           if (y === height) type = VOXEL_GRASS;
           else if (y < height - 2) type = VOXEL_STONE;
-          this.setVoxel(x, y, z, type, 3);
+          this.setVoxel(x, y, z, type, VOXEL_MAX_DURABILITY);
         }
       }
     }
@@ -229,7 +231,7 @@ export class VoxelWorld {
     if (y > GROUND_LEVEL) {
       const chunk = this.getOrCreateChunk(x, z);
       const key = this.key(x, y, z);
-      chunk.voxels.set(key, { type: VOXEL_BUILT, durability: 3 });
+      chunk.voxels.set(key, { type: VOXEL_BUILT, durability: VOXEL_MAX_DURABILITY });
       const supported = this.hasSupport(x, y, z, 12);
       chunk.voxels.delete(key);
       if (!supported) {
@@ -246,7 +248,7 @@ export class VoxelWorld {
     
     v.durability -= damage;
     
-    if (v.durability <= 0) {
+    if (v.durability <= VOXEL_DURABILITY_EPSILON) {
       this.setVoxel(x, y, z, VOXEL_AIR);
       // Pass coordinates for localized collapse detection
       const collapseResult = this.collapseDisconnected(x, y, z);
@@ -411,7 +413,7 @@ export class VoxelWorld {
 
   private getColorWithDurability(type: number, durability: number): THREE.Color {
     const baseColor = this.getBaseColor(type);
-    const factor = durability / 3;
+    const factor = durability / VOXEL_MAX_DURABILITY;
     const r = ((baseColor >> 16) & 0xFF) / 255 * factor;
     const g = ((baseColor >> 8) & 0xFF) / 255 * factor;
     const b = (baseColor & 0xFF) / 255 * factor;

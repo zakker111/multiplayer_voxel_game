@@ -57,7 +57,7 @@ test('damage falls off monotonically between fullRange and falloffRange', () => 
   // Past falloffRange the multiplier is frozen, not zeroed.
   assert.strictEqual(
     weaponDamage(WEAPONS.smg, false, 400),
-    Math.round(WEAPONS.smg.damage.body * WEAPONS.smg.minMultiplier),
+    WEAPONS.smg.damage.body * WEAPONS.smg.minMultiplier,
   );
 });
 

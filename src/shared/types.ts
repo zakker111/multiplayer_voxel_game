@@ -253,6 +253,21 @@ export const VOXEL_STONE = 2;
 export const VOXEL_GRASS = 3;
 export const VOXEL_BUILT = 4;
 
+/** Starting HP of a solid block. Durability is a float pool: a block can sit at
+ *  a partial value, and the client shades it by
+ *  `durability / VOXEL_MAX_DURABILITY` so chip damage is visible. */
+export const VOXEL_MAX_DURABILITY = 1;
+
+/** Damage one rifle or SMG round does to a block: a third of its pool, so a
+ *  block always takes exactly three rounds and each one removes a fraction.
+ *  Voxel durability is a float pool precisely so this need not be a whole
+ *  number. */
+export const VOXEL_SHOT_DAMAGE = VOXEL_MAX_DURABILITY / 3;
+
+/** A sliver left behind by float subtraction still counts as a broken block,
+ *  so the third round always breaks it (1 - 3 * (1/3) is not exactly 0). */
+export const VOXEL_DURABILITY_EPSILON = 1e-9;
+
 // The garage is a protected visual structure, not a destructible voxel entity.
 // A fixed footprint keeps its floor and future vehicle pad clear of edits.
 export const WORKSHOP_CENTERS = {
@@ -623,7 +638,10 @@ export function rangeMultiplier(weapon: WeaponStats, distance: number): number {
  *  weapon hits for identical numbers in every mode. */
 export function weaponDamage(weapon: WeaponStats, isHeadshot: boolean, distance: number): number {
   const base = isHeadshot ? weapon.damage.head : weapon.damage.body;
-  return Math.max(1, Math.round(base * rangeMultiplier(weapon, distance)));
+  // HP is a float pool: falloff lands continuously instead of snapping every
+  // hit to a whole number. The floor of 1 keeps a hit at the edge of falloff
+  // from becoming a no-op.
+  return Math.max(1, base * rangeMultiplier(weapon, distance));
 }
 
 export const TOOLS = {

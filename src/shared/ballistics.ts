@@ -132,6 +132,12 @@ export interface ShellArc {
   impact: Position;
 }
 
+/** How finely the flight inside one integration step is sampled for collisions.
+ *  A cannon round covers over two metres per step, so testing only the endpoint
+ *  can skip a one-voxel wall. Shared so the server, the offline shells and the
+ *  preview ring all stop at the same point. */
+export const SHELL_IMPACT_SAMPLE = 0.25;
+
 /**
  * Sample the flight path of a shell. Uses the same semi-implicit integration
  * (gravity first, then move) as the server's `updateShells`, so a preview drawn
@@ -151,14 +157,30 @@ export function shellArc(
   const velocityZ = velocity.z;
 
   for (let t = step; t <= maxTime; t += step) {
+    const from = { ...point };
     velocityY.value -= options.gravity * step;
     point.x += velocityX * step;
     point.y += velocityY.value * step;
     point.z += velocityZ * step;
     points.push({ ...point });
 
-    if (options.solidAt?.(point)) return { points, impact: { ...point } };
-    if (options.stopAt?.(point)) return { points, impact: { ...point } };
+    // Walk the stretch just flown in short samples, as the server and offline
+    // shells do: an endpoint-only test at cannon speed can skip a wall and put
+    // the ring on the far side of cover.
+    const dx = point.x - from.x;
+    const dy = point.y - from.y;
+    const dz = point.z - from.z;
+    const length = Math.hypot(dx, dy, dz);
+    const samples = Math.max(1, Math.ceil(length / SHELL_IMPACT_SAMPLE));
+    for (let i = 1; i <= samples; i++) {
+      const f = i / samples;
+      const sample = { x: from.x + dx * f, y: from.y + dy * f, z: from.z + dz * f };
+      if (options.solidAt?.(sample)) return { points, impact: { ...sample } };
+      if (options.stopAt?.(sample)) return { points, impact: { ...sample } };
+    }
+    // Ground keeps its integration-point test: the arc is solved for the step
+    // grid, and refining this crossing would change where a lofted shot is
+    // reported to land relative to the grid it was solved on.
     const ground = options.groundAt?.(point.x, point.z);
     if (ground !== null && ground !== undefined && point.y <= ground + 0.05) {
       return { points, impact: { x: point.x, y: ground, z: point.z } };
@@ -211,14 +233,46 @@ export interface BlastBuildTarget {
   kind?: string;
 }
 
+/** A burst is an oval, not a sphere: the shockwave spreads across the ground
+ *  further than it reaches upward, and a round still travelling at impact
+ *  carries it further along its flight line. Damage therefore stays highest in
+ *  the shallow oval that hugs the ground where the shell lands. */
+export const BLAST_GROUND_STRETCH = 1.2;
+export const BLAST_PATH_STRETCH = 1.25;
+
+/** Distance from a burst, measured on that oval: a point 1.2m across the ground
+ *  counts as 1m, a point 1.5m ahead along `direction` counts as 1m, and height
+ *  counts unchanged. `direction` is the round's velocity at impact, so a cannon
+ *  round stretches its burst along the line it was fired on while a mortar's
+ *  steep drop leaves a wide, flat oval around the crater. */
+export function blastDistance(impact: Position, point: Position, direction?: Position): number {
+  const dx = point.x - impact.x;
+  const dz = point.z - impact.z;
+  const dy = point.y - impact.y;
+  const flat = direction ? Math.hypot(direction.x, direction.z) : 0;
+  if (!direction || flat < 1e-6) {
+    return Math.hypot(dx / BLAST_GROUND_STRETCH, dy, dz / BLAST_GROUND_STRETCH);
+  }
+  const fx = direction.x / flat;
+  const fz = direction.z / flat;
+  const along = dx * fx + dz * fz;
+  const side = -dx * fz + dz * fx;
+  return Math.hypot(
+    along / (BLAST_GROUND_STRETCH * BLAST_PATH_STRETCH),
+    side / BLAST_GROUND_STRETCH,
+    dy,
+  );
+}
+
 /**
- * Blast damage at a distance: linear falloff from the centre, rounded, with a
- * minimum of 1 so anything inside the radius is hurt. Both the server and the
- * offline blast call this, so their numbers cannot drift apart.
+ * Blast damage at a distance: linear falloff from the centre, with a minimum of
+ * 1 so anything inside the radius is hurt. Both the server and the offline
+ * blast call this, so their numbers cannot drift apart. The fraction is kept
+ * because player and bot HP is a float pool.
  */
 export function blastFalloff(power: number, radius: number, distance: number): number {
   if (!(radius > 0) || distance > radius) return 0;
-  return Math.max(1, Math.round(power * (1 - distance / radius)));
+  return Math.max(1, power * (1 - distance / radius));
 }
 
 /**
@@ -231,6 +285,7 @@ export function blastFalloff(power: number, radius: number, distance: number): n
  */
 export function blastBuildHits<T extends BlastBuildTarget>(
   team: 'red' | 'blue', impact: Position, radius: number, power: number, builds: Iterable<T>,
+  direction?: Position,
 ): Array<{ build: T; damage: number }> {
   const hits: Array<{ build: T; damage: number }> = [];
   for (const build of builds) {
@@ -241,13 +296,71 @@ export function blastBuildHits<T extends BlastBuildTarget>(
     });
     const distance = direct
       ? 0
-      : Math.hypot(
-        build.position.x - impact.x,
-        build.position.y + 0.6 - impact.y,
-        build.position.z - impact.z,
-      );
+      : blastDistance(impact, { x: build.position.x, y: build.position.y + 0.6, z: build.position.z }, direction);
     if (distance > radius) continue;
     hits.push({ build, damage: blastFalloff(power, radius, distance) });
+  }
+  return hits;
+}
+
+/** Power a blast needs at its centre to break one full block. Blast power is
+ *  anti-personnel HP, while a block's pool is one unit, so this keeps a cannon
+ *  to a ~2.4m break radius with a chipped ring instead of deleting everything
+ *  inside its anti-personnel radius. */
+export const VOXEL_BLAST_TOUGHNESS = 60;
+
+/** Damage one blast does to the block at `distance` from its centre, in block
+ *  durability units. Unlike `blastFalloff` there is no 1-point floor: the ring
+ *  outside the break radius is only chipped, and the client's durability shade
+ *  shows it. */
+export function blastVoxelDamage(power: number, radius: number, distance: number): number {
+  if (!(radius > 0) || !(power > 0) || distance >= radius) return 0;
+  return (power * (1 - distance / radius)) / VOXEL_BLAST_TOUGHNESS;
+}
+
+export interface BlastVoxelHit {
+  x: number;
+  y: number;
+  z: number;
+  /** Durability to subtract, already at the shared distance falloff. */
+  damage: number;
+}
+
+/** Solid blocks a blast damages, each at the damage its distance earns. The
+ *  caller supplies its own world lookup, so the server, the offline client and
+ *  any future explosive carve the same shape.
+ *
+ *  Blocks inside the break radius are damaged even when buried. In the chipped
+ *  ring only exposed blocks are touched, so a blast chips the crater it can
+ *  reach instead of quietly pre-damaging rock behind cover. */
+export function blastVoxelHits(
+  impact: Position,
+  radius: number,
+  power: number,
+  isSolid: (x: number, y: number, z: number) => boolean,
+  direction?: Position,
+): BlastVoxelHit[] {
+  const hits: BlastVoxelHit[] = [];
+  if (!(radius > 0) || !(power > 0)) return hits;
+  // Horizontal reach includes both oval stretches; vertical reach is the radius.
+  const reach = radius * BLAST_GROUND_STRETCH * BLAST_PATH_STRETCH;
+  const exposed = (x: number, y: number, z: number): boolean =>
+    !isSolid(x + 1, y, z) || !isSolid(x - 1, y, z) ||
+    !isSolid(x, y + 1, z) || !isSolid(x, y - 1, z) ||
+    !isSolid(x, y, z + 1) || !isSolid(x, y, z - 1);
+
+  for (let x = Math.floor(impact.x - reach); x <= Math.ceil(impact.x + reach); x++) {
+    for (let y = Math.floor(impact.y - radius); y <= Math.ceil(impact.y + radius); y++) {
+      for (let z = Math.floor(impact.z - reach); z <= Math.ceil(impact.z + reach); z++) {
+        if (!isSolid(x, y, z)) continue;
+        const distance = blastDistance(impact, { x, y, z }, direction);
+        if (distance >= radius) continue;
+        const damage = blastVoxelDamage(power, radius, distance);
+        if (damage <= 0) continue;
+        if (damage < 1 && !exposed(x, y, z)) continue;
+        hits.push({ x, y, z, damage });
+      }
+    }
   }
   return hits;
 }

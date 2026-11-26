@@ -49,6 +49,8 @@ import {
   BLUE_FLAG_POS,
   RED_FLAG_POS,
   VOXEL_BUILT,
+  VOXEL_MAX_DURABILITY,
+  VOXEL_SHOT_DAMAGE,
   WORKSHOP_CENTERS,
   WORKSHOP_START_STOCK,
   WORKSHOP_CAPACITY,
@@ -66,7 +68,7 @@ import {
   type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
 } from '../shared/types';
 import { surfaceGround, vehicleClear, vehicleExitSpot, vehicleGround, vehicleRectsOverlap } from '../shared/vehiclePhysics';
-import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, blastBuildHits, blastFalloff, mortarImpactPoint, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
+import { CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, SHELL_IMPACT_SAMPLE, ballisticVelocity, blastBuildHits, blastDistance, blastFalloff, blastVoxelHits, mortarImpactPoint, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 export interface GameConnection {
   send(data: string): void;
@@ -123,6 +125,10 @@ const EMPLACEMENT_WORKSHOP_CLEARANCE = 8;
 const EMPLACEMENT_SEPARATION = 0.5;
 /** Minimum gap between ghost validity replies for one player, in ms. */
 const EMPLACEMENT_PREVIEW_INTERVAL = 90;
+/** Slack allowed at the end of a shot ray. A solid further short of the target
+ *  than this is cover and must stop the round; only float rounding at the
+ *  endpoint is forgiven. */
+const LOS_TOLERANCE = 0.1;
 
 /** One shell in flight. Stepped on the server tick, drawn on the client from the
  *  same spawn point, velocity and gravity. */
@@ -738,7 +744,7 @@ export class ServerGame {
     );
     if (terrainHit && terrainHit.distance < blockerDistance) {
       const { x, y, z } = terrainHit.voxelPos;
-      if (this.world.damageVoxel(x, y, z, 1)) {
+      if (this.world.damageVoxel(x, y, z, VOXEL_SHOT_DAMAGE)) {
         this.broadcast({ type: 'voxelChanged', change: { x, y, z, type: VOXEL_AIR, durability: 0 } });
       }
     }
@@ -849,8 +855,8 @@ export class ServerGame {
       // Bodies and hardware do not move inside a tick; one list serves both
       // substeps and matches the geometry the client draws its ring with.
       const obstacles = this.shellObstacles();
-      // Two integration substeps keep a fast cannon round from tunnelling
-      // through a one-voxel wall.
+      // Two integration substeps, and `shellImpactAt` samples the whole travel
+      // of each one, so a fast cannon round cannot tunnel through a wall.
       for (let i = 0; i < 2; i++) {
         const half = step / 2;
         shell.velocity.y -= EMPLACEMENT_SHELL_GRAVITY * half;
@@ -859,7 +865,7 @@ export class ServerGame {
           y: shell.position.y + shell.velocity.y * half,
           z: shell.position.z + shell.velocity.z * half,
         };
-        const impact = this.shellImpactAt(shell, next, obstacles);
+        const impact = this.shellImpactAt(shell, shell.position, next, obstacles);
         if (impact) {
           this.explodeShell(shell, impact);
           break;
@@ -874,14 +880,23 @@ export class ServerGame {
     }
   }
 
-  /** Where a shell would stop, or null when the path is clear. */
-  private shellImpactAt(shell: ServerShell, next: Position, obstacles: readonly ShellObstacle[]): Position | null {
+  /** Where a shell would stop, or null when the path is clear. Marches the
+   *  whole segment, not just its end: a cannon round covers more than two
+   *  metres per substep, so an endpoint test alone lets it pass through a
+   *  one-voxel wall and burst behind cover. */
+  private shellImpactAt(shell: ServerShell, previous: Position, next: Position, obstacles: readonly ShellObstacle[]): Position | null {
+    const dx = next.x - previous.x;
+    const dy = next.y - previous.y;
+    const dz = next.z - previous.z;
+    const length = Math.hypot(dx, dy, dz);
+    const samples = Math.max(1, Math.ceil(length / SHELL_IMPACT_SAMPLE));
+    for (let i = 1; i <= samples; i++) {
+      const t = i / samples;
+      const point = { x: previous.x + dx * t, y: previous.y + dy * t, z: previous.z + dz * t };
+      if (this.world.isSolid(Math.round(point.x), Math.round(point.y), Math.round(point.z))) return point;
+      if (shellStopsAt(point, shell.team, obstacles)) return point;
+    }
     if (Math.abs(next.x) >= WORLD_HALF || Math.abs(next.z) >= WORLD_HALF) return next;
-    // Burst on the sample that entered the solid, exactly like the preview's
-    // `solidAt` does. Returning the previous (in-air) sample put the crater and
-    // the splash up to 2m short of the ring the gunner aimed with.
-    if (this.world.isSolid(Math.round(next.x), Math.round(next.y), Math.round(next.z))) return next;
-    if (shellStopsAt(next, shell.team, obstacles)) return next;
     return null;
   }
 
@@ -917,30 +932,37 @@ export class ServerGame {
 
     for (const [id, target] of this.players) {
       if (target.isDead || target.isSpectating || target.team === shell.team) continue;
-      const distance = Math.hypot(target.position.x - position.x, target.position.y + 1 - position.y, target.position.z - position.z);
+      const distance = blastDistance(position, { x: target.position.x, y: target.position.y + 1, z: target.position.z }, shell.velocity);
       if (distance > radius) continue;
       this.applyDamage(id, blastFalloff(maxDamage, radius, distance), shell.ownerId, false);
     }
     for (const jeep of this.jeeps.values()) {
       if (jeep.wreck || jeep.team === shell.team) continue;
-      const distance = Math.hypot(jeep.position.x - position.x, jeep.position.y + 1 - position.y, jeep.position.z - position.z);
+      const distance = blastDistance(position, { x: jeep.position.x, y: jeep.position.y + 1, z: jeep.position.z }, shell.velocity);
       if (distance > radius) continue;
       this.damageJeep(jeep, blastFalloff(maxDamage, radius, distance));
     }
     // One list of builds, each hit once and already at the shared falloff; a
     // build the shell struck directly is the full-power entry.
-    for (const { build, damage } of blastBuildHits(shell.team, position, radius, maxDamage, this.emplacements.values())) {
+    for (const { build, damage } of blastBuildHits(shell.team, position, radius, maxDamage, this.emplacements.values(), shell.velocity)) {
       this.damageEmplacement(build.id, damage);
     }
-    // Terrain damage is the point of a shell: carve the voxels it lands on.
-    const ground = Math.round(position.y);
-    for (const [dx, dy, dz] of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 0, 1], [-1, 0, -1], [1, 0, -1], [-1, 0, 1], [0, -1, 0]]) {
-      const x = Math.round(position.x) + dx, y = ground + dy, z = Math.round(position.z) + dz;
-      if (!this.world.isSolid(x, y, z)) continue;
-      if (this.world.damageVoxel(x, y, z, 99)) {
-        // A shell that removed terrain must reach clients, or their world
-        // diverges from the server's from then on.
-        this.broadcast({ type: 'voxelChanged', change: { x, y, z, type: VOXEL_AIR, durability: 0 } });
+    // Terrain takes the blast by distance from the burst: blocks at the centre
+    // break, the ring outside them is chipped, and the same helper serves any
+    // future explosive. Chipped blocks must reach clients too, or their
+    // durability shading drifts from the server's.
+    for (const { x, y, z, damage } of blastVoxelHits(position, radius, maxDamage, (vx, vy, vz) => this.world.isSolid(vx, vy, vz), shell.velocity)) {
+      const before = this.world.getVoxel(x, y, z)?.durability ?? 0;
+      const destroyed = this.world.damageVoxel(x, y, z, damage);
+      const voxel = this.world.getVoxel(x, y, z);
+      if (!destroyed && (voxel?.durability ?? 0) === before) continue; // protected cell
+      this.broadcast({
+        type: 'voxelChanged',
+        change: { x, y, z, type: voxel ? voxel.type : VOXEL_AIR, durability: voxel ? voxel.durability : 0 },
+      });
+      if (!destroyed) continue;
+      for (const change of this.world.collapseDisconnected(x, y, z)) {
+        this.broadcast({ type: 'voxelChanged', change });
       }
     }
     this.broadcast({ type: 'shellImpact', id: shell.id, kind: shell.kind, position: { ...position }, radius });
@@ -1140,9 +1162,11 @@ export class ServerGame {
     if (removed || this.jeepSync >= 0.1) { this.jeepSync = 0; this.broadcastJeeps(); }
   }
 
+  /** Vehicles keep whole HP: a fractional weapon or blast hit is rounded once,
+   *  here, so the synced number never shows a part point of damage. */
   private damageJeep(jeep: ServerJeep, damage: number): void {
-    if (jeep.wreck) return;
-    jeep.hp = Math.max(0, jeep.hp - damage);
+    if (jeep.wreck || !(damage > 0)) return;
+    jeep.hp = Math.max(0, jeep.hp - Math.max(1, Math.round(damage)));
     if (jeep.hp === 0) {
       if (jeep.driverId) this.exitJeep(jeep.driverId, true);
       else if (jeep.passengerId) this.exitJeep(jeep.passengerId, true);
@@ -1154,16 +1178,19 @@ export class ServerGame {
   /** Spent rounds hurt structures too; at zero hp the squad loses the build. */
   private damageEmplacement(emplacementId: string, damage: number): void {
     const emplacement = this.emplacements.get(emplacementId);
-    if (!emplacement || damage <= 0) return;
+    if (!emplacement || !(damage > 0)) return;
     const maxHp = emplacementSpec(emplacement.kind)?.maxHp ?? 0;
-    emplacement.hp = Math.max(0, emplacement.hp - damage);
+    // Builds keep whole HP: round the hit once, here, so every caller (rounds,
+    // blast splash) leaves the structure at an integer.
+    const applied = Math.max(1, Math.round(damage));
+    emplacement.hp = Math.max(0, emplacement.hp - applied);
     // Send a discrete hit event so the client can flash the build and show a
     // health bar; the full-list broadcast that follows is only for position/
     // yaw sync and removal, not for damage feedback.
     this.broadcast({
       type: 'emplacementDamaged',
       emplacementId,
-      damage,
+      damage: applied,
       hp: emplacement.hp,
       maxHp,
     });
@@ -1649,7 +1676,7 @@ export class ServerGame {
     if (dist < 0.5) return true;
     const dir = { x: dx / dist, y: dy / dist, z: dz / dist };
     const hit = this.world.raycast(from, dir, dist);
-    return !hit || hit.distance >= dist - 1.0;
+    return !hit || hit.distance >= dist - LOS_TOLERANCE;
   }
 
   /** Bot fired at a validated target: apply weapon damage through the same
@@ -1731,7 +1758,7 @@ export class ServerGame {
 
   private damageAndBroadcastVoxel(pos: Position): void {
     const { x, y, z } = pos;
-    const destroyed = this.world.damageVoxel(x, y, z, 1);
+    const destroyed = this.world.damageVoxel(x, y, z, VOXEL_SHOT_DAMAGE);
     const voxel = this.world.getVoxel(x, y, z);
     this.broadcast({
       type: 'voxelChanged',
@@ -2043,10 +2070,10 @@ export class ServerGame {
     if (!bot || !(bot instanceof ServerBot) || bot.isDead) return;
     const { x, y, z } = position;
     if (!this.canBuildAt(x, y, z)) return;
-    this.world.setVoxel(x, y, z, 4, 3); // VOXEL_BUILT
+    this.world.setVoxel(x, y, z, VOXEL_BUILT, VOXEL_MAX_DURABILITY);
     this.broadcast({
       type: 'voxelChanged',
-      change: { x, y, z, type: 4, durability: 3 },
+      change: { x, y, z, type: VOXEL_BUILT, durability: VOXEL_MAX_DURABILITY },
     });
   }
 
@@ -2949,6 +2976,9 @@ export class ServerGame {
     if (Math.hypot(originDx, originDz) > 4.0 || Math.abs(originDy) > 2.5) return;
     const dirLength = Math.hypot(direction.x, direction.y, direction.z);
     if (!(dirLength > 0.9 && dirLength < 1.1)) return;
+    // One unit aim vector for every geometric test below: the round, the cover
+    // ray and the fallback hit test must all travel the same line.
+    const aim = { x: direction.x / dirLength, y: direction.y / dirLength, z: direction.z / dirLength };
 
     const now = Date.now() / 1000;
     const weapon = WEAPONS[player.equipment as 'rifle' | 'smg'];
@@ -2990,10 +3020,10 @@ export class ServerGame {
     });
 
     // Raycast to find terrain hit distance (extended battlefield bullet range)
-    const hit = this.world.raycast(origin, direction, 350);
+    const hit = this.world.raycast(origin, aim, 350);
     const maxDist = hit ? hit.distance : 350;
-    const vehicleHit = this.hitJeep(origin, direction, maxDist, player.team);
-    const structureHit = this.hitEmplacement(origin, direction, maxDist, player.team);
+    const vehicleHit = this.hitJeep(origin, aim, maxDist, player.team);
+    const structureHit = this.hitEmplacement(origin, aim, maxDist, player.team);
 
     // Suppression awareness: enemies within ~2m of the bullet's path were
     // nearly hit — bot victims react by seeking/digging cover ("pinned down").
@@ -3005,11 +3035,11 @@ export class ServerGame {
         const tx = tgt.position.x - origin.x;
         const ty = tgt.position.y + 1.0 - origin.y;
         const tz = tgt.position.z - origin.z;
-        const dot = tx * direction.x + ty * direction.y + tz * direction.z;
+        const dot = tx * aim.x + ty * aim.y + tz * aim.z;
         if (dot <= 0 || dot > rayLen) continue;
-        const px = origin.x + direction.x * dot - tgt.position.x;
-        const py = origin.y + direction.y * dot - (tgt.position.y + 1.0);
-        const pz = origin.z + direction.z * dot - tgt.position.z;
+        const px = origin.x + aim.x * dot - tgt.position.x;
+        const py = origin.y + aim.y * dot - (tgt.position.y + 1.0);
+        const pz = origin.z + aim.z * dot - tgt.position.z;
         if (Math.hypot(px, py, pz) < 2.0) {
           tgt.noteIncoming(this.world.serverTime);
         }
@@ -3022,20 +3052,16 @@ export class ServerGame {
     if (clientTargetId && this.players.has(clientTargetId)) {
       const target = this.players.get(clientTargetId)!;
       if (!target.isDead && target.team !== player.team) {
-        const dx = target.position.x - origin.x;
-        // Aim at torso height (+1.0), matching the client's hit model, so the
-        // server LoS ray uses the same endpoint the client actually shot at.
-        const dy = target.position.y + 1.0 - origin.y;
-        const dz = target.position.z - origin.z;
-        const dist = Math.hypot(dx, dy, dz);
-        if (dist > 1e-6 && dist <= 350) {
-          // Line of sight check — normalize by the TRUE distance to the
-          // torso point (previously divided by foot-level distance while
-          // adding +1.0 to y, producing a skewed unit vector that could
-          // fail LoS against terrain for legitimately-hit targets).
-          const toTargetDir = { x: dx / dist, y: dy / dist, z: dz / dist };
-          const terrainHit = this.world.raycast(origin, toTargetDir, dist);
-          if (!terrainHit || terrainHit.distance >= dist - 1.2) {
+          const dx = target.position.x - origin.x;
+          const dy = target.position.y + 1.0 - origin.y;
+          const dz = target.position.z - origin.z;
+          const dist = Math.hypot(dx, dy, dz);
+          // Distance of the target along the bullet's own ray. The cover test
+          // uses that ray, not a separate ray to the torso: a wall block in
+          // the round's path used to be ignored whenever its torso line was
+          // clear, so shots passed straight through eye-level cover.
+          const along = dx * aim.x + dy * aim.y + dz * aim.z;
+          if (dist > 1e-6 && dist <= 350 && along > 0 && maxDist >= along - LOS_TOLERANCE) {
             confirmedTarget = {
               id: clientTargetId,
               player: target,
@@ -3043,7 +3069,6 @@ export class ServerGame {
               distance: dist,
             };
           }
-        }
       }
     }
 
@@ -3061,12 +3086,12 @@ export class ServerGame {
           z: target.position.z - origin.z,
         };
 
-        const dot = toTarget.x * direction.x + toTarget.y * direction.y + toTarget.z * direction.z;
+        const dot = toTarget.x * aim.x + toTarget.y * aim.y + toTarget.z * aim.z;
         if (dot > 0 && dot < closestDist) {
           const pointOnRay = {
-            x: origin.x + direction.x * dot,
-            y: origin.y + direction.y * dot,
-            z: origin.z + direction.z * dot,
+            x: origin.x + aim.x * dot,
+            y: origin.y + aim.y * dot,
+            z: origin.z + aim.z * dot,
           };
           const horizDist = Math.hypot(pointOnRay.x - target.position.x, pointOnRay.z - target.position.z);
           const vertDist = pointOnRay.y - target.position.y;
@@ -3165,7 +3190,7 @@ export class ServerGame {
     // Hit voxel (if bullet hit block and didn't hit player first)
     if (hit && hit.voxelPos) {
       const { x, y, z } = hit.voxelPos;
-      const destroyed = this.world.damageVoxel(x, y, z, 1);
+      const destroyed = this.world.damageVoxel(x, y, z, VOXEL_SHOT_DAMAGE);
       
       if (destroyed) {
         const voxel = this.world.getVoxel(x, y, z);
@@ -3327,7 +3352,7 @@ export class ServerGame {
     if (reach > this.BUILD_REACH) return;
 
     if (this.canBuildAt(x, y, z)) {
-      this.world.setVoxel(x, y, z, 4, 3); // VOXEL_BUILT
+      this.world.setVoxel(x, y, z, VOXEL_BUILT, VOXEL_MAX_DURABILITY);
       if (inventory > 0) {
         this.inventories.set(playerId, inventory - 1);
         this.sendToPlayer(playerId, { type: 'inventoryUpdated', inventory: inventory - 1 });
@@ -3342,8 +3367,8 @@ export class ServerGame {
           x,
           y,
           z,
-          type: 4,
-          durability: 3,
+          type: VOXEL_BUILT,
+          durability: VOXEL_MAX_DURABILITY,
         },
       });
     }

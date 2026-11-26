@@ -9,7 +9,7 @@ import {
   MORTAR_BLAST_DAMAGE, MORTAR_BLAST_RADIUS,
   type Position,
 } from '../shared/types';
-import { blastBuildHits, blastFalloff, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
+import { SHELL_IMPACT_SAMPLE, blastBuildHits, blastDistance, blastFalloff, shellStopsAt, type ShellObstacle } from '../shared/ballistics';
 
 /** Fixed integration step: a cannon round covers 2.1m per 0.025s. */
 export const SHELL_STEP = 0.025;
@@ -88,17 +88,37 @@ function stepOnce<T extends OfflineShell, B extends OfflineBotTarget, J extends 
 ): void {
   for (let i = shells.length - 1; i >= 0; i--) {
     const shell = shells[i];
+    const from = { x: shell.position.x, y: shell.position.y, z: shell.position.z };
     shell.velocity.y -= EMPLACEMENT_SHELL_GRAVITY * dt;
     shell.position.x += shell.velocity.x * dt;
     shell.position.y += shell.velocity.y * dt;
     shell.position.z += shell.velocity.z * dt;
 
-    const ground = world.getGroundHeight(shell.position.x, shell.position.z);
-    const stopped = shellStopsAt(shell.position, shell.team, obstacles);
-    const stale = time - shell.firedAt > SHELL_MAX_AGE;
-    if (shell.position.y > ground && !stopped && !stale) continue;
+    // Sample the whole travel of this step: a cannon round moves ~2m per step,
+    // so checking only the endpoint can pass it through a one-voxel wall and
+    // burst behind cover.
+    const dx = shell.position.x - from.x;
+    const dy = shell.position.y - from.y;
+    const dz = shell.position.z - from.z;
+    const length = Math.hypot(dx, dy, dz);
+    const samples = Math.max(1, Math.ceil(length / SHELL_IMPACT_SAMPLE));
+    let impact: Position | null = null;
+    for (let s = 1; s <= samples; s++) {
+      const t = s / samples;
+      const point = { x: from.x + dx * t, y: from.y + dy * t, z: from.z + dz * t };
+      const ground = world.getGroundHeight(point.x, point.z);
+      if (point.y <= ground || shellStopsAt(point, shell.team, obstacles)) {
+        impact = { x: point.x, y: Math.max(ground, point.y), z: point.z };
+        break;
+      }
+    }
+    if (!impact) {
+      const stale = time - shell.firedAt > SHELL_MAX_AGE;
+      if (!stale) continue;
+      const ground = world.getGroundHeight(shell.position.x, shell.position.z);
+      impact = { x: shell.position.x, y: Math.max(ground, shell.position.y), z: shell.position.z };
+    }
 
-    const impact = { x: shell.position.x, y: Math.max(ground, shell.position.y), z: shell.position.z };
     const radius = applyOfflineBlast(shell, impact, targets, handlers);
     shells.splice(i, 1);
     handlers.onExplode(shell, impact, radius);
@@ -123,27 +143,19 @@ function applyOfflineBlast<T extends OfflineShell, B extends OfflineBotTarget, J
 
   for (const bot of targets.bots) {
     if (bot.isDead || bot.team === shell.team) continue;
-    const distance = Math.hypot(
-      bot.position.x - impact.x,
-      bot.position.y + 1 - impact.y,
-      bot.position.z - impact.z,
-    );
+    const distance = blastDistance(impact, { x: bot.position.x, y: bot.position.y + 1, z: bot.position.z }, shell.velocity);
     if (distance > radius) continue;
     handlers.damageBot(bot, splash(distance));
   }
 
   for (const jeep of targets.jeeps) {
     if (jeep.wreck || jeep.team === shell.team) continue;
-    const distance = Math.hypot(
-      jeep.position.x - impact.x,
-      jeep.position.y + 1 - impact.y,
-      jeep.position.z - impact.z,
-    );
+    const distance = blastDistance(impact, { x: jeep.position.x, y: jeep.position.y + 1, z: jeep.position.z }, shell.velocity);
     if (distance > radius) continue;
     handlers.damageJeep(jeep, splash(distance));
   }
 
-  for (const { build, damage } of blastBuildHits(shell.team, impact, radius, power, targets.builds)) {
+  for (const { build, damage } of blastBuildHits(shell.team, impact, radius, power, targets.builds, shell.velocity)) {
     handlers.damageBuild(build, damage);
   }
 

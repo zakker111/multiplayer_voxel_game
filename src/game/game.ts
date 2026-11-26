@@ -25,10 +25,11 @@ import {
   WORKSHOP_REACH, JEEP_ENTER_REACH, BENCH_REACH, benchPosition,
   WORKSHOP_CENTERS, WORKSHOP_CAPACITY, WORLD_HALF, vehicleSpec,
   VOXEL_AIR, VOXEL_DIRT, VOXEL_GRASS, GROUND_LEVEL,
+  VOXEL_MAX_DURABILITY, VOXEL_SHOT_DAMAGE,
   emplacementSpec, EMPLACEMENTS, type EmplacementKind, type BlueprintSlots, type EmplacementSnapshot,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_SHELL_GRAVITY,
   EMPLACEMENT_USE_REACH, EMPLACEMENT_MAX_PITCH, EMPLACEMENT_ROUND_DAMAGE, emplacedShotDirection,
-  CANNON_BLAST_RADIUS, MORTAR_BLAST_RADIUS,
+  CANNON_BLAST_RADIUS, MORTAR_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_DAMAGE,
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
   type EmplacementSpec, type Footprint, type SpotContact,
   isWorkshopProtectedCell,
@@ -38,7 +39,7 @@ import {
   type RoundWinner,
 } from '../shared/types';
 import {
-  CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, shellArc, mortarImpactPoint,
+  CANNON_SHELL_SPEED, MORTAR_SHELL_SPEED, ballisticVelocity, blastVoxelHits, shellArc, mortarImpactPoint,
   shellStopsAt, type ShellObstacle,
 } from '../shared/ballistics';
 import { SHELL_STEP, stepOfflineShells } from './localShells';
@@ -1097,7 +1098,7 @@ export class Game {
           const ground = this.world.getGroundHeight(x, z);
           if (ground - 0.5 >= apronTop) continue;
           for (let y = Math.floor(ground) + 1; y <= apronTop; y++) {
-            this.world.setVoxel(x, y, z, y === apronTop ? VOXEL_GRASS : VOXEL_DIRT, 3);
+            this.world.setVoxel(x, y, z, y === apronTop ? VOXEL_GRASS : VOXEL_DIRT, VOXEL_MAX_DURABILITY);
           }
         }
       }
@@ -1842,7 +1843,7 @@ export class Game {
     // ground chips the voxel it hit.
     if (!best && terrainHit) {
       const { x, y, z } = terrainHit.voxelPos;
-      this.world.damageVoxel(x, y, z, 1);
+      this.world.damageVoxel(x, y, z, VOXEL_SHOT_DAMAGE);
     }
 
     const tracerDist = best ? best.distance : maxDist;
@@ -1932,7 +1933,7 @@ export class Game {
         damageJeep: (jeep, damage) => this.damageLocalJeep(jeep, damage),
         damageBuild: (build, damage) => this.damageLocalEmplacement(build.id, damage),
         onExplode: (shell, impact, radius) => {
-          this.explodeLocalShell(impact, radius);
+          this.explodeLocalShell(shell, impact, radius);
           this.scene.remove(shell.mesh);
           shell.mesh.geometry.dispose();
           (shell.mesh.material as THREE.Material).dispose();
@@ -1946,31 +1947,29 @@ export class Game {
     }
   }
 
-  /** Blast visuals and the terrain crater. Damage was already resolved by
-   *  `stepOfflineShells`; this path must never damage a victim as well. */
-  private explodeLocalShell(impact: Position, radius: number): void {
+  /** Blast visuals and the terrain crater. Victim damage was already resolved
+   *  by `stepOfflineShells`; this path must never damage a body as well. */
+  private explodeLocalShell(shell: { kind: 'cannon' | 'mortar'; velocity: Position }, impact: Position, radius: number): void {
     const material = new THREE.MeshBasicMaterial({ color: 0xffb347, transparent: true, opacity: 0.85, depthWrite: false });
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius * 0.6, 12, 8), material);
     mesh.position.set(impact.x, impact.y, impact.z);
     this.scene.add(mesh);
     this.shellBlasts.push({ mesh, material, until: performance.now() / 1000 + 0.35 });
     this.sounds.collapse();
-    // Slight terrain damage: the same ten-cell crater the server carves, so an
-    // offline round dents the ground instead of only popping in the air.
-    const craterY = Math.round(impact.y);
-    for (const [dx, dy, dz] of [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 0, 1], [-1, 0, -1], [1, 0, -1], [-1, 0, 1], [0, -1, 0]]) {
-      const x = Math.round(impact.x) + dx;
-      const y = craterY + dy;
-      const z = Math.round(impact.z) + dz;
-      if (!this.world.isSolid(x, y, z)) continue;
-      this.world.damageVoxel(x, y, z, 3);
+    // The same distance-driven crater the server carves, so an offline round
+    // digs the hole the online one would and future explosives only have to
+    // call the shared helper.
+    const power = shell.kind === 'mortar' ? MORTAR_BLAST_DAMAGE : CANNON_BLAST_DAMAGE;
+    for (const { x, y, z, damage } of blastVoxelHits(impact, radius, power, (vx, vy, vz) => this.world.isSolid(vx, vy, vz), shell.velocity)) {
+      this.world.damageVoxel(x, y, z, damage);
     }
   }
 
   /** Damage a client-owned jeep. At zero HP it wrecks and puts its crew out. */
   private damageLocalJeep(jeep: JeepSnapshot, damage: number): void {
-    if (jeep.wreck || damage <= 0) return;
-    jeep.hp = Math.max(0, jeep.hp - damage);
+    if (jeep.wreck || !(damage > 0)) return;
+    // Vehicles keep whole HP, so a fractional hit is rounded once here.
+    jeep.hp = Math.max(0, jeep.hp - Math.max(1, Math.round(damage)));
     if (jeep.hp > 0) { this.applyJeeps(this.localJeeps); return; }
 
     jeep.wreck = true;
@@ -1996,8 +1995,9 @@ export class Game {
     const emplacement = this.localEmplacements.find(e => e.id === id);
     if (!emplacement) return;
     const spec = emplacementSpec(emplacement.kind);
-    if (!spec) return;
-    emplacement.hp = Math.max(0, emplacement.hp - damage);
+    if (!spec || !(damage > 0)) return;
+    // Builds keep whole HP, so a fractional hit is rounded once here.
+    emplacement.hp = Math.max(0, emplacement.hp - Math.max(1, Math.round(damage)));
     const snapshot = this.emplacedSnapshots.get(id);
     if (snapshot) snapshot.hp = emplacement.hp;
     this.updateHealthBarVisibility(id, emplacement.hp, spec.maxHp);
@@ -3984,7 +3984,7 @@ export class Game {
       this.world.setVoxel(x, y, z, type, durability);
       
       // If solid voxel with partial durability, update color immediately
-      if (type !== 0 && durability < 3) {
+      if (type !== 0 && durability < VOXEL_MAX_DURABILITY) {
         this.world.updateVoxelColor(x, y, z, type, durability);
       }
 
@@ -5819,7 +5819,7 @@ export class Game {
       // Hit a voxel in the world
       const voxel = this.world.getVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z);
       if (voxel && this.gameMode !== 'online') {
-        const result = this.world.damageVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, 1);
+        const result = this.world.damageVoxel(hit.voxelPos.x, hit.voxelPos.y, hit.voxelPos.z, VOXEL_SHOT_DAMAGE);
         if (result.destroyed) {
           this.sounds.pickaxeHit();
         }
@@ -6085,7 +6085,7 @@ export class Game {
         return;
       }
       if (!this.world.isSolid(px, py, pz) && this.canPlaceBlock(px, py, pz)) {
-        this.world.setVoxel(px, py, pz, VOXEL_BUILT, 3);
+        this.world.setVoxel(px, py, pz, VOXEL_BUILT, VOXEL_MAX_DURABILITY);
         this.inventory--;
         this.sounds.buildPlace();
         
@@ -7702,7 +7702,7 @@ export class Game {
               if (bot.breachTimer > 0.4) {
                 bot.breachTimer = 0;
                 this.sounds.pickaxeHit();
-                const res = this.world.damageVoxel(obstX, obstY, obstZ, 1);
+                const res = this.world.damageVoxel(obstX, obstY, obstZ, VOXEL_SHOT_DAMAGE);
                 if (res.destroyed) {
                   bot.isBreaching = false;
                   if (bot.bodyParts) {
@@ -8195,7 +8195,7 @@ export class Game {
       if (terrainHit) {
         const voxel = this.world.getVoxel(terrainHit.voxelPos.x, terrainHit.voxelPos.y, terrainHit.voxelPos.z);
         if (voxel) {
-          const result = this.world.damageVoxel(terrainHit.voxelPos.x, terrainHit.voxelPos.y, terrainHit.voxelPos.z, 1);
+          const result = this.world.damageVoxel(terrainHit.voxelPos.x, terrainHit.voxelPos.y, terrainHit.voxelPos.z, VOXEL_SHOT_DAMAGE);
           if (result.destroyed) {
             this.sounds.pickaxeHit();
           }
