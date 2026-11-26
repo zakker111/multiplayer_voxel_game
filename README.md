@@ -78,6 +78,10 @@ npm test          # node --test tests/  (263 regression tests)
 npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)
+
+# Commit pending changes and push the current branch (uses the git bundled
+# with Freebuff when none is installed; explains the token prompt)
+bash scripts/push-github.sh
 ```
 
 Open http://localhost:3000 — pick **Multiplayer** to join the live server (a full 10v10 bot battle is already running), or play local Bot Match / Sandbox modes.
