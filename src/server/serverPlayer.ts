@@ -66,6 +66,8 @@ export class ServerPlayer {
    *  and nothing else refills it, so a squad that stops paying for magazines
    *  (workshop blocks at the bench) eventually runs dry. */
   reserveAmmo: number = 0;
+  /** Shell packs carried for a cannon or mortar, bought at the bench. */
+  shellPacks: number = 0;
   isReloading: boolean = false;
   reloadStartTime: number = 0;
   reloadTime: number = 2.0; // seconds
@@ -363,6 +365,7 @@ export class ServerPlayer {
       currentAmmo: this.currentAmmo,
       magazineSize: this.magazineSize,
       reserveAmmo: this.reserveAmmo,
+      shellPacks: this.shellPacks,
       isReloading: this.isReloading,
       aimTransition: this.isAiming ? 1 : 0, // Sync aiming state
       carryingFlag: this.carryingFlag,

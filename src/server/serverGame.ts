@@ -63,6 +63,8 @@ import {
   WORLD_HALF, vehicleSpec, emplacementSpec, EMPLACEMENTS, BENCH_REACH, benchPosition, EmplacementKind,
   MANNED_EMPLACEMENTS, EMPLACEMENT_MOUNT_REACH, EMPLACEMENT_USE_REACH,
   SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SPOTTING_POST_RADIUS,
+  SHELL_PACK_COST, SHELL_PACK_LIMIT, SHELL_PACK_ROUNDS,
+  emplacementAmmoCap, emplacementDismantleRefund,
   EMPLACEMENT_FIRE_INTERVAL, EMPLACEMENT_ROUND_DAMAGE, EMPLACEMENT_MAX_PITCH, emplacedShotDirection,
   EMPLACEMENT_SHELL_GRAVITY, CANNON_BLAST_RADIUS, CANNON_BLAST_DAMAGE, MORTAR_BLAST_RADIUS, MORTAR_BLAST_DAMAGE,
   type Footprint, type EmplacementSpec, type EmplacementSnapshot, type BlueprintSlots, type SpotContact,
@@ -426,8 +428,13 @@ export class ServerGame {
     );
     if (distance > EMPLACEMENT_USE_REACH) return this.emplacementMessage(playerId, 'Walk up to the build to dismantle it');
 
-    // The build's cost comes back, and so does anything a supply crate held.
-    const refund = this.refundWorkshop(player.team, spec.cost + emplacement.stock);
+    // The build's cost comes back less the rounds it has already fired, plus
+    // anything a supply crate held. Without that deduction a drained gun could
+    // be torn down and rebuilt for full value, refilling its belt for free.
+    const refund = this.refundWorkshop(
+      player.team,
+      emplacementDismantleRefund(spec, emplacement.ammo, emplacement.stock),
+    );
     this.removeEmplacement(emplacement);
     const label = emplacement.kind === 'mgNest' ? 'MG nest' : emplacement.kind;
     this.emplacementMessage(
@@ -1362,6 +1369,89 @@ export class ServerGame {
 
   private ammoMessage(playerId: string, message: string): void {
     this.sendToPlayer(playerId, { type: 'ammoMessage', message });
+  }
+
+  /** Buy one carried shell pack at the bench, paid from the team stock. The
+   *  pack is loaded beside a gun later, so a gunner can carry rounds forward
+   *  instead of walking the gun back to spawn. */
+  private craftShellPack(playerId: string): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') {
+      return this.emplacementMessage(playerId, 'Cannot buy a shell pack right now');
+    }
+    if (player.shellPacks >= SHELL_PACK_LIMIT) {
+      return this.emplacementMessage(playerId, `You already carry ${SHELL_PACK_LIMIT} shell packs`);
+    }
+    const bench = benchPosition(this.getWorkshops()[player.team].position);
+    if (Math.hypot(player.position.x - bench.x, player.position.y - bench.y, player.position.z - bench.z) > BENCH_REACH) {
+      return this.emplacementMessage(playerId, 'Stand at your blueprint bench to buy a shell pack');
+    }
+    if (this.workshopStock[player.team] < SHELL_PACK_COST) {
+      return this.emplacementMessage(playerId, 'Not enough workshop blocks for a shell pack');
+    }
+    this.workshopStock[player.team] -= SHELL_PACK_COST;
+    player.shellPacks += 1;
+    this.broadcastWorkshops();
+    this.sendToPlayer(playerId, { type: 'playerUpdated', playerId, state: player.getState() });
+    this.emplacementMessage(
+      playerId,
+      `🐚 Shell pack ready (${player.shellPacks}/${SHELL_PACK_LIMIT}) · -${SHELL_PACK_COST} blocks`,
+    );
+  }
+
+  /** Load one shell pack into a friendly cannon or mortar. A pack in hand is
+   *  spent first; beside the gun, blocks can buy one directly so a gunner does
+   *  not have to walk back to the bench. The belt caps instead of overflowing;
+   *  the last pack may only partly fit. */
+  private loadShellPack(playerId: string, emplacementId: unknown): void {
+    const player = this.players.get(playerId);
+    if (!player || player.isDead || player.isSpectating || this.roundPhase !== 'live') {
+      return this.emplacementMessage(playerId, 'Cannot load shells right now');
+    }
+    if (typeof emplacementId !== 'string') return;
+    const emplacement = this.emplacements.get(emplacementId);
+    if (!emplacement) return;
+    if (emplacement.team !== player.team) return this.emplacementMessage(playerId, 'That gun belongs to the other team');
+    const rounds = SHELL_PACK_ROUNDS[emplacement.kind];
+    if (!rounds) return this.emplacementMessage(playerId, 'Only cannons and mortars take shell packs');
+    const cap = emplacementAmmoCap(emplacement.kind);
+    if (emplacement.ammo >= cap) return this.emplacementMessage(playerId, 'That gun is already full');
+
+    // The gunner is already at the seat; anyone else must walk up to the gun.
+    const manning = emplacement.gunnerId === playerId;
+    const distance = Math.hypot(
+      player.position.x - emplacement.position.x,
+      player.position.y - emplacement.position.y,
+      player.position.z - emplacement.position.z,
+    );
+    if (!manning && distance > EMPLACEMENT_USE_REACH) {
+      return this.emplacementMessage(playerId, 'Walk up to the gun to load shells');
+    }
+
+    let bought = false;
+    if (player.shellPacks > 0) {
+      player.shellPacks -= 1;
+    } else {
+      if (this.workshopStock[player.team] < SHELL_PACK_COST) {
+        return this.emplacementMessage(
+          playerId,
+          `No shell pack in hand — buy one here or at the bench (${SHELL_PACK_COST} blocks)`,
+        );
+      }
+      this.workshopStock[player.team] -= SHELL_PACK_COST;
+      bought = true;
+      this.broadcastWorkshops();
+    }
+
+    const loaded = Math.min(rounds, cap - emplacement.ammo);
+    emplacement.ammo += loaded;
+    this.broadcastEmplacements();
+    this.sendToPlayer(playerId, { type: 'playerUpdated', playerId, state: player.getState() });
+    this.emplacementMessage(
+      playerId,
+      `Loaded ${loaded} ${emplacement.kind} shell${loaded === 1 ? '' : 's'} · ${emplacement.ammo}/${cap} rounds`
+        + (bought ? ` · -${SHELL_PACK_COST} blocks` : ''),
+    );
   }
 
   private depositWorkshop(playerId: string, team: unknown): void {
@@ -2845,6 +2935,14 @@ export class ServerGame {
 
       case 'craftAmmo':
         this.craftAmmo(playerId);
+        break;
+
+      case 'craftShellPack':
+        this.craftShellPack(playerId);
+        break;
+
+      case 'loadShellPack':
+        this.loadShellPack(playerId, message.emplacementId);
         break;
 
       case 'reload':

@@ -231,6 +231,10 @@ export interface GameState {
   crateStock: number | null;
   /** What the dismantle key would tear down from here, or null. */
   dismantleTarget: 'build' | 'jeep' | null;
+  /** Shell packs carried for the next cannon or mortar resupply. */
+  shellPacks: number;
+  /** A friendly cannon or mortar is in reach (or manned) for an R reload. */
+  shellGunNearby: boolean;
   jeepNearby: boolean;
   jeepDriving: boolean;
   jeepRiding: boolean;
@@ -524,6 +528,8 @@ export class Game {
   private benchFeedback = '';
   /** Online pouch rounds, mirrored from the server's own PlayerState. */
   private ammoReserve = 0;
+  /** Shell packs carried, mirrored from the server's PlayerState. */
+  private shellPacks = 0;
   /** Emplacements the server has broadcast, and the meshes drawn for them. */
   private emplacedSnapshots = new Map<string, EmplacementSnapshot>();
   private emplacementMeshes = new Map<string, THREE.Group>();
@@ -3795,6 +3801,7 @@ export class Game {
       this.player.updateCamera();
       this.onlineJoinConfirmed = true;
       if (typeof state.reserveAmmo === 'number') this.ammoReserve = state.reserveAmmo;
+      if (typeof state.shellPacks === 'number') this.shellPacks = state.shellPacks;
     });
 
     // Handle player joined
@@ -3820,6 +3827,7 @@ export class Game {
           }
           if (typeof msg.state.hp === 'number') this.player.hp = msg.state.hp;
           if (typeof msg.state.reserveAmmo === 'number') this.ammoReserve = msg.state.reserveAmmo;
+          if (typeof msg.state.shellPacks === 'number') this.shellPacks = msg.state.shellPacks;
           this.spawnProtected = !!msg.state.spawnProtected;
         }
         return;
@@ -4636,6 +4644,40 @@ export class Game {
     this.networkClient?.send({ type: 'craftAmmo' });
   }
 
+  /** Buy one carried shell pack at the bench; R loads it beside a gun. */
+  buyShellPack(): void {
+    if (!this.benchOpen) { this.showBenchMessage('Stand at your blueprint bench to buy a shell pack'); return; }
+    this.networkClient?.send({ type: 'craftShellPack' });
+  }
+
+  /** The friendly cannon or mortar an R press would load: the manned one, or
+   *  the nearest one inside use reach. */
+  private shellPackCandidate(): EmplacementSnapshot | null {
+    const isShellGun = (gun: EmplacementSnapshot) =>
+      (gun.kind === 'cannon' || gun.kind === 'mortar') && gun.team === this.playerTeam;
+    if (this.mountedEmplacementId) {
+      const mounted = this.emplacedSnapshots.get(this.mountedEmplacementId);
+      return mounted && isShellGun(mounted) ? mounted : null;
+    }
+    let best: EmplacementSnapshot | null = null;
+    let bestDistanceSq = Infinity;
+    const reachSq = EMPLACEMENT_USE_REACH * EMPLACEMENT_USE_REACH;
+    for (const gun of this.emplacedSnapshots.values()) {
+      if (!isShellGun(gun)) continue;
+      const distanceSq = distanceSquared(this.player.position, gun.position);
+      if (distanceSq > reachSq || distanceSq >= bestDistanceSq) continue;
+      best = gun;
+      bestDistanceSq = distanceSq;
+    }
+    return best;
+  }
+
+  /** Ask the server to load a shell pack into the gun in reach. */
+  loadShellPack(): void {
+    const gun = this.shellPackCandidate();
+    if (gun) this.networkClient?.send({ type: 'loadShellPack', emplacementId: gun.id });
+  }
+
   /** One-click bench path: craft into the first free slot. */
   craftFromBenchNext(kind: EmplacementKind): void {
     const slot = this.craftedSlots.findIndex((entry) => entry === null);
@@ -5426,8 +5468,13 @@ export class Game {
       this.ghostRequestedAt = 0; // re-ask the server for this rotation
     }
     if (e.code === 'KeyB' && !e.repeat && this.benchEnabled) { this.toggleBenchMenu(); return; }
-    if (e.code === 'KeyR') this.startReload();
-
+    if (e.code === 'KeyR') {
+      // Beside or manning a cannon/mortar, R loads a shell pack instead of
+      // reloading the rifle in hand.
+      if (!e.repeat && this.networkClient && this.shellPackCandidate()) { this.loadShellPack(); return; }
+      this.startReload();
+      return;
+    }
     this.player.handleKeyDown(e.code);
   }
 
@@ -8425,6 +8472,8 @@ export class Game {
           : null,
         manningAim: this.mannedMortarAim(),
         emplacementNearby: this.nearbyMannableEmplacement() !== null,
+        shellPacks: this.shellPacks,
+        shellGunNearby: this.shellPackCandidate() !== null,
         crateNearby: crate !== null,
         crateStock: crate ? crate.stock : null,
         dismantleTarget: this.dismantleCandidate()?.type ?? null,

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
-import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, emplacementSpec, type EmplacementKind } from './shared/types';
+import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SHELL_PACK_COST, SHELL_PACK_LIMIT, emplacementSpec, type EmplacementKind } from './shared/types';
 import { Globe, Users, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower } from 'lucide-react';
 
 /** HUD names for the bench blueprints; the shared table only carries numbers. */
@@ -39,7 +39,7 @@ function App() {
     blueprintCatalogue: ['mgNest', 'supplyCrate', 'spottingPost'],
     benchMenuOpen: false, benchFeedback: '',
     manningEmplacement: false, manningKind: null, manningAmmo: null, manningAim: null, emplacementNearby: false,
-    crateNearby: false, crateStock: null, dismantleTarget: null,
+    crateNearby: false, crateStock: null, dismantleTarget: null, shellPacks: 0, shellGunNearby: false,
     jeepNearby: false, jeepDriving: false, jeepRiding: false, jeepHp: 0, jeepSpeed: 0,
     isDead: false, respawnTimer: 0, hitMarker: false, targetInfo: '',
     message: '', messageTimer: 0, buildMode: false, buildValid: true,
@@ -207,6 +207,9 @@ function App() {
   // conditions live here instead of being repeated through the markup.
   const ammoCost = gameState.ammoCost;
   const canBuyAmmo = gameMode === 'online' && ammoCost !== null && gameState.workshopStock >= ammoCost;
+  const canBuyShellPack = gameMode === 'online'
+    && gameState.shellPacks < SHELL_PACK_LIMIT
+    && gameState.workshopStock >= SHELL_PACK_COST;
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black">
@@ -1048,6 +1051,9 @@ function App() {
                     : gameState.manningKind === 'cannon'
                       ? 'look at the target, click to fire (heavy splash) · right-click zoom · F to step out'
                       : 'hold click to fire · move mouse to aim · F to step out'}
+                  {gameState.manningKind === 'cannon' || gameState.manningKind === 'mortar'
+                    ? ` · R loads a shell pack (${gameState.shellPacks} carried)`
+                    : ''}
                   {gameState.manningKind === 'mortar' && gameState.manningAim && (
                     <div className="mt-0.5 font-mono text-xs text-sky-200">
                       TARGET X {gameState.manningAim.x.toFixed(1)} · Z {gameState.manningAim.z.toFixed(1)} · {Math.round(gameState.manningAim.range)}m
@@ -1059,6 +1065,7 @@ function App() {
               {(gameMode === 'online' || gameMode === 'beta') && !gameState.manningEmplacement && gameState.emplacementNearby && (
                 <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-20 bg-gray-900/90 border border-sky-500/50 rounded-xl px-4 py-2 text-sm text-white text-center">
                   Press F to man the gun
+                  {gameState.shellGunNearby ? ` · R loads a shell pack (${SHELL_PACK_COST} blocks)` : ''}
                 </div>
               )}
 
@@ -1129,6 +1136,36 @@ function App() {
                         </div>
                       ))}
                     </div>
+
+                    {/* Shell packs are carried to a cannon or mortar and loaded
+                        with R beside (or manning) the gun. */}
+                    {gameMode === 'online' && (
+                      <div className="mt-2 flex items-center gap-2 rounded-lg bg-gray-800/70 px-3 py-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-sm text-white">Shell pack</span>
+                            <span className={`text-xs font-mono ${canBuyShellPack ? 'text-amber-300' : 'text-gray-500'}`}>
+                              {SHELL_PACK_COST}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-gray-400">
+                            Cannon 5 shells / mortar 3 bombs · carrying {gameState.shellPacks}/{SHELL_PACK_LIMIT} · R beside a gun
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={!canBuyShellPack}
+                          onClick={() => gameRef.current?.buyShellPack()}
+                          className={`rounded-md border px-2 py-1 text-xs ${
+                            canBuyShellPack
+                              ? 'border-emerald-500/60 text-emerald-200 hover:bg-emerald-500/20'
+                              : 'cursor-not-allowed border-gray-700 text-gray-500'
+                          }`}
+                        >
+                          Buy
+                        </button>
+                      </div>
+                    )}
 
                     {/* Ammo is bought with the same bench stock the builds use. */}
                     {gameMode === 'online' && (

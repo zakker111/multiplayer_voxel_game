@@ -33,6 +33,8 @@ export interface PlayerState {
   aimTransition?: number; // 0-1 for smooth aiming animation
   carryingFlag?: boolean; // Is player carrying enemy flag?
   spawnProtected?: boolean; // spawn invulnerability is still active (HUD shield)
+  /** Shell packs carried for a cannon or mortar; loaded beside the gun. */
+  shellPacks?: number;
   isBot?: boolean; // Server-authoritative: true for AI combatants (scoreboard)
   name?: string;   // Display name shown on the Tab scoreboard / nametags
 }
@@ -73,6 +75,10 @@ export type ClientMessage =
   // The server validates the range and solves the arc itself.
   | { type: 'fireEmplacement'; target?: Position }
   | { type: 'useSupplyCrate'; emplacementId: string; action: 'deposit' | 'draw' }
+  // Shell resupply: buy a carried pack at the bench, then load it beside (or
+  // while manning) a friendly cannon or mortar.
+  | { type: 'craftShellPack' }
+  | { type: 'loadShellPack'; emplacementId: string }
   | { type: 'join'; team: 'red' | 'blue'; position?: Position; name?: string }
   | { type: 'playerInput'; input: PlayerInput }
   | { type: 'shoot'; origin: Position; direction: Position; targetId?: string; isHeadshot?: boolean }
@@ -368,6 +374,44 @@ export const EMPLACEMENTS: Record<EmplacementKind, EmplacementSpec> = {
   supplyCrate: { kind: 'supplyCrate', cost: 20, maxHp: 150, teamLimit: 3, halfWidth: 0.9, halfLength: 0.9, height: 1.1, arc: 0, fireInterval: 0, ammo: 0, minRange: 0, maxRange: 0 },
   spottingPost: { kind: 'spottingPost', cost: 40, maxHp: 200, teamLimit: 1, halfWidth: 0.9, halfLength: 0.9, height: 4, arc: 0, fireInterval: 0, ammo: 0, minRange: 0, maxRange: 0 },
 };
+
+/** Blocks a shell pack costs, whether bought at the bench or beside the gun.
+ *  A pack carries five cannon shells or three mortar bombs. */
+export const SHELL_PACK_COST = 30;
+/** Packs one player may carry, so fire support cannot be stockpiled. */
+export const SHELL_PACK_LIMIT = 3;
+/** Rounds one shell pack adds, by gun. Support builds have no entry. */
+export const SHELL_PACK_ROUNDS: Partial<Record<EmplacementKind, number>> = {
+  cannon: 5,
+  mortar: 3,
+};
+/** Most rounds a gun can hold after resupply: three starting belts. */
+export const EMPLACEMENT_AMMO_CAP: Partial<Record<EmplacementKind, number>> = {
+  cannon: 30,
+  mortar: 18,
+};
+/** What one fired round is worth in workshop blocks when a gun is dismantled.
+ *  The starting belt is priced from its pack, so rebuilding a drained gun
+ *  costs the rounds already fired instead of refilling them for free. */
+export const EMPLACEMENT_ROUND_VALUE: Partial<Record<EmplacementKind, number>> = {
+  cannon: SHELL_PACK_COST / 5,
+  mortar: SHELL_PACK_COST / 3,
+  mgNest: 0.2,
+};
+
+/** Rounds a gun may hold, including bought packs. Unarmed builds keep 0. */
+export function emplacementAmmoCap(kind: EmplacementKind): number {
+  return EMPLACEMENT_AMMO_CAP[kind] ?? EMPLACEMENTS[kind].ammo;
+}
+
+/** Blocks returned when a build is dismantled: its cost minus the rounds it
+ *  has already fired, plus whatever a supply crate still holds. Purchased
+ *  rounds beyond the starting belt are not refunded. */
+export function emplacementDismantleRefund(spec: EmplacementSpec, ammo: number, stock = 0): number {
+  const value = EMPLACEMENT_ROUND_VALUE[spec.kind] ?? 0;
+  const fired = Math.max(0, spec.ammo - Math.min(ammo, spec.ammo));
+  return Math.max(0, Math.round(spec.cost - fired * value)) + stock;
+}
 
 /** Unknown kinds come straight from the wire, so this is a lookup, not a cast. */
 export function emplacementSpec(kind: string): EmplacementSpec | undefined {
