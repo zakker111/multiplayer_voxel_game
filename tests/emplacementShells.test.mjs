@@ -13,7 +13,7 @@ const {
   WEAPONS, vehicleSpec, VOXEL_STONE, VOXEL_SHOT_DAMAGE, VOXEL_MAX_DURABILITY,
 } = require('../dist/tests/sharedTypes.cjs');
 const {
-  shellArc, shellStopsAt, CANNON_SHELL_SPEED, MORTAR_DISPERSION,
+  shellArc, shellStopsAt, CANNON_SHELL_SPEED, MORTAR_DISPERSION, SHELL_IMPACT_SAMPLE,
 } = require('../dist/tests/ballistics.cjs');
 process.env.SERVER_BOT_COUNT = '0';
 
@@ -285,7 +285,11 @@ test('a mortar round lands where the gunner aimed, not in a fixed band', () => {
   const impacts = gunner.frames.filter((f) => f.type === 'shellImpact');
   assert.ok(impacts.length >= 1, 'the round came down');
   const miss = Math.hypot(impacts[0].position.x - target.x, impacts[0].position.z - target.z);
-  assert.ok(miss < 2.5, `landed ${miss.toFixed(2)}m from the marked point`);
+  // The scattered point is inside MORTAR_DISPERSION, but the burst is the first
+  // ground sample along the flight path (one SHELL_IMPACT_SAMPLE step), so a
+  // round aimed at the edge of the ring can land one sample beyond it.
+  assert.ok(miss <= MORTAR_DISPERSION + SHELL_IMPACT_SAMPLE + 1e-6,
+    `landed ${miss.toFixed(2)}m from the marked point`);
   assert.ok(enemy.player.hp < 100, 'the enemy standing on the mark was caught by the splash');
   assert.equal(
     gunner.frames.some((f) => f.type === 'emplacementMessage' && /too close/i.test(f.message)),
@@ -723,7 +727,11 @@ test('a mortar scatters around the mark while a cannon fires exactly where aimed
     Math.max(...misses) <= MORTAR_DISPERSION + 1e-6,
     `every round stays inside the landing ring (${Math.max(...misses).toFixed(2)}m)`,
   );
-  assert.ok(Math.min(...misses) > 0.05, 'a mortar round is never a laser on the exact mark');
+  // A single round can land near the centre by chance (the scatter is a disc),
+  // so check the pattern rather than the closest sample: a pinpoint gun would
+  // average ~0 while a ring scatters about 2R/3 out.
+  const meanMiss = misses.reduce((sum, miss) => sum + miss, 0) / misses.length;
+  assert.ok(meanMiss > 1, `rounds scatter around the mark (mean ${meanMiss.toFixed(2)}m)`);
   assert.ok(
     new Set(points.map((p) => `${p.x.toFixed(2)},${p.z.toFixed(2)}`)).size >= 30,
     'consecutive rounds land in different spots',

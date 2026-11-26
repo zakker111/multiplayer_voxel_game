@@ -31,7 +31,18 @@
 //              teleports the probe on purpose, so that server needs
 //              MOVE_VALIDATION=off, on a freshly started server: flag state
 //              persists between runs, so a dirty flag fails the CTF checks.
+import { readFileSync } from 'node:fs';
 import { WebSocket } from 'ws';
+
+/** Flag stands are defined once in src/shared/types.ts; read them from the
+ *  source so an arena resize cannot leave this probe teleporting at the old
+ *  coordinates (the 512m layout moved the stands from ±160 to ±140). */
+const SHARED_TYPES = readFileSync(new URL('../src/shared/types.ts', import.meta.url), 'utf8');
+const flagStandZ = (name) => {
+  const match = SHARED_TYPES.match(new RegExp(`export const ${name} = \\{ x: [^,]+, z: (-?[0-9.]+) \\}`));
+  if (!match) throw new Error(`could not read ${name} from src/shared/types.ts`);
+  return Number(match[1]);
+};
 
 const BASE = process.env.BASE || 'http://127.0.0.1:3000';
 const PHASE = process.env.PHASE || 'core';
@@ -917,16 +928,18 @@ try {
   }
 
   // ---------- CTF: pick the red flag up at its base, capture at ours ----------
+  const redStandZ = flagStandZ('RED_FLAG_POS');
+  const blueStandZ = flagStandZ('BLUE_FLAG_POS');
   let picked = null;
   let captured = null;
   for (let attempt = 0; attempt < 3 && !captured; attempt++) {
     A.messages.length = 0;
-    await A.place({ x: 0.5, y: spawn.y, z: 160.5 }, 'rifle');
+    await A.place({ x: 0.5, y: spawn.y, z: redStandZ + 0.5 }, 'rifle');
     await sleep(120);
     await A.send({ type: 'pickupFlag' });
     picked = await A.waitFor('flagPickedUp', 1500, (m) => m.playerId === A.playerId);
     if (!picked) { await sleep(800); continue; }
-    await A.place({ x: 0.5, y: spawn.y, z: -160.5 }, 'rifle');
+    await A.place({ x: 0.5, y: spawn.y, z: blueStandZ + 0.5 }, 'rifle');
     await sleep(80);
     await A.send({ type: 'captureFlag', team: 'red' });
     captured = await A.waitFor('flagCaptured', 2000, (m) => m.playerId === A.playerId);
