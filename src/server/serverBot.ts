@@ -33,6 +33,7 @@ import {
   WORLD_SIZE,
   CHUNK_SIZE,
   EMPLACEMENT_MOUNT_REACH,
+  emplacementSpec,
 } from '../shared/types';
 
 export type BotState =
@@ -182,6 +183,14 @@ const ESCORT_COVER_RANGE = 60;
 // A bot fighting a placed build holds this ring instead of closing on it, so it
 // never walks into a manned nest's footprint or its muzzle.
 const EMPLACEMENT_STANDOFF_RANGE = 12;
+// A manned nest outguns a rifle inside 90m, so a bot that only "sees" targets at
+// 75m walked blind into its kill zone. Builds are sighted this far out instead,
+// letting the rifle (140m full range) answer the gun from beyond its reach.
+const EMPLACEMENT_SIGHT_RANGE = 130;
+// How long a bot plinks at a manned gun from outside its range before giving up
+// on the standoff and committing. Without a cap, a squad could stall at 100m
+// forever trading misses with a 300 HP build.
+const EMPLACEMENT_SUPPRESS_SECONDS = 6;
 
 // Difficulty knobs (env-overridable so Render can tune without code changes)
 const BOT_MAX_HP = Number(process.env.SERVER_BOT_HP ?? 130); // beefier than players (100)
@@ -200,6 +209,9 @@ export class ServerBot extends ServerPlayer {
   private lastSeenEnemy: Position | null = null;
   private lastShotAt: number = -10;
   private aimTargetId: string | null = null;
+  // Which manned gun this bot is currently out-ranging, and since when.
+  private suppressTargetId: string | null = null;
+  private suppressSince = 0;
   private aimTargetAt: number = 0;
   private lastCampCheck: number = -10;
   private lastDecisionAt: number = -10;
@@ -409,7 +421,7 @@ export class ServerBot extends ServerPlayer {
         cand.position.y - this.position.y,
         cand.position.z - this.position.z,
       );
-      if (d > VISIBLE_RANGE) continue;
+      if (d > (cand.emplacement ? EMPLACEMENT_SIGHT_RANGE : VISIBLE_RANGE)) continue;
       if (!ctx.canSee(this.eyePos(), cand.position)) continue;
       // Smart targeting: flag carriers are priority; recent attackers get a
       // distance discount so bots "hunt back" toward whoever hurt them.
@@ -808,10 +820,45 @@ export class ServerBot extends ServerPlayer {
     if (this.isReloading && dist < 26) {
       this.breakContact(enemy.position, step, ctx);
     } else if (enemy.emplacement) {
-      // A build is a fixed target: close to a standoff ring and stop there.
+      // A build is a fixed target: hold a ring instead of closing on it.
       // blockedBy already keeps bots out of the pad, but walking up to the
-      // footprint put them in the muzzle of a manned nest.
-      if (dist > EMPLACEMENT_STANDOFF_RANGE) {
+      // footprint put them in the muzzle of a manned nest. A manned gun is
+      // answered from outside its range: the rifle reaches 140m, the nest 90m.
+      if (enemy.emplacement.manned) {
+        if (this.suppressTargetId !== enemy.id) {
+          this.suppressTargetId = enemy.id;
+          this.suppressSince = t;
+        }
+        const spec = emplacementSpec(enemy.emplacement.kind as Parameters<typeof emplacementSpec>[0]);
+        // Never time out while still inside the gun's reach: a bot that starts
+        // the fight too close has to finish backing out first (measured: 5s of
+        // retreat covers only ~25m, and charging early fed it to the muzzle).
+        const givingUp = t - this.suppressSince > EMPLACEMENT_SUPPRESS_SECONDS
+          && dist > (spec?.maxRange ?? 0) + 4;
+        const standoff = givingUp
+          ? EMPLACEMENT_STANDOFF_RANGE
+          : Math.max(EMPLACEMENT_STANDOFF_RANGE, (spec?.maxRange ?? 0) + 12);
+        if (dist > standoff + 4) {
+          this.moveTo(enemy.position, step, ctx, false);
+        } else if (dist < standoff - 12) {
+          // Inside the gun's reach: back out while still firing at it. moveTo
+          // turns the body toward the retreat point, so restore the facing
+          // afterwards — otherwise the muzzle never comes back to the gun and
+          // the bot retreats without shooting.
+          const len = Math.hypot(this.position.x - enemy.position.x, this.position.z - enemy.position.z) || 1;
+          const facing = this.rotation.yaw;
+          this.moveTo({
+            x: this.position.x + ((this.position.x - enemy.position.x) / len) * 8,
+            y: this.position.y,
+            z: this.position.z + ((this.position.z - enemy.position.z) / len) * 8,
+          }, step, ctx, false);
+          this.rotation.yaw = facing;
+        } else {
+          this.velocity.x = 0;
+          this.velocity.z = 0;
+          this.snapToGround(ctx);
+        }
+      } else if (dist > EMPLACEMENT_STANDOFF_RANGE) {
         this.moveTo(enemy.position, step, ctx, false);
       } else {
         this.velocity.x = 0;
@@ -903,7 +950,9 @@ export class ServerBot extends ServerPlayer {
     const startDist = Math.hypot(enemyFlag.x - this.position.x, enemyFlag.z - this.position.z);
     // Don't trickle into the stand alone: if no teammate is nearby and no
     // enemy is already in our face, pause briefly at the rally point so the
-    // next wave can form up. The timer is capped, so a lone bot still attacks.
+    // next wave can form up. The pause must happen *outside* the nest's reach:
+    // at 90m it stood in the MG's 90m kill zone for 2.5s and was shot dead
+    // before moving (measured: 130 HP to 0 in 0.75s, 0 pickups in 30 min).
     const mateNear = ctx.targets.some((mate) =>
       mate.id !== this.id &&
       !mate.isDead &&
@@ -911,7 +960,7 @@ export class ServerBot extends ServerPlayer {
       Math.hypot(mate.position.x - this.position.x, mate.position.z - this.position.z) < 18,
     );
     const threatNear = enemy !== null && dist < 25;
-    if (!mateNear && !threatNear && startDist > 25 && startDist < 90) {
+    if (!mateNear && !threatNear && startDist > 110 && startDist < 200) {
       if (this.stagingSince === null) this.stagingSince = t;
       if (t - this.stagingSince < 2.5) {
         this.velocity.x = 0;

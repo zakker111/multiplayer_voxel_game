@@ -467,12 +467,12 @@ test('a bot round damages an enemy build and never its own', () => {
   assert.equal(nest.hp, afterEnemyFire, 'a bot never damages its own team\'s build');
 });
 
-test('a bot engaging a build holds a standoff instead of closing into it', () => {
+const engageNest = (manned, ticks, startDist = 20) => {
   const bot = new ServerBot('standoff', { x: 0, y: GROUND_LEVEL, z: 0 }, 'blue', 'Sapper');
   bot.equipment = 'rifle';
   bot.currentAmmo = 30;
   bot.magazineSize = 30;
-  const nestPos = { x: 20, y: GROUND_LEVEL, z: 0 };
+  const nestPos = { x: startDist, y: GROUND_LEVEL, z: 0 };
   const ctx = {
     world: new ServerWorld(),
     serverTime: 0,
@@ -489,17 +489,33 @@ test('a bot engaging a build holds a standoff instead of closing into it', () =>
     team: 'red',
     isDead: false,
     carryingFlag: false,
-    emplacement: { id: 'red-nest', kind: 'mgNest', manned: true },
+    emplacement: { id: 'red-nest', kind: 'mgNest', manned },
   };
   let closest = Infinity;
-  for (let tick = 0; tick < 120; tick++) {
+  for (let tick = 0; tick < ticks; tick++) {
     ctx.serverTime = tick * 0.05;
     const dist = Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z);
     bot.doEngage(target, dist, ctx, ctx.serverTime);
     closest = Math.min(closest, Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z));
   }
-  assert.ok(closest <= 13, `the bot closes in to fight the nest (closest ${closest.toFixed(1)}m)`);
-  assert.ok(closest >= 10.5, `but stops outside the muzzle (closest ${closest.toFixed(1)}m)`);
+  const final = Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z);
+  return { closest, final };
+};
+
+test('a bot engaging a manned nest out-ranges it instead of walking into the muzzle', () => {
+  // A manned nest outguns a rifle inside its reach, so a bot that finds itself
+  // in the kill zone backs out past maxRange and answers with rifle fire
+  // (140m full range) instead of charging the muzzle.
+  const reach = emplacementSpec('mgNest').maxRange;
+  const { closest, final } = engageNest(true, 160, 60);
+  assert.ok(closest >= 59.5, `the bot never dives on the gun (closest ${closest.toFixed(1)}m)`);
+  assert.ok(final >= reach, `it pulls back outside the gun's reach (final ${final.toFixed(1)}m)`);
+});
+
+test('a bot engaging an unmanned build closes to a standoff instead of into it', () => {
+  const { closest } = engageNest(false, 120);
+  assert.ok(closest <= 13, `the bot closes in to fight the build (closest ${closest.toFixed(1)}m)`);
+  assert.ok(closest >= 10.5, `but stops outside its footprint (closest ${closest.toFixed(1)}m)`);
 });
 
 test('a bot routes around an emplacement instead of walking into it', () => {

@@ -137,7 +137,7 @@ test('a bot that respawns mid-rally stages again instead of skipping the wait', 
   const ctx = ctxFor(world);
   const bot = new ServerBot(
     'rally-test',
-    { x: types.RED_FLAG_POS.x, y: GROUND, z: types.RED_FLAG_POS.z - 60 },
+    { x: types.RED_FLAG_POS.x, y: GROUND, z: types.RED_FLAG_POS.z - 150 },
     'blue',
     'Rally',
   );
