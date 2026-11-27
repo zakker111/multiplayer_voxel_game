@@ -339,6 +339,12 @@ export class ServerBot extends ServerPlayer {
     return this.botState;
   }
 
+  /** Forget the standoff clock; the next fight with a gun starts its own 6s. */
+  private resetSuppression(): void {
+    this.suppressTargetId = null;
+    this.suppressSince = 0;
+  }
+
   /** Assault bots push the objective; support bots hold and dig in. */
   get roleName(): 'assault' | 'support' {
     return this.role;
@@ -635,6 +641,11 @@ export class ServerBot extends ServerPlayer {
       this.buildPlan = null;
     }
     if (this.botState !== state) {
+      // The standoff clock belongs to one continuous fight with one gun. A bot
+      // that broke off and comes back must get the full window again: leaving
+      // the timestamp behind let a returning bot believe it had already waited
+      // out the 6s cap and charge the muzzle on its first tick back.
+      if (this.botState === 'ENGAGE') this.resetSuppression();
       this.botState = state;
       this.waypoint = null;
       this.stagingSince = null;
@@ -802,6 +813,14 @@ export class ServerBot extends ServerPlayer {
 
   private doEngage(enemy: BotTargetInfo | null, dist: number, ctx: BotContext, t: number): void {
     const step = dtOf(ctx);
+    // The standoff clock is per continuous fight: any change of target (or a
+    // target that is not a live gun) starts a fresh window, so re-engaging the
+    // same nest later cannot inherit an expired timer.
+    const suppressing = enemy?.emplacement?.manned ? enemy.id : null;
+    if (this.suppressTargetId !== suppressing) {
+      this.suppressTargetId = suppressing;
+      this.suppressSince = suppressing ? t : 0;
+    }
     if (!enemy) {
       this.aimTargetId = null;
       // Lost sight: push toward last known position, then re-decide
@@ -825,10 +844,6 @@ export class ServerBot extends ServerPlayer {
       // footprint put them in the muzzle of a manned nest. A manned gun is
       // answered from outside its range: the rifle reaches 140m, the nest 90m.
       if (enemy.emplacement.manned) {
-        if (this.suppressTargetId !== enemy.id) {
-          this.suppressTargetId = enemy.id;
-          this.suppressSince = t;
-        }
         const spec = emplacementSpec(enemy.emplacement.kind as Parameters<typeof emplacementSpec>[0]);
         // Never time out while still inside the gun's reach: a bot that starts
         // the fight too close has to finish backing out first (measured: 5s of

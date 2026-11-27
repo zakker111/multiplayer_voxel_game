@@ -467,7 +467,7 @@ test('a bot round damages an enemy build and never its own', () => {
   assert.equal(nest.hp, afterEnemyFire, 'a bot never damages its own team\'s build');
 });
 
-const engageNest = (manned, ticks, startDist = 20) => {
+const nestArena = (manned, startDist = 20) => {
   const bot = new ServerBot('standoff', { x: 0, y: GROUND_LEVEL, z: 0 }, 'blue', 'Sapper');
   bot.equipment = 'rifle';
   bot.currentAmmo = 30;
@@ -491,15 +491,27 @@ const engageNest = (manned, ticks, startDist = 20) => {
     carryingFlag: false,
     emplacement: { id: 'red-nest', kind: 'mgNest', manned },
   };
+  // botUpdate() enters ENGAGE before acting it out; the harness has to match,
+  // otherwise leaving ENGAGE later is a no-op and the reset is never exercised.
+  bot.transition('ENGAGE', 0, 4);
+  return { bot, ctx, target, nestPos };
+};
+
+/** Drive one doEngage tick loop and report how close the bot ever got. */
+const driveEngage = (bot, ctx, target, nestPos, ticks) => {
+  const gap = () => Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z);
   let closest = Infinity;
   for (let tick = 0; tick < ticks; tick++) {
-    ctx.serverTime = tick * 0.05;
-    const dist = Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z);
-    bot.doEngage(target, dist, ctx, ctx.serverTime);
-    closest = Math.min(closest, Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z));
+    ctx.serverTime += 0.05;
+    bot.doEngage(target, gap(), ctx, ctx.serverTime);
+    closest = Math.min(closest, gap());
   }
-  const final = Math.hypot(nestPos.x - bot.position.x, nestPos.z - bot.position.z);
-  return { closest, final };
+  return { closest, final: gap() };
+};
+
+const engageNest = (manned, ticks, startDist = 20) => {
+  const arena = nestArena(manned, startDist);
+  return { ...arena, ...driveEngage(arena.bot, arena.ctx, arena.target, arena.nestPos, ticks) };
 };
 
 test('a bot engaging a manned nest out-ranges it instead of walking into the muzzle', () => {
@@ -510,6 +522,50 @@ test('a bot engaging a manned nest out-ranges it instead of walking into the muz
   const { closest, final } = engageNest(true, 160, 60);
   assert.ok(closest >= 59.5, `the bot never dives on the gun (closest ${closest.toFixed(1)}m)`);
   assert.ok(final >= reach, `it pulls back outside the gun's reach (final ${final.toFixed(1)}m)`);
+});
+
+test('a bot that breaks off and re-engages the same nest gets a fresh standoff window', () => {
+  // Regression: the standoff clock is per target id and was never cleared. A
+  // bot that left ENGAGE and met the same nest again saw `t - suppressSince`
+  // already past the 6s cap on its first tick back, so it charged the muzzle
+  // it had just backed away from.
+  const reach = emplacementSpec('mgNest').maxRange;
+  const { bot, ctx, target, nestPos, final } = engageNest(true, 160, 60);
+  assert.ok(final >= reach, `the first fight backs out past the gun (final ${final.toFixed(1)}m)`);
+
+  // Break off, then meet the same gun again from far out — the range a bot
+  // actually sights a build at (130m). With the stale clock the old code saw
+  // "already waited 6s" and walked straight at the muzzle; a fresh window has
+  // it walk to the standoff ring and hold.
+  bot.transition('ADVANCE', ctx.serverTime, 1);
+  bot.position = { x: nestPos.x - 120, y: GROUND_LEVEL, z: nestPos.z };
+  bot.transition('ENGAGE', ctx.serverTime, 4);
+
+  // Five seconds, still inside the fresh 6s cap: no charge.
+  const again = driveEngage(bot, ctx, target, nestPos, 100);
+  assert.ok(again.closest >= reach + 10,
+    `the bot holds its ring instead of charging in (closest ${again.closest.toFixed(1)}m)`);
+});
+
+test('a bot that switches target and back to the same nest also restarts the clock', () => {
+  const { bot, ctx, target, nestPos } = engageNest(true, 160, 60);
+  const reach = emplacementSpec('mgNest').maxRange;
+  // A rifleman steals the bot's attention while it never leaves ENGAGE.
+  const player = {
+    id: 'red-rifle',
+    position: { x: nestPos.x - 50, y: GROUND_LEVEL, z: 30 },
+    team: 'red',
+    isDead: false,
+    carryingFlag: false,
+  };
+  ctx.serverTime += 0.05;
+  bot.doEngage(player, 55, ctx, ctx.serverTime);
+  // Back on the nest, sighted from far out again.
+  bot.position = { x: nestPos.x - 120, y: GROUND_LEVEL, z: nestPos.z };
+
+  const again = driveEngage(bot, ctx, target, nestPos, 100);
+  assert.ok(again.closest >= reach + 10,
+    `the nest gets a full window again (closest ${again.closest.toFixed(1)}m)`);
 });
 
 test('a bot engaging an unmanned build closes to a standoff instead of into it', () => {
