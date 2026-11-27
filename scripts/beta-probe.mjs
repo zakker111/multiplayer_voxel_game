@@ -26,6 +26,11 @@
 // PHASE=support: craft and place a supply crate, fill it with mined blocks and
 //              draw them back out. Needs a botless server with
 //              MOVE_VALIDATION=off (it teleports).
+// PHASE=bots : a live roster (SERVER_BOT_COUNT > 0). Bots must stand up a
+//              structure, crew it and drive a jeep, observed over the real
+//              protocol. This client never places a build or a jeep, so
+//              anything that appears on the wire came from the bot AI, and the
+//              init roster supplies the ids to attribute it.
 // PHASE=all  : also workshop deposit, jeep build/enter/drive/exit and a flag
 //              capture (deterministic when the server runs without bots). It
 //              teleports the probe on purpose, so that server needs
@@ -382,14 +387,16 @@ try {
     dug ? `y=${dug.change.y} -> type ${dug.change.type}` : 'no voxelChanged');
 
   // ---------- building ----------
+  // Build back into the cell the spade just cleared: it is air, touches solid
+  // ground and sits below the player's body, so every CanBuild rule (empty cell,
+  // no body or vehicle overlap, support in reach) already holds.
   A.messages.length = 0;
   let built = null;
-  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1]]) {
-    const cell = { x: Math.floor(pos.x) + dx, y: Math.floor(pos.y) + dy, z: Math.floor(pos.z) };
+  if (dug) {
+    const cell = { x: dug.change.x, y: dug.change.y, z: dug.change.z };
     await A.send({ type: 'build', position: cell });
-    built = await A.waitFor('voxelChanged', 700,
+    built = await A.waitFor('voxelChanged', 900,
       (m) => m.change.x === cell.x && m.change.y === cell.y && m.change.z === cell.z);
-    if (built) break;
   }
   check('building places a voxel and broadcasts it', !!built);
   check('building spends inventory',
@@ -441,6 +448,53 @@ try {
   B.close();
   const leftSeen = await A.waitFor('playerLeft', 3000, (m) => m.playerId === B.playerId);
   check('disconnect removes the player for others', !!leftSeen);
+
+  // ---------- bots online: build, crew, drive ----------
+  // Observation only: A joins and stands still, so any build, gunner or driver
+  // in these broadcasts is the bot AI's doing. Polls until all three are seen
+  // or the budget runs out (BOT_PHASE_SECONDS, default 300); a healthy roster
+  // reaches all three in about two and a half minutes.
+  if (PHASE === 'bots') {
+    const botIds = new Set(bots.map((b) => b.id));
+    const started = Date.now();
+    const deadline = started + Number(process.env.BOT_PHASE_SECONDS || 300) * 1000;
+    let built = null;
+    let crewed = null;
+    let driven = null;
+    const firstSeen = new Map();
+    let cursor = 0;
+    while (botIds.size > 0 && Date.now() < deadline && !(built && crewed && driven)) {
+      for (; cursor < A.messages.length; cursor++) {
+        const m = A.messages[cursor];
+        if (m.type === 'emplacementsUpdated') {
+          for (const e of m.emplacements ?? []) {
+            if (e.wreck) continue;
+            built ??= e;
+            if (!crewed && e.gunnerId && botIds.has(e.gunnerId)) crewed = e;
+          }
+        } else if (m.type === 'jeepsUpdated') {
+          for (const j of m.jeeps ?? []) {
+            if (j.wreck || !j.driverId || !botIds.has(j.driverId)) continue;
+            const from = firstSeen.get(j.id);
+            if (!from) firstSeen.set(j.id, j.position);
+            else if (!driven && Math.hypot(j.position.x - from.x, j.position.z - from.z) > 2) driven = j;
+          }
+        }
+      }
+      // Bot positions stream every tick; keep only what this loop still needs.
+      A.messages.length = 0;
+      cursor = 0;
+      await sleep(500);
+    }
+    const why = botIds.size === 0 ? 'no bots on this server (needs SERVER_BOT_COUNT)' : '';
+    const waited = `${Math.round((Date.now() - started) / 1000)}s`;
+    check('bots build a structure online', !!built,
+      built ? `${built.kind} ${built.id}` : why || `nothing placed in ${waited}`);
+    check('a bot crews its structure online', !!crewed,
+      crewed ? `${crewed.kind} gunner=${crewed.gunnerId}` : why || `no bot gunner in ${waited}`);
+    check('bots drive a jeep online', !!driven,
+      driven ? `${driven.id} driver=${driven.driverId}` : why || `no bot-driven jeep moved in ${waited}`);
+  }
 
   // ---------- player-built emplacements: craft, place, man, fire, wreck ----------
   if (PHASE === 'structures') {
@@ -559,9 +613,10 @@ try {
           else if (live.hp < startHp) damaged = true;
         }
       }
+      // A destroyed build stays on the map as a smoking wreck for
+      // WRECK_LIFETIME_SECONDS, so "damaged and still listed" is a pass.
       check('rifle fire damages and eventually wrecks an enemy emplacement', damaged || gone,
         gone ? 'destroyed' : damaged ? 'damaged but standing' : 'no damage seen');
-      check('a wrecked cannon leaves the map', gone, gone ? '' : `hp ${startHp} -> ${R.last('emplacementsUpdated')?.emplacements?.find((e) => e.id === gun.id)?.hp}`);
     }
   }
 
@@ -738,6 +793,22 @@ try {
       R.close();
       await A.send({ type: 'dismountEmplacement' });
       await sleep(250);
+
+      // ---------- dismantle: a misplaced friendly nest is not permanent ----------
+      // The refund is broadcast before the removal, so the latest workshop
+      // snapshot is already here once the removal arrives.
+      const stockBeforeDismantle = A.last('workshopsUpdated')?.workshops?.blue?.stock ?? 0;
+      await A.place({ x: nest.position.x + 1.5, y: nest.position.y, z: nest.position.z }, 'rifle');
+      await sleep(150);
+      A.messages.length = 0;
+      await A.send({ type: 'dismantleEmplacement', emplacementId: nest.id });
+      const nestGone = await A.waitFor('emplacementsUpdated', 2500,
+        (m) => !(m.emplacements ?? []).some((e) => e.id === nest.id));
+      check('a friendly nest can be dismantled over the wire', !!nestGone,
+        nestGone ? '' : `saw ${A.types()}`);
+      const stockAfterDismantle = A.last('workshopsUpdated')?.workshops?.blue?.stock ?? 0;
+      check('dismantling refunds the build to the workshop', stockAfterDismantle > stockBeforeDismantle,
+        `stock ${stockBeforeDismantle} -> ${stockAfterDismantle}`);
     }
 
     // Per-team limit: three crates place, the fourth is refused and free.
@@ -921,10 +992,78 @@ try {
       (m) => m.jeeps.some((j) => j.id === jeep.id && Math.hypot(j.position.x - startPos.x, j.position.z - startPos.z) > 0.5));
     check('driving moves the jeep', !!(await drove), 'throttle held ~1.2s');
 
+    // Assert the seat itself is free: a plain jeepsUpdated can be the 10Hz sync
+    // tick from before the exit landed, which would leave the passenger check
+    // below convinced that A still drives.
     A.messages.length = 0;
     await A.send({ type: 'exitJeep' });
-    const exited = await A.waitAny(['jeepExited', 'jeepsUpdated'], 2000);
-    check('exiting the jeep is handled', !!exited, exited ? exited.type : 'no response');
+    const exited = await A.waitFor('jeepsUpdated', 2000,
+      (m) => m.jeeps.some((j) => j.id === jeep.id && j.driverId === null));
+    check('exiting the jeep frees the driver seat', !!exited, exited ? '' : 'still seated');
+  }
+
+  // ---------- passenger seat: a second player rides along ----------
+  // The drive test left A on foot, so A takes the wheel and P boards second.
+  const seatJeep = jeep ? A.last('jeepsUpdated')?.jeeps?.find((j) => j.id === jeep.id) : null;
+  if (seatJeep) {
+    const P = new Client('P');
+    await P.connect();
+    const initP = await P.waitFor('init', 6000);
+    P.token = initP?.sessionToken;
+    P.playerId = initP?.playerId;
+    await P.send({ type: 'join', team: 'blue', name: 'Probe_P' });
+    await P.waitFor('joined', 4000);
+    // Stand just outside the jeep footprint (the server discards a position that
+    // lands inside a vehicle) but inside the enter reach.
+    const beside = { x: seatJeep.position.x, y: seatJeep.position.y, z: seatJeep.position.z + 3.2 };
+    if (!seatJeep.driverId) {
+      await A.place(beside, 'rifle');
+      await A.send({ type: 'enterJeep', vehicleId: jeep.id });
+      await A.waitFor('jeepsUpdated', 1500,
+        (m) => m.jeeps.some((j) => j.id === jeep.id && j.driverId === A.playerId));
+    }
+    await P.place(beside, 'rifle');
+    await sleep(120);
+    await P.send({ type: 'enterJeep', vehicleId: jeep.id });
+    const passengerSeen = await P.waitFor('jeepsUpdated', 2000,
+      (m) => m.jeeps.some((j) => j.id === jeep.id && j.passengerId === P.playerId));
+    const seats = P.last('jeepsUpdated')?.jeeps?.find((j) => j.id === jeep.id);
+    const seatName = (id) => (id === A.playerId ? 'A' : id === P.playerId ? 'P' : id ? 'other' : 'none');
+    check('a second player takes the jeep passenger seat', !!passengerSeen,
+      passengerSeen ? '' : `driver=${seatName(seats?.driverId)} passenger=${seatName(seats?.passengerId)}`);
+    if (passengerSeen) {
+      await P.send({ type: 'exitJeep' });
+      const cleared = await P.waitFor('jeepsUpdated', 2000,
+        (m) => m.jeeps.some((j) => j.id === jeep.id && j.passengerId === null));
+      check('the passenger can step out of the jeep', !!cleared,
+        cleared ? '' : P.last('jeepMessage')?.message ?? `saw ${P.types()}`);
+      // Leave the driver's seat so the scuttle check below is allowed.
+      await A.send({ type: 'exitJeep' });
+      await A.waitFor('jeepsUpdated', 2000, (m) => m.jeeps.some((j) => j.id === jeep.id && j.driverId === null));
+    }
+    P.close();
+  }
+
+  // ---------- scuttle: a friendly jeep in reach refunds its cost ----------
+  // refundWorkshop and the removal are broadcast before the jeepMessage, so the
+  // latest snapshots are already here once the message arrives.
+  if (jeep) {
+    const stockBefore = A.last('workshopsUpdated')?.workshops?.blue?.stock ?? 0;
+    const live = A.last('jeepsUpdated')?.jeeps?.find((j) => j.id === jeep.id);
+    if (live) {
+      await A.place({ x: live.position.x, y: live.position.y, z: live.position.z + 3 }, 'rifle');
+      await sleep(150);
+    }
+    A.messages.length = 0;
+    await A.send({ type: 'scuttleJeep', vehicleId: jeep.id });
+    const msg = await A.waitFor('jeepMessage', 2500);
+    const remaining = A.last('jeepsUpdated')?.jeeps ?? [];
+    check('a friendly jeep can be scuttled over the wire', !!msg && /Scuttled jeep/.test(msg.message),
+      msg ? msg.message : `saw ${A.types()}`);
+    check('scuttling refunds the jeep cost to the workshop',
+      (A.last('workshopsUpdated')?.workshops?.blue?.stock ?? 0) > stockBefore,
+      `stock ${stockBefore} -> ${A.last('workshopsUpdated')?.workshops?.blue?.stock}`);
+    check('a scuttled jeep leaves the map', !remaining.some((j) => j.id === jeep.id), `jeeps=${remaining.length}`);
   }
 
   // ---------- CTF: pick the red flag up at its base, capture at ours ----------

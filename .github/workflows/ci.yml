@@ -37,12 +37,31 @@ jobs:
         run: npm test
 
   beta-probe:
-    name: Beta protocol probe (PHASE=all)
+    name: Beta protocol probe (PHASE=${{ matrix.phase }})
     runs-on: ubuntu-latest
-    # Drives the real HTTP/SSE/WS protocol the browser uses. The probe teleports
-    # on purpose (flag capture, workshop, jeep) so it needs a botless server with
-    # MOVE_VALIDATION=off, and a freshly started one: flag and round state
-    # persist between runs, so a reused process fails the CTF checks.
+    # Drives the real HTTP/SSE/WS protocol the browser uses. The economy phases
+    # teleport on purpose (flag capture, workshop, jeep, builds) so they need a
+    # botless server with MOVE_VALIDATION=off, and a freshly started one: flag,
+    # round and build state persist between runs, so a dirty process fails later
+    # checks. The bots phase is the exception: it observes a live roster instead.
+    strategy:
+      fail-fast: false
+      matrix:
+        # Online coverage of the Beta economy: core loop + vehicles/CTF, the
+        # cannon/structures path, the Phase 4 emplacement rules (nest, crates,
+        # team limit, dismantle refund), the forward supply crate, and the bot AI
+        # building, crewing and driving by itself over the wire.
+        include:
+          - phase: all
+            bots: 0
+          - phase: structures
+            bots: 0
+          - phase: emplacements
+            bots: 0
+          - phase: support
+            bots: 0
+          - phase: bots
+            bots: 10
     env:
       PROBE_PORT: '3121'
     steps:
@@ -65,9 +84,9 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
-      - name: Start a fresh botless server
+      - name: Start a fresh server
         run: |
-          nohup env NODE_ENV=production PORT="$PROBE_PORT" SERVER_BOT_COUNT=0 \
+          nohup env NODE_ENV=production PORT="$PROBE_PORT" SERVER_BOT_COUNT=${{ matrix.bots }} \
             MOVE_VALIDATION=off node dist/server.cjs > beta-probe-server.log 2>&1 &
           echo $! > beta-probe-server.pid
           for attempt in $(seq 1 90); do
@@ -82,7 +101,7 @@ jobs:
           exit 1
 
       - name: Run Beta probe
-        run: BASE="http://127.0.0.1:$PROBE_PORT" PHASE=all node scripts/beta-probe.mjs
+        run: BASE="http://127.0.0.1:$PROBE_PORT" PHASE=${{ matrix.phase }} node scripts/beta-probe.mjs
 
       - name: Server log and cleanup
         if: always()
