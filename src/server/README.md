@@ -16,7 +16,7 @@ and [AGENTS.md](../../AGENTS.md). This file only covers the server internals.
 | `serverGame.ts` | Players, connections, combat validation, CTF objective, rounds, scores, bot orchestration |
 | `serverPlayer.ts` | Server-side player state, movement, ammo/reload, damage, footsteps |
 | `serverBot.ts` | FSM bot AI (see below) |
-| `serverWorld.ts` | Voxel storage, chunked dirty tracking, raycasts, `canBuild()` |
+| `serverWorld.ts` | Voxel storage (packed type array + live records for edited cells), raycasts, `canBuild()` |
 | `logger.ts` | Structured timestamped logging (`[INFO]` / `[WARN]` / `[ERROR]` + subsystem tag) |
 | `banStore.ts` | Persistent `bans.json` store for IP/name bans |
 

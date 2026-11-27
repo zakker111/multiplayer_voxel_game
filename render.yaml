@@ -7,7 +7,17 @@ services:
   - type: web
     name: voxel-fps-ctf
     runtime: node
-    plan: free
+    # The app lives at the repo root of this repo, so no `rootDir` is needed and
+    # the Blueprint wizard finds this file by default. If the code is ever moved
+    # into a subdirectory (e.g. voxel/), add `rootDir: voxel` here and leave this
+    # file at the repo root. Only if this file moves too does the wizard need its
+    # Blueprint Path set to `voxel/render.yaml`.
+    #
+    # Starter: 0.5 CPU / 512 MB, $7/mo. Memory is no longer the constraint: a
+    # 20-bot server measures ~115 MB RSS (~2.1 ms per tick, so ~0.04 core at
+    # 20 Hz, more with humans and shells). Free (0.1 CPU) leaves too little
+    # headroom and still spins down, hence Starter.
+    plan: 0.5c-512mb
     region: oregon
     branch: main
     # `autoDeploy` is deprecated; this is its documented replacement.

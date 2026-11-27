@@ -45,7 +45,8 @@ test('team workshops enforce resource provenance, proximity, protection and life
   const old = game.world.getVoxel(site.x, GROUND_LEVEL, site.z);
   game.world.setVoxel(site.x, GROUND_LEVEL, site.z, 0);
   assert.equal(game.world.damageVoxel(site.x, GROUND_LEVEL, site.z, 20), false);
-  assert.equal(game.world.getVoxel(site.x, GROUND_LEVEL, site.z), old);
+  // A protected cell is left untouched: same block type and durability.
+  assert.deepEqual(game.world.getVoxel(site.x, GROUND_LEVEL, site.z), old);
   assert.equal(game.world.canBuild(site.x, GROUND_LEVEL + 1, site.z), false);
 
   // A placed block yields ordinary building stock, not depositable resources.

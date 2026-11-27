@@ -1,6 +1,6 @@
 import {
   WORLD_SIZE,
-  CHUNK_SIZE,
+  WORLD_HALF,
   GROUND_LEVEL,
   MAX_BUILD_UP,
   MAX_DIG_DOWN,
@@ -22,14 +22,26 @@ interface VoxelData {
   durability: number;
 }
 
-interface Chunk {
-  voxels: Map<string, VoxelData>;
-  dirty: boolean;
-}
+/** Vertical window the server stores. Terrain spans 0..GROUND_LEVEL, building is
+ *  capped at GROUND_LEVEL + MAX_BUILD_UP and digging at GROUND_LEVEL -
+ *  MAX_DIG_DOWN, so this window covers every legal cell with margin to spare
+ *  while the array stays one byte per cell. */
+const WORLD_MIN_Y = GROUND_LEVEL - MAX_DIG_DOWN - 8;
+const WORLD_MAX_Y = GROUND_LEVEL + MAX_BUILD_UP + 8;
+const WORLD_LAYERS = WORLD_MAX_Y - WORLD_MIN_Y + 1;
 
 export class ServerWorld {
-  private chunks: Map<string, Chunk> = new Map();
-  private modifiedVoxels: Map<string, VoxelChange> = new Map();
+  /** Block type per cell, 0 = air. One flat array instead of a Map entry per
+   *  solid voxel: the old chunk maps cost ~115 bytes per voxel (2.2M of them,
+   *  ~244 MB of heap), this is one byte per cell (~15 MB) and faster to read. */
+  private readonly types = new Uint8Array(WORLD_SIZE * WORLD_SIZE * WORLD_LAYERS);
+  /** Live voxel records for cells that have been written (built, mined or
+   *  damaged), keyed by cell index. Untouched terrain lives in `types` alone at
+   *  VOXEL_MAX_DURABILITY, so this holds thousands of entries, not 2.2M — and
+   *  because these are the same objects `getVoxel` hands out, a caller holding
+   *  a block still sees later chip damage on it. */
+  private readonly voxelObjects = new Map<number, VoxelData>();
+  private readonly modifiedVoxels = new Map<number, VoxelChange>();
   private isGeneratingTerrain: boolean = false;
   public serverTime: number = 0;
 
@@ -45,48 +57,37 @@ export class ServerWorld {
     this.serverTime += dt;
   }
 
-  private getChunkKey(chunkX: number, chunkZ: number): string {
-    return `${chunkX},${chunkZ}`;
+  /** Flat index into `types`, or -1 for a cell outside the stored window. */
+  private indexOf(x: number, y: number, z: number): number {
+    if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z)) return -1;
+    if (y < WORLD_MIN_Y || y > WORLD_MAX_Y) return -1;
+    const ix = x + WORLD_HALF;
+    const iz = z + WORLD_HALF;
+    if (ix < 0 || ix >= WORLD_SIZE || iz < 0 || iz >= WORLD_SIZE) return -1;
+    return ((y - WORLD_MIN_Y) * WORLD_SIZE + iz) * WORLD_SIZE + ix;
   }
 
   private getVoxelKey(x: number, y: number, z: number): string {
     return `${x},${y},${z}`;
   }
 
-  private getChunkCoords(x: number, z: number): { chunkX: number; chunkZ: number } {
-    return {
-      chunkX: Math.floor(x / CHUNK_SIZE),
-      chunkZ: Math.floor(z / CHUNK_SIZE),
-    };
-  }
-
-  private getOrCreateChunk(chunkX: number, chunkZ: number): Chunk {
-    const key = this.getChunkKey(chunkX, chunkZ);
-    let chunk = this.chunks.get(key);
-    if (!chunk) {
-      chunk = { voxels: new Map(), dirty: true };
-      this.chunks.set(key, chunk);
-    }
-    return chunk;
-  }
-
   private generateTerrain(): void {
     const half = WORLD_SIZE / 2;
-    
+
     for (let x = -half; x < half; x++) {
       for (let z = -half; z < half; z++) {
         const height = GROUND_LEVEL + Math.floor(Math.sin(x * 0.1) * Math.cos(z * 0.1) * 2);
-        
+
         for (let y = 0; y <= height; y++) {
           let type = VOXEL_DIRT;
           if (y === height) type = VOXEL_GRASS;
           else if (y < height - 2) type = VOXEL_STONE;
-          
+
           this.setVoxel(x, y, z, type, VOXEL_MAX_DURABILITY);
         }
       }
     }
-    
+
     console.log('Terrain generated');
   }
 
@@ -102,7 +103,8 @@ export class ServerWorld {
             if ((existing?.type ?? VOXEL_AIR) === desired) continue;
             const durability = desired === VOXEL_AIR ? 0 : VOXEL_MAX_DURABILITY;
             this.setVoxel(x, y, z, desired, durability);
-            this.modifiedVoxels.set(this.getVoxelKey(x, y, z), { x, y, z, type: desired, durability });
+            const index = this.indexOf(x, y, z);
+            if (index >= 0) this.modifiedVoxels.set(index, { x, y, z, type: desired, durability });
           }
         }
       }
@@ -110,68 +112,55 @@ export class ServerWorld {
   }
 
   getVoxel(x: number, y: number, z: number): VoxelData | null {
-    const { chunkX, chunkZ } = this.getChunkCoords(x, z);
-    const chunk = this.chunks.get(this.getChunkKey(chunkX, chunkZ));
-    if (!chunk) return null;
-    
-    return chunk.voxels.get(this.getVoxelKey(x, y, z)) || null;
+    const index = this.indexOf(x, y, z);
+    if (index < 0) return null;
+    const type = this.types[index];
+    if (type === VOXEL_AIR) return null;
+    // A written cell returns its live record; untouched terrain is a snapshot at
+    // full durability (nothing can chip it without first creating a record).
+    return this.voxelObjects.get(index) ?? { type, durability: VOXEL_MAX_DURABILITY };
   }
 
   setVoxel(x: number, y: number, z: number, type: number, durability: number = VOXEL_MAX_DURABILITY): void {
     if (!this.isGeneratingTerrain && isWorkshopProtectedCell(x, z)) return;
-    const { chunkX, chunkZ } = this.getChunkCoords(x, z);
-    const chunk = this.getOrCreateChunk(chunkX, chunkZ);
-    
-    if (type === VOXEL_AIR) {
-      chunk.voxels.delete(this.getVoxelKey(x, y, z));
-    } else {
-      chunk.voxels.set(this.getVoxelKey(x, y, z), { type, durability });
-    }
-    
-    chunk.dirty = true;
-    
-    // Track persistent voxel modifications for late-joining players
-    if (!this.isGeneratingTerrain) {
-      this.modifiedVoxels.set(this.getVoxelKey(x, y, z), { x, y, z, type, durability });
-    }
+    const index = this.indexOf(x, y, z);
+    if (index < 0) return;
 
-    // Mark neighboring chunks dirty if on edge
-    const localX = x - chunkX * CHUNK_SIZE;
-    const localZ = z - chunkZ * CHUNK_SIZE;
-    
-    if (localX === 0) this.markChunkDirty(chunkX - 1, chunkZ);
-    if (localX === CHUNK_SIZE - 1) this.markChunkDirty(chunkX + 1, chunkZ);
-    if (localZ === 0) this.markChunkDirty(chunkX, chunkZ - 1);
-    if (localZ === CHUNK_SIZE - 1) this.markChunkDirty(chunkX, chunkZ + 1);
+    this.types[index] = type;
+    // Terrain and workshop leveling run before anyone can hold a voxel handle,
+    // so they only fill the type array; allocating a record per terrain cell
+    // would put the 2.2M objects straight back.
+    if (type === VOXEL_AIR || this.isGeneratingTerrain) this.voxelObjects.delete(index);
+    else this.voxelObjects.set(index, { type, durability });
+
+    // Track persistent voxel modifications for late-joining players.
+    if (!this.isGeneratingTerrain) {
+      this.modifiedVoxels.set(index, { x, y, z, type, durability });
+    }
   }
 
   getModifiedVoxels(): VoxelChange[] {
     return Array.from(this.modifiedVoxels.values());
   }
 
-  private markChunkDirty(chunkX: number, chunkZ: number): void {
-    const chunk = this.chunks.get(this.getChunkKey(chunkX, chunkZ));
-    if (chunk) {
-      chunk.dirty = true;
-    }
-  }
-
   isSolid(x: number, y: number, z: number): boolean {
-    const voxel = this.getVoxel(x, y, z);
-    return voxel !== null && voxel.type !== VOXEL_AIR;
+    // Read the type array directly: this is the hottest query in the game
+    // (ground snapshots, raycasts, bot line-of-sight) and must not allocate.
+    const index = this.indexOf(x, y, z);
+    return index >= 0 && this.types[index] !== VOXEL_AIR;
   }
 
   getGroundHeight(x: number, z: number): number {
     const ix = Math.round(x);
     const iz = Math.round(z);
-    
+
     // Search from high above down to find the topmost solid block
     for (let y = GROUND_LEVEL + MAX_BUILD_UP + 10; y >= 0; y--) {
       if (this.isSolid(ix, y, iz)) {
         return y + 1; // Return position ON TOP of the solid block
       }
     }
-    
+
     // Fallback to base ground level if nothing found
     return GROUND_LEVEL;
   }
@@ -221,16 +210,17 @@ export class ServerWorld {
     // Structural support: connectivity to ground within 12 blocks. The
     // flood-fill must start from the *filled* cell, so temporarily mark it
     // solid before checking (same logic as the client's VoxelWorld.canBuild).
-    // Write directly into the chunk map so this probe is NOT recorded in
+    // Write straight into the type array so this probe is NOT recorded in
     // modifiedVoxels (late joiners must not receive phantom add+delete pairs).
     if (y > GROUND_LEVEL) {
-      const { chunkX, chunkZ } = this.getChunkCoords(x, z);
-      const chunk = this.getOrCreateChunk(chunkX, chunkZ);
-      const vkey = this.getVoxelKey(x, y, z);
-      chunk.voxels.set(vkey, { type: VOXEL_BUILT, durability: VOXEL_MAX_DURABILITY });
-      const supported = this.hasSupport(x, y, z, 12);
-      chunk.voxels.delete(vkey);
-      if (!supported) return false;
+      const index = this.indexOf(x, y, z);
+      if (index >= 0) {
+        const previous = this.types[index];
+        this.types[index] = VOXEL_BUILT;
+        const supported = this.hasSupport(x, y, z, 12);
+        this.types[index] = previous;
+        if (!supported) return false;
+      }
     }
 
     return true;
@@ -238,16 +228,21 @@ export class ServerWorld {
 
   damageVoxel(x: number, y: number, z: number, damage: number): boolean {
     if (isWorkshopProtectedCell(x, z)) return false;
-    const voxel = this.getVoxel(x, y, z);
-    if (!voxel) return false;
-    
+    const index = this.indexOf(x, y, z);
+    if (index < 0 || this.types[index] === VOXEL_AIR) return false;
+
+    let voxel = this.voxelObjects.get(index);
+    if (!voxel) {
+      voxel = { type: this.types[index], durability: VOXEL_MAX_DURABILITY };
+      this.voxelObjects.set(index, voxel);
+    }
     voxel.durability -= damage;
-    
+
     if (voxel.durability <= VOXEL_DURABILITY_EPSILON) {
       this.setVoxel(x, y, z, VOXEL_AIR, 0);
       return true;
     }
-    
+
     return false;
   }
 
@@ -330,7 +325,7 @@ export class ServerWorld {
 
     const toCollapse: string[] = [];
     const checked = new Set<string>();
-    
+
     // Check all 6 neighbors of the destroyed voxel
     const neighbors = [
       [destroyedX + 1, destroyedY, destroyedZ],
@@ -342,12 +337,11 @@ export class ServerWorld {
     ];
 
     for (const [nx, ny, nz] of neighbors) {
-      const voxel = this.getVoxel(nx, ny, nz);
-      if (!voxel || voxel.type === VOXEL_AIR || isWorkshopProtectedCell(nx, nz)) continue;
-      
+      if (!this.isSolid(nx, ny, nz) || isWorkshopProtectedCell(nx, nz)) continue;
+
       const key = this.getVoxelKey(nx, ny, nz);
       if (checked.has(key)) continue;
-      
+
       // Check if this voxel has support (path to ground within 12 blocks)
       if (!this.hasSupport(nx, ny, nz, 12)) {
         this.findUnsupportedChain(nx, ny, nz, toCollapse, checked);
@@ -360,7 +354,7 @@ export class ServerWorld {
       const x = parseInt(parts[0]);
       const y = parseInt(parts[1]);
       const z = parseInt(parts[2]);
-      
+
       if (isWorkshopProtectedCell(x, z)) continue;
       this.setVoxel(x, y, z, VOXEL_AIR, 0);
       changes.push({ x, y, z, type: VOXEL_AIR, durability: 0 });
@@ -372,18 +366,18 @@ export class ServerWorld {
   private hasSupport(x: number, y: number, z: number, maxDistance: number): boolean {
     const visited = new Set<string>();
     const queue: Array<{x: number, y: number, z: number, dist: number}> = [];
-    
+
     queue.push({x, y, z, dist: 0});
     visited.add(this.getVoxelKey(x, y, z));
 
     let queueHead = 0;
     while (queueHead < queue.length) {
       const current = queue[queueHead++];
-      
+
       if (current.y <= GROUND_LEVEL) {
         return true;
       }
-      
+
       if (current.dist >= maxDistance) {
         continue;
       }
@@ -400,10 +394,8 @@ export class ServerWorld {
       for (const [nx, ny, nz] of neighbors) {
         const nkey = this.getVoxelKey(nx, ny, nz);
         if (visited.has(nkey)) continue;
-        
-        const voxel = this.getVoxel(nx, ny, nz);
-        if (!voxel || voxel.type === VOXEL_AIR) continue;
-        
+        if (!this.isSolid(nx, ny, nz)) continue;
+
         visited.add(nkey);
         queue.push({x: nx, y: ny, z: nz, dist: current.dist + 1});
       }
@@ -434,40 +426,11 @@ export class ServerWorld {
       for (const [nx, ny, nz] of neighbors) {
         const nkey = this.getVoxelKey(nx, ny, nz);
         if (checked.has(nkey)) continue;
-        
-        const voxel = this.getVoxel(nx, ny, nz);
-        if (!voxel || voxel.type === VOXEL_AIR || isWorkshopProtectedCell(nx, nz)) continue;
-        
+        if (!this.isSolid(nx, ny, nz) || isWorkshopProtectedCell(nx, nz)) continue;
+
         checked.add(nkey);
         queue.push({x: nx, y: ny, z: nz});
       }
     }
-  }
-
-  getDirtyChunks(): { chunkX: number; chunkZ: number; voxels: VoxelChange[] }[] {
-    const dirtyChunks: { chunkX: number; chunkZ: number; voxels: VoxelChange[] }[] = [];
-
-    for (const [key, chunk] of this.chunks) {
-      if (chunk.dirty) {
-        const [chunkX, chunkZ] = key.split(',').map(Number);
-        const voxels: VoxelChange[] = [];
-
-        for (const [voxelKey, voxel] of chunk.voxels) {
-          const [x, y, z] = voxelKey.split(',').map(Number);
-          voxels.push({
-            x,
-            y,
-            z,
-            type: voxel.type,
-            durability: voxel.durability,
-          });
-        }
-
-        dirtyChunks.push({ chunkX, chunkZ, voxels });
-        chunk.dirty = false;
-      }
-    }
-
-    return dirtyChunks;
   }
 }

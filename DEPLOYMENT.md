@@ -32,16 +32,16 @@ How to get the game live for developers and playtesters. **Render is the primary
 
 ## ⭐ Option 1: Render Blueprint (Primary — auto-deploy from GitHub)
 
-**Time:** first setup ~5 min, updates ~2–4 min · **Cost:** free tier · **Difficulty:** ⭐ Very Easy
+**Time:** first setup ~5 min, updates ~2–4 min · **Cost:** ~$7/mo (Starter, 0.5 CPU) · **Difficulty:** ⭐ Very Easy
 
 This repo ships [`render.yaml`](render.yaml), so Render configures the whole service from that file — no build/start commands, region or env vars to type in. You only walk the Blueprint wizard and answer one prompt.
 
-1. Make sure the branch Render will watch (`main`) contains `render.yaml`.
+1. `render.yaml` is already at the repo root of `main`, so the wizard finds it with no Blueprint Path to type. (If the code is ever moved underneath a subdirectory, add `rootDir: <dir>` to the service and keep this file at the root. Only if this file moves too do you set the wizard's **Blueprint Path**, e.g. `voxel/render.yaml`.)
 2. Sign in at [dashboard.render.com](https://dashboard.render.com) with GitHub.
 3. **New +** (top right) → **Blueprint**.
 4. **Connect a repository** → `zakker111/multiplayer_voxel_game`. If it is not listed, click **Configure account** and grant Render access to that repo, then come back and refresh the list.
 5. Name the Blueprint (e.g. `voxel-fps`) and confirm **Branch: main** → **Deploy Blueprint**.
-   - Render parses `render.yaml` and shows one **Web Service** named `voxel-fps-ctf` (Node, Free plan, Oregon).
+   - Render parses `render.yaml` and shows one **Web Service** named `voxel-fps-ctf` (Node, Starter `0.5c-512mb`, Oregon).
    - It prompts for **`ADMIN_TOKEN`** — the only value you supply. See [ADMIN_TOKEN](#admin_token-during-setup) below.
 6. Watch the first deploy. Render prints its own lines (`Cloning from https://github.com/…`, the build, then `Build successful 🎉`). The app then logs three lines, in this order, each prefixed `<ISO timestamp> [LEVEL] [server]`:
    - `ADMIN_TOKEN not set — admin API open to localhost only. Set ADMIN_TOKEN to allow remote access.` (warn — only when you left the prompt blank)
@@ -55,7 +55,7 @@ This repo ships [`render.yaml`](render.yaml), so Render configures the whole ser
 
 | Field | Value |
 | :--- | :--- |
-| `runtime` / `plan` / `region` | `node` / `free` / `oregon` |
+| `runtime` / `plan` / `region` | `node` / `0.5c-512mb` (Starter, 0.5 CPU / 512 MB, $7/mo) / `oregon` |
 | `branch` / `autoDeployTrigger` | `main` / `commit` (redeploy on every push) |
 | `buildCommand` | `npm ci --include=dev && npm run build` — `--include=dev` is required because Vite and esbuild are devDependencies and `NODE_ENV=production` |
 | `startCommand` | `npm start` (`node dist/server.cjs`; binds Render's injected `$PORT`) |
@@ -77,7 +77,7 @@ Render only prompts on the *first* creation. To set or rotate it later: service 
 
 **Updates:** every push to `main` triggers a rebuild+redeploy (~2–4 min). If a build fails, Render keeps serving the previous version — check the deploy logs.
 
-**Free tier behaviour** ([Render's free limits](https://render.com/docs/free)): an instance spins down after 15 minutes with no inbound traffic — meaning no HTTP request *and* no WebSocket message from an existing connection. An active match keeps it awake (the client sends input at 20Hz); an idle server sleeps, and the next visitor sees Render's loading page for about a minute while it boots. Each workspace gets 750 instance hours per calendar month, and exhausting them suspends every free service until the next month. The filesystem is ephemeral, so `bans.json` is lost on redeploy, restart **and** on every spin-down.
+**Plan behaviour** ([Render compute plans](https://render.com/docs/compute-plans)): Starter never spins down, so a match stays live and the first visitor never waits on a cold start. A 20-bot server measures ~115 MB RSS and ~2.1 ms per 20 Hz tick (~0.04 core of simulation, more with humans and shells), so 512 MB and 0.5 CPU both have room to spare at `SERVER_BOT_COUNT=10`. The free plan (0.1 CPU) is the one with no headroom, and it spins down when idle. The filesystem is ephemeral on every Render plan, so `bans.json` is lost on redeploy and restart.
 
 **Playtesters must hard-refresh** (Ctrl/Cmd+Shift+R) after each deploy to load the new client bundle.
 
@@ -179,7 +179,7 @@ npm run admin -- players --url https://your-app.onrender.com --token $ADMIN_TOKE
 npm run admin -- ban 203.0.113.42 "cheating" --url https://your-app.onrender.com --token $ADMIN_TOKEN
 ```
 
-Bans persist to `bans.json` (gitignored; path overridable with `BAN_FILE`) and are checked at the WebSocket upgrade stage, so banned players cannot reconnect. They survive restarts on a host with a persistent disk (local, Docker volume, VPS); on Render's free tier the filesystem is ephemeral, so a redeploy, restart or spin-down clears them. Kicking a player also triggers the same-team bot backfill, keeping the match 10v10.
+Bans persist to `bans.json` (gitignored; path overridable with `BAN_FILE`) and are checked at the WebSocket upgrade stage, so banned players cannot reconnect. They survive restarts on a host with a persistent disk (local, Docker volume, VPS); on Render the filesystem is ephemeral, so a redeploy or restart clears them. Kicking a player also triggers the same-team bot backfill, keeping the match 10v10.
 
 ---
 
@@ -238,7 +238,7 @@ Override the hosts with `PAGES_URL` / `RENDER_URL` / `BETA_URL`. Expect `ALL CHE
 
 The bundle check is a staleness gate: the host's HTML must name the same `assets/index-<hash>.js` your build just produced, and the served bytes must hash to the same sha256. Build first so `dist/index.html` supplies the expectation, or pass it explicitly with `EXPECTED_BUNDLE=assets/index-<hash>.js` (e.g. when checking from a machine without a build) — a mismatch fails with both bundle names, which is how an old Render or Pages deploy shows up instead of a silent pass. `--static` skips `/api/status` and the WebSocket for Pages, which has no backend.
 
-Cold free instances can take ~1 minute to wake; set `WARMUP_MS=180000` for a slower one.
+A cold instance (free plan, or the first request after a deploy) can take ~1 minute to wake; set `WARMUP_MS=180000` for a slower one.
 
 Checklist:
 1. Open the URL → main menu loads, terrain renders.
@@ -255,7 +255,7 @@ Checklist:
 
 | Symptom | Fix |
 | :--- | :--- |
-| "Failed to connect to server" | Check `/api/status`; Render free tier may be sleeping — wait ~1 min and retry |
+| "Failed to connect to server" | Check `/api/status` and the deploy logs; a paid instance doesn't sleep, so a failure here is the build, the health check or the WebSocket proxy rather than a cold start |
 | Blueprint wizard shows no repository | **Configure account** on the connect step and grant Render access to the repo |
 | Blueprint asks for `ADMIN_TOKEN` and you are unsure | Leave it blank; the game runs normally and the admin API stays localhost-only. Add a secret later in the **Environment** tab |
 | Blueprint rejected `render.yaml` | Validate the field names against [the Blueprint spec](https://render.com/docs/blueprint-spec); errors name the offending key |
@@ -270,7 +270,7 @@ Checklist:
 
 ## 🎯 Recommended Setups
 
-- **Playtesting with friends:** Render free tier + invite links. Zero maintenance.
+- **Playtesting with friends:** Render Starter (`0.5c-512mb`, $7/mo) + invite links. Zero maintenance, no spin-down.
 - **Community server:** VPS ($5/mo) + PM2 + Nginx + domain SSL, `ADMIN_TOKEN` set for moderation.
 - **CI/demo client without server cost:** GitHub Pages + one shared Render/VPS server via Custom Server URL.
 

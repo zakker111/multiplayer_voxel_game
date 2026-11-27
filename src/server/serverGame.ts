@@ -1927,8 +1927,8 @@ export class ServerGame {
   private damageVoxelAndBroadcast(x: number, y: number, z: number, damage: number): boolean {
     const before = this.world.getVoxel(x, y, z);
     if (!before) return false;
-    // `getVoxel` returns the live chunk object, which `damageVoxel` mutates in
-    // place, so snapshot the old values before the hit rather than the object.
+    // `getVoxel` returns a record snapshot, but read the old values explicitly
+    // so this stays correct if the world ever hands back a live object again.
     const beforeType = before.type;
     const beforeDurability = before.durability;
     const destroyed = this.world.damageVoxel(x, y, z, damage);
