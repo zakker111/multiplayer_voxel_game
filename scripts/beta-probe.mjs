@@ -30,7 +30,9 @@
 //              structure, crew it and drive a jeep, observed over the real
 //              protocol. This client never places a build or a jeep, so
 //              anything that appears on the wire came from the bot AI, and the
-//              init roster supplies the ids to attribute it.
+//              init roster supplies the ids to attribute it. It watches for up
+//              to BOT_PHASE_SECONDS (default 600): the AI's blueprint lottery,
+//              not the transport, decides how soon a crewable gun appears.
 // PHASE=all  : also workshop deposit, jeep build/enter/drive/exit and a flag
 //              capture (deterministic when the server runs without bots). It
 //              teleports the probe on purpose, so that server needs
@@ -451,49 +453,65 @@ try {
 
   // ---------- bots online: build, crew, drive ----------
   // Observation only: A joins and stands still, so any build, gunner or driver
-  // in these broadcasts is the bot AI's doing. Polls until all three are seen
-  // or the budget runs out (BOT_PHASE_SECONDS, default 300); a healthy roster
-  // reaches all three in about two and a half minutes.
+  // in these broadcasts is the bot AI's doing. What gates this window is the
+  // AI's own blueprint lottery, not the transport: measured on fresh 20-bot
+  // servers, the first structure lands anywhere from 30s to 4min, a crewable
+  // gun (crates and spotting posts have no seat) takes 2-5min, and a bot then
+  // has to walk to it and mount. A 300s ceiling caught all three in barely half
+  // the runs, so the budget is ten minutes (BOT_PHASE_SECONDS to override) and
+  // the loop exits as soon as it has seen everything.
   if (PHASE === 'bots') {
     const botIds = new Set(bots.map((b) => b.id));
     const started = Date.now();
-    const deadline = started + Number(process.env.BOT_PHASE_SECONDS || 300) * 1000;
+    const budgetSeconds = Number(process.env.BOT_PHASE_SECONDS || 600);
+    const deadline = started + budgetSeconds * 1000;
+    const elapsed = () => Math.round((Date.now() - started) / 1000);
+    // Each milestone keeps the second it landed and what was seen.
     let built = null;
     let crewed = null;
     let driven = null;
-    const firstSeen = new Map();
-    let cursor = 0;
+    const jeepStart = new Map();
+    let lastNoteAt = 0;
     while (botIds.size > 0 && Date.now() < deadline && !(built && crewed && driven)) {
-      for (; cursor < A.messages.length; cursor++) {
-        const m = A.messages[cursor];
+      for (const m of A.messages) {
         if (m.type === 'emplacementsUpdated') {
           for (const e of m.emplacements ?? []) {
             if (e.wreck) continue;
-            built ??= e;
-            if (!crewed && e.gunnerId && botIds.has(e.gunnerId)) crewed = e;
+            if (!built) built = { at: elapsed(), what: `${e.kind} ${e.id}` };
+            if (!crewed && e.gunnerId && botIds.has(e.gunnerId)) {
+              crewed = { at: elapsed(), what: `${e.kind} gunner=${e.gunnerId}` };
+            }
           }
         } else if (m.type === 'jeepsUpdated') {
           for (const j of m.jeeps ?? []) {
             if (j.wreck || !j.driverId || !botIds.has(j.driverId)) continue;
-            const from = firstSeen.get(j.id);
-            if (!from) firstSeen.set(j.id, j.position);
-            else if (!driven && Math.hypot(j.position.x - from.x, j.position.z - from.z) > 2) driven = j;
+            const from = jeepStart.get(j.id);
+            if (!from) jeepStart.set(j.id, j.position);
+            else if (!driven && Math.hypot(j.position.x - from.x, j.position.z - from.z) > 2) {
+              driven = { at: elapsed(), what: `${j.id} driver=${j.driverId}` };
+            }
           }
         }
       }
-      // Bot positions stream every tick; keep only what this loop still needs.
+      // Bot positions stream every tick; keep only what the next poll needs.
       A.messages.length = 0;
-      cursor = 0;
+      // A slow draw should be visible in the CI log, not only in the final
+      // failure line: say what is still missing once a minute.
+      if (Date.now() - lastNoteAt >= 60000 && !(built && crewed && driven)) {
+        lastNoteAt = Date.now();
+        const missing = [!built && 'structure', !crewed && 'crewed gun', !driven && 'driven jeep'].filter(Boolean);
+        console.log(`  [bots] ${elapsed()}s: waiting for ${missing.join(', ')}`);
+      }
       await sleep(500);
     }
     const why = botIds.size === 0 ? 'no bots on this server (needs SERVER_BOT_COUNT)' : '';
-    const waited = `${Math.round((Date.now() - started) / 1000)}s`;
+    const waited = `${elapsed()}s of ${budgetSeconds}s`;
     check('bots build a structure online', !!built,
-      built ? `${built.kind} ${built.id}` : why || `nothing placed in ${waited}`);
+      built ? `${built.what} at ${built.at}s` : why || `nothing placed in ${waited}`);
     check('a bot crews its structure online', !!crewed,
-      crewed ? `${crewed.kind} gunner=${crewed.gunnerId}` : why || `no bot gunner in ${waited}`);
+      crewed ? `${crewed.what} at ${crewed.at}s` : why || `no bot gunner in ${waited}`);
     check('bots drive a jeep online', !!driven,
-      driven ? `${driven.id} driver=${driven.driverId}` : why || `no bot-driven jeep moved in ${waited}`);
+      driven ? `${driven.what} at ${driven.at}s` : why || `no bot-driven jeep moved in ${waited}`);
   }
 
   // ---------- player-built emplacements: craft, place, man, fire, wreck ----------

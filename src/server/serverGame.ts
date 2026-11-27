@@ -1635,7 +1635,16 @@ export class ServerGame {
     const engineerCount = teamBots.filter((p) => p.isEngineer).length;
     const logisticsCount = teamBots.filter((p) => p.isLogistics).length;
     // Keep logistics assignment separate from the two firebase engineers.
-    const bot = new ServerBot(botId, spawnPos, team, name, engineerCount < 2, engineerCount >= 2 && logisticsCount < 1);
+    // Roles are otherwise hashed per bot (~60% assault), which could give a team
+    // two assault engineers: tryGunBuild only runs from a defend post, so such a
+    // team could go a whole match without an emplacement (measured: bimodal, 0 or
+    // 6+ builds in five minutes). Pin the first engineer to the defensive role.
+    const bot = new ServerBot(
+      botId, spawnPos, team, name,
+      engineerCount < 2,
+      engineerCount >= 2 && logisticsCount < 1,
+      engineerCount === 0 ? 'support' : undefined,
+    );
     this.players.set(botId, bot);
     this.inventories.set(botId, 0);
     this.depositableBlocks.set(botId, 0);

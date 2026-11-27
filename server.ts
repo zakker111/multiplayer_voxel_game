@@ -6,6 +6,7 @@ import { createServer as createViteServer } from 'vite';
 import { ServerGame, GameConnection } from './src/server/serverGame';
 import { normalizeIp } from './src/server/banStore';
 import { ConnectionLimiter, TokenBucket } from './src/server/limits';
+import { TickClock } from './src/server/tickClock';
 import type { ClientMessage } from './src/shared/types';
 import { createLogger } from './src/server/logger';
 
@@ -433,12 +434,26 @@ async function startServer() {
     });
   });
 
-  // Game tick loop - 20 ticks per second
+  // Game tick loop - 20 ticks per second of *simulation*, anchored to the wall
+  // clock. setInterval fires at most once per interval however long a tick took,
+  // so one step per fire silently lost the missed time and ran the whole
+  // simulation in slow motion on a CPU-thin host. Catch up instead, capped so an
+  // undersized host gives up the oldest time rather than bursting it here.
   const TICK_RATE = 20;
   const TICK_INTERVAL = 1000 / TICK_RATE;
+  const STEP_SECONDS = TICK_INTERVAL / 1000;
+  const MAX_CATCHUP_STEPS = 10; // at most half a second of sim per fire
+  const tickClock = new TickClock(TICK_INTERVAL, MAX_CATCHUP_STEPS);
+  let lastBehindLogMs = 0;
   const gameInterval = setInterval(() => {
-    game.update(TICK_INTERVAL / 1000);
+    const now = Date.now();
+    const { steps, droppedSeconds } = tickClock.advance(now);
+    for (let i = 0; i < steps; i++) game.update(STEP_SECONDS);
     game.broadcastState();
+    if (droppedSeconds > 0 && now - lastBehindLogMs >= 10_000) {
+      lastBehindLogMs = now;
+      log.warn(`game loop is behind: dropped ${droppedSeconds.toFixed(2)}s of simulation (host short of CPU)`);
+    }
   }, TICK_INTERVAL);
 
   log.info(`game loop started tickRate=${TICK_RATE}Hz`);

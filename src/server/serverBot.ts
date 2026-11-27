@@ -292,6 +292,8 @@ export class ServerBot extends ServerPlayer {
     name: string,
     engineer?: boolean,
     logistics?: boolean,
+    /** Pin the role instead of hashing it (see addBot's firebase engineer). */
+    roleOverride?: 'assault' | 'support',
   ) {
     super(id, position, team);
     this.name = name;
@@ -312,7 +314,7 @@ export class ServerBot extends ServerPlayer {
     // ~60% commit to the flag run; the rest hold the defensive ring. Leaving
     // every bot on attack meant both waves collided in midfield and neither
     // stand was ever reached (measured: 0 captures in 10 simulated minutes).
-    this.role = hash % 100 < 60 ? 'assault' : 'support';
+    this.role = roleOverride ?? (hash % 100 < 60 ? 'assault' : 'support');
     // The server normally assigns a guaranteed two engineers per team; the
     // hash is the fallback for standalone/test bots. Engineers build the
     // firebase while the rest of the squad fights and screens it.
