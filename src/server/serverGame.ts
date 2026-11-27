@@ -57,6 +57,7 @@ import {
   WORKSHOP_REACH,
   GROUND_LEVEL,
   gunStats,
+  isOutOfWorld,
   isWorkshopProtectedCell,
   Workshops,
   JeepSnapshot,
@@ -3104,9 +3105,34 @@ export class ServerGame {
         {
           if (!player.isDead) {
             if (this.jeepOf(playerId)) break;
-            // Already alive: the server owns this player's position. Re-assert
-            // it so a client that wrongly believes it died (e.g. a local
-            // void-fall) recovers, but never teleport a live player back to
+            // The client dies when it falls below the void line (VOID_KILL_Y),
+            // but it stops updating the moment it dies, so the server's last
+            // accepted position can sit just above that line and far below the
+            // terrain (the reported loop was y = -7.93 on ground at y = 8).
+            // Re-asserting it revived the player inside the void, where they
+            // died again on the next frame — an endless "respawning in 4s" loop.
+            // Terrain is only generated down to y = 0, so a mined pit bottoms
+            // out on real blocks at or above that layer and a miner this low is
+            // never standing on anything: it is a fall into the void. Compare
+            // against the world floor, not the column's surface, so a player
+            // under a roof (a tunnel, a build they put overhead) is never
+            // mistaken for a void death. Spectators are exempt: their body does
+            // not move, and their camera is free to go anywhere.
+            const fellOutOfWorld = !player.isSpectating
+              && (isOutOfWorld(player.position) || player.position.y < 0);
+            if (fellOutOfWorld) {
+              player.hp = 0;
+              player.isDead = true;
+              this.handlePlayerDeath(playerId);
+              this.broadcast({ type: 'playerDied', playerId });
+              this.broadcast({ type: 'playerUpdated', playerId, state: player.getState() });
+              this.respawnTimers.set(playerId, 4.0);
+              log.info(`player ${playerId} fell out of the world — respawning at base`);
+              break;
+            }
+            // Already alive on real ground: the server owns this player's
+            // position. Re-assert it so a client that wrongly believes it died
+            // recovers, but never teleport a live player back to
             // spawn — that was a free full-heal + escape (and let a flag
             // carrier teleport home with the enemy flag).
             this.broadcast({
