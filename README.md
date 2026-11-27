@@ -5,7 +5,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 ![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
-![Tests](https://img.shields.io/badge/tests-294%2F294%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-302%2F302%20passing-brightgreen.svg)
 
 ---
 
@@ -59,22 +59,93 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Run it on your own computer
 
-### Prerequisites
-- Node.js 18+ and npm
+**Prerequisite:** [Node.js 18+](https://nodejs.org). Nothing else — the launcher installs the rest.
+
+### One click
+
+| System | How to start the server |
+| :--- | :--- |
+| **Windows** | Double-click **`start-server.bat`** |
+| **Linux / macOS** | `./start-server.sh` in the game folder |
+
+Both run the same launcher (`scripts/start-local.mjs`, also `npm run serve`). The
+first run installs dependencies and builds the client + server; later runs skip
+straight to starting. It prints the addresses to share, then runs the game:
+
+```
+──────────────────────────────────────────────────────────
+  Voxel FPS server
+──────────────────────────────────────────────────────────
+  This computer      http://localhost:3000
+  Same network       http://192.168.1.24:3000   <- friends on your Wi-Fi/LAN
+
+  Playing across the internet needs a public address:
+    - forward TCP 3000 on your router, then share http://<your-public-ip>:3000
+    - or use a tunnel / VPS (see DEPLOYMENT.md)
+──────────────────────────────────────────────────────────
+```
+
+Options (either the `.bat`/`.sh` or `npm run serve --`):
+
+```bash
+start-server.bat 4000        # Windows: use port 4000 instead of 3000
+./start-server.sh 4000       # Linux/macOS
+start-server.bat --rebuild   # force a client + server rebuild, then start
+```
+
+Open the printed URL, pick **Multiplayer**, and the full 10v10 bot battle is
+already running — you drop into it with the team you choose.
+
+### Playing with other people
+
+1. **Same Wi-Fi / LAN** — everyone opens the *Same network* address the launcher
+   printed (`http://<your-lan-ip>:<port>`). On Windows, allow Node.js through the
+   firewall when it asks, or add a TCP rule for the port. Nothing else to set up.
+2. **Over the internet** — the server needs a public address. Pick one:
+   - **Port forward** TCP 3000 (or the port you chose) on your router to this
+     computer, then share `http://<your-public-ip>:3000`.
+   - **Tunnel**: `cloudflared tunnel --url http://localhost:3000` (or `ssh -R`,
+     Tailscale) and share the generated URL — good for a quick game with a friend.
+   - **Hosted**: run the same launcher or `npm start` on a VPS, or use the
+     Render/Docker setups in [DEPLOYMENT.md](DEPLOYMENT.md).
+3. **Joining** — open the server's URL, choose **Multiplayer**, and pick the
+   server in the list (below) or type the address into **Custom Server**. Invite
+   links carry the server too: `?mode=online&team=red&server=ws://host:port`.
+
+> One process serves both the web client and the authoritative WebSocket game
+> server, so a single `http://ip:port` address is all a player needs — no
+> separate static host.
+
+### 🔎 Choosing a server in the lobby
+
+The **Multiplayer → Choose Server** box checks servers and shows whether each one
+is up, with its live socket count:
+
+- **This server** — the one that served the page, always listed.
+- **Entries from `public/servers.json`** — edit that file to advertise your own:
+  `{ "name": "My LAN game", "url": "http://192.168.1.24:3000" }` (`ws://`,
+  `wss://` and bare `host:port` also work).
+- **Saved servers** — every server this browser has joined before.
+
+Click a row to select it, then **Connect & Deploy**. **Check again** re-probes.
+The probe is a `GET /api/status`, which also returns `{ status, connectedPlayers,
+roster, round }` for scripts; `GET /api/health` is the minimal liveness check.
+
+### Manual setup (development)
 
 ```bash
 git clone https://github.com/<your-org>/<your-repo>.git
 cd <your-repo>
 npm install
 
-# Development (Vite + tsx live server on PORT, default 3000)
+# Development: Vite + the game server in one process (PORT, default 3000)
 npm run dev
 
 # Full verification pipeline (used by CI)
 npm run lint      # tsc --noEmit
-npm test          # node --test tests/  (294 regression tests)
+npm test          # node --test tests/  (302 regression tests)
 npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)
@@ -84,7 +155,9 @@ npm start         # production server (reads process.env.PORT)
 bash scripts/push-github.sh
 ```
 
-Open http://localhost:3000 — pick **Multiplayer** to join the live server (a full 10v10 bot battle is already running), or play local Bot Match / Sandbox modes.
+With `npm run dev` the client is rebuilt live (hot reload); use the one-click
+launcher or `npm run build && npm start` when you want the production bundle that
+players should use.
 
 ---
 
@@ -192,6 +265,9 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
 │   ├── App.tsx                # React HUD, menus, scoreboard, lobby
 │   └── main.tsx               # React entry
 ├── server.ts                  # Single production entry: Express static + WS + admin API
+├── start-server.bat / .sh     # one-click local server (port arg, installs+builds on first run)
+├── scripts/start-local.mjs    # the launcher both wrappers call (also `npm run serve`)
+├── public/servers.json        # servers the lobby probes and lists
 ├── Dockerfile / docker-compose.yml
 ├── index.html, vite.config.js, tsconfig.json, package.json
 └── README.md / DEPLOYMENT.md / AGENTS.md / .env.example

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
 import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SHELL_PACK_COST, SHELL_PACK_LIMIT, emplacementSpec, type EmplacementKind } from './shared/types';
-import { Globe, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower } from 'lucide-react';
+import { Globe, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower, RefreshCw } from 'lucide-react';
 
 /** HUD names for the bench blueprints; the shared table only carries numbers. */
 const EMPLACEMENT_LABELS: Record<EmplacementKind, string> = {
@@ -27,6 +27,53 @@ function formatRoundClock(seconds: number): string {
   const mins = Math.floor(total / 60);
   return `${mins}:${String(total % 60).padStart(2, '0')}`;
 }
+
+/** http(s) origin for an address typed as ws://, wss://, http:// or host:port. */
+function httpOriginOf(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (/^wss:\/\//i.test(trimmed)) return trimmed.replace(/^wss:\/\//i, 'https://');
+  if (/^ws:\/\//i.test(trimmed)) return trimmed.replace(/^ws:\/\//i, 'http://');
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const protocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https://' : 'http://';
+  return protocol + trimmed;
+}
+
+/** The form NetworkClient takes: ws:// or wss://, matching the page protocol. */
+function wsAddressOf(raw: string): string {
+  return httpOriginOf(raw).replace(/^http/i, 'ws');
+}
+
+const CUSTOM_SERVERS_KEY = 'voxel-fps.custom-servers';
+
+/** Servers this player has joined before, newest first. */
+function readSavedServers(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CUSTOM_SERVERS_KEY) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberServer(address: string): void {
+  const origin = httpOriginOf(address);
+  if (!origin) return;
+  try {
+    const next = [origin, ...readSavedServers().filter((entry) => httpOriginOf(entry) !== origin)].slice(0, 5);
+    localStorage.setItem(CUSTOM_SERVERS_KEY, JSON.stringify(next));
+  } catch {
+    // Private browsing: remembering servers is a convenience, not a requirement.
+  }
+}
+
+/** One row in the lobby's "servers found" list. */
+type ServerProbe = {
+  origin: string;
+  name: string;
+  state: 'checking' | 'online' | 'offline';
+  players?: number;
+};
 
 type StartMode = 'multiplayer' | 'singleplayer' | 'online' | 'beta';
 
@@ -126,6 +173,9 @@ function App() {
   const [modalTeam, setModalTeam] = useState<'blue' | 'red'>('blue');
   const [serverUrl, setServerUrl] = useState<string | undefined>(undefined);
   const [copiedInvite, setCopiedInvite] = useState(false);
+  const [serverProbes, setServerProbes] = useState<ServerProbe[]>([]);
+  const [probeRound, setProbeRound] = useState(0);
+  const pageOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 
   // Auto-launch support for automated previewing and AI testing via URL query parameters (?mode=spectator, ?mode=bots, ?mode=online)
   useEffect(() => {
@@ -165,6 +215,75 @@ function App() {
     document.addEventListener('pointerlockchange', handleLockChange);
     return () => document.removeEventListener('pointerlockchange', handleLockChange);
   }, []);
+
+  // Server discovery: list this origin, every entry in public/servers.json and
+  // every server this player joined before, then ask each one's /api/status
+  // whether it is up. The probe is a CORS-enabled GET the server already
+  // exposes, so a dead host shows as an offline row instead of a failed join.
+  useEffect(() => {
+    if (!showMultiplayerModal || typeof window === 'undefined') return;
+    let cancelled = false;
+    const here = window.location.origin;
+
+    const probeOne = async (origin: string) => {
+      let state: ServerProbe['state'] = 'offline';
+      let players: number | undefined;
+      try {
+        // An https page cannot probe an http server: mixed content is blocked
+        // by the browser, so report it as offline without a console error.
+        const blocked = window.location.protocol === 'https:' && origin.startsWith('http:');
+        if (!blocked) {
+          const response = await fetch(`${origin}/api/status`, {
+            cache: 'no-store',
+            signal: AbortSignal.timeout(2000),
+          });
+          if (response.ok) {
+            const status = await response.json();
+            state = 'online';
+            players = typeof status?.connectedPlayers === 'number' ? status.connectedPlayers : undefined;
+          }
+        }
+      } catch {
+        state = 'offline';
+      }
+      if (cancelled) return;
+      setServerProbes((current) => current.map((probe) => (probe.origin === origin ? { ...probe, state, players } : probe)));
+    };
+
+    const discover = async () => {
+      const candidates: Array<{ name: string; origin: string }> = [{ name: 'This server', origin: here }];
+      try {
+        const response = await fetch(`${here}/servers.json`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+        if (response.ok) {
+          const data = await response.json();
+          const list = Array.isArray(data) ? data : data?.servers;
+          if (Array.isArray(list)) {
+            for (const entry of list) {
+              if (entry && typeof entry.url === 'string') {
+                candidates.push({ name: String(entry.name ?? entry.url), origin: httpOriginOf(entry.url) });
+              }
+            }
+          }
+        }
+      } catch {
+        // A host without a server list still works: the page origin is listed.
+      }
+      for (const saved of readSavedServers()) candidates.push({ name: 'Saved server', origin: httpOriginOf(saved) });
+
+      const seen = new Set<string>();
+      const unique = candidates.filter((candidate) => {
+        if (!candidate.origin || seen.has(candidate.origin)) return false;
+        seen.add(candidate.origin);
+        return true;
+      });
+      if (cancelled) return;
+      setServerProbes(unique.map((candidate) => ({ origin: candidate.origin, name: candidate.name, state: 'checking' })));
+      await Promise.all(unique.map((candidate) => probeOne(candidate.origin)));
+    };
+
+    void discover();
+    return () => { cancelled = true; };
+  }, [showMultiplayerModal, probeRound]);
 
   useEffect(() => {
     if (!canvasRef.current || gameRef.current || !gameMode) return;
@@ -240,6 +359,7 @@ function App() {
 
   const handleDeployMultiplayer = () => {
     const target = serverType === 'custom' && customServerUrl.trim() ? customServerUrl.trim() : undefined;
+    if (target) rememberServer(target);
     handleStart('online', modalTeam, target);
     setShowMultiplayerModal(false);
   };
@@ -486,6 +606,77 @@ function App() {
               <label className="block text-xs font-semibold uppercase tracking-wider text-gray-400 mb-2">
                 1. Choose Server
               </label>
+
+              {/* Live server list: the page origin, public/servers.json and
+                  remembered servers, each asked whether it is up. */}
+              <div className="mb-3 rounded-xl border border-gray-800 bg-gray-950/70 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1.5">
+                    <RadioTower className="w-3.5 h-3.5 text-emerald-400" /> Servers found
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setProbeRound((round) => round + 1)}
+                    className="text-[11px] text-gray-400 hover:text-white flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" /> Check again
+                  </button>
+                </div>
+                <div className="space-y-1.5">
+                  {serverProbes.map((probe) => {
+                    const selected = serverType === 'default'
+                      ? probe.origin === pageOrigin
+                      : probe.origin === httpOriginOf(customServerUrl);
+                    return (
+                      <button
+                        key={probe.origin}
+                        type="button"
+                        onClick={() => {
+                          if (probe.origin === pageOrigin) {
+                            setServerType('default');
+                          } else {
+                            setServerType('custom');
+                            setCustomServerUrl(wsAddressOf(probe.origin));
+                          }
+                        }}
+                        className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border text-left text-xs transition-colors cursor-pointer ${
+                          selected ? 'bg-blue-950/40 border-blue-500' : 'bg-gray-900/60 border-gray-800 hover:border-gray-600'
+                        }`}
+                      >
+                        <span className="flex items-center gap-2 min-w-0">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            probe.state === 'online' ? 'bg-emerald-400'
+                              : probe.state === 'checking' ? 'bg-amber-400 animate-pulse'
+                              : 'bg-gray-600'
+                          }`} />
+                          <span className="truncate">
+                            <span className="font-semibold text-gray-200">{probe.name}</span>
+                            <span className="ml-1.5 font-mono text-[11px] text-gray-500">
+                              {probe.origin.replace(/^https?:\/\//, '')}
+                            </span>
+                          </span>
+                        </span>
+                        <span className={`shrink-0 text-[11px] font-mono ${
+                          probe.state === 'online' ? 'text-emerald-400'
+                            : probe.state === 'checking' ? 'text-amber-400'
+                            : 'text-gray-500'
+                        }`}>
+                          {probe.state === 'online'
+                            ? (probe.players !== undefined ? `${probe.players} online` : 'online')
+                            : probe.state === 'checking' ? 'checking…' : 'offline'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {serverProbes.length === 0 && (
+                    <p className="text-[11px] text-gray-500">Looking for servers…</p>
+                  )}
+                </div>
+                <p className="mt-2 text-[10px] text-gray-500">
+                  Lists this server, everything in <span className="font-mono">public/servers.json</span>, and servers you joined before.
+                </p>
+              </div>
+
               <div className="grid grid-cols-2 gap-3 mb-3">
                 <button
                   type="button"
@@ -534,7 +725,7 @@ function App() {
                     type="text"
                     value={customServerUrl}
                     onChange={(e) => setCustomServerUrl(e.target.value)}
-                    placeholder="ws://localhost:3000 or wss://..."
+                    placeholder="192.168.1.24:3000, ws://localhost:3000 or wss://..."
                     className="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 font-mono"
                   />
                 </div>

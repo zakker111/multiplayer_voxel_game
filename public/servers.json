@@ -1,0 +1,6 @@
+{
+  "comment": "Servers the in-game lobby checks. Add your own as { \"name\": ..., \"url\": \"http://host:port\" } (ws://, wss:// and bare host:port also work). The lobby always lists the server that served this page, so a local game does not need an entry here.",
+  "servers": [
+    { "name": "Local server (this computer)", "url": "http://localhost:3000" }
+  ]
+}

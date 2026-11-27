@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "serve": "node scripts/start-local.mjs",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild scripts/admin.ts --bundle --platform=node --format=cjs --outfile=dist/admin.cjs --log-level=error",
     "build:server": "esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "build:admin": "esbuild scripts/admin.ts --bundle --platform=node --format=cjs --outfile=dist/admin.cjs --log-level=error",
