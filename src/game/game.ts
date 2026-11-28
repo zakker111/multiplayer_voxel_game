@@ -2188,6 +2188,48 @@ export class Game {
     this.applyJeeps(this.localJeeps);
   }
 
+  /** Ray versus an enemy build offline; the same oriented box the server uses,
+   *  so a shot that hits online hits in the Beta too. */
+  private hitLocalEmplacement(
+    origin: THREE.Vector3, direction: THREE.Vector3, maxDist: number,
+  ): { emplacement: EmplacementSnapshot; distance: number } | null {
+    let best: { emplacement: EmplacementSnapshot; distance: number } | null = null;
+    for (const emplacement of this.localEmplacements) {
+      if (emplacement.wreck || emplacement.team === this.playerTeam) continue;
+      const spec = emplacementSpec(emplacement.kind);
+      if (!spec) continue;
+      let near = 0;
+      let far = maxDist;
+      const cos = Math.cos(emplacement.yaw);
+      const sin = Math.sin(emplacement.yaw);
+      const dx = origin.x - emplacement.position.x;
+      const dz = origin.z - emplacement.position.z;
+      const localX = cos * dx - sin * dz;
+      const localZ = sin * dx + cos * dz;
+      const localDirX = cos * direction.x - sin * direction.z;
+      const localDirZ = sin * direction.x + cos * direction.z;
+      const slabs: Array<[number, number, number, number]> = [
+        [localX, localDirX, -spec.halfWidth, spec.halfWidth],
+        [origin.y, direction.y, emplacement.position.y, emplacement.position.y + spec.height],
+        [localZ, localDirZ, -spec.halfLength, spec.halfLength],
+      ];
+      let missed = false;
+      for (const [o, d, low, high] of slabs) {
+        if (Math.abs(d) < 1e-8) {
+          if (o < low || o > high) { missed = true; break; }
+          continue;
+        }
+        const a = (low - o) / d;
+        const b = (high - o) / d;
+        near = Math.max(near, Math.min(a, b));
+        far = Math.min(far, Math.max(a, b));
+      }
+      if (missed || near > far || near > maxDist) continue;
+      if (!best || near < best.distance) best = { emplacement, distance: Math.max(0, near) };
+    }
+    return best;
+  }
+
   /** Damage a build offline; a wrecked one takes its gunner down with it. */
   private damageLocalEmplacement(id: string, damage: number): void {
     const emplacement = this.localEmplacements.find(e => e.id === id);
@@ -2211,7 +2253,11 @@ export class Game {
     this.localEmplacementFireAt.delete(id);
     this.localWreckExpiry.set(`build:${id}`, this.localTime + WRECK_LIFETIME_SECONDS);
     this.applyEmplacements(this.localEmplacements);
-    this.showMessage(`💥 Your ${emplacement.kind} was destroyed — it is smoking out`);
+    // The same crash lands on the enemy's build when the player shoots one, so
+    // the line has to say whose it was.
+    this.showMessage(emplacement.team === this.playerTeam
+      ? `💥 Your ${emplacement.kind} was destroyed — it is smoking out`
+      : `💥 Enemy ${emplacement.kind} destroyed — it is smoking out`);
   }
 
   /** Shots from a build land like player shots: hp, flinch, hit marker, and the
@@ -5987,6 +6033,20 @@ export class Game {
           }
         }
       }
+    }
+
+    // A placed structure stops the round like the server's own ray does: same
+    // oriented box, same priority against a body behind it. Jeeps died offline
+    // but builds did not, because this test was missing.
+    const structureHit = this.hitLocalEmplacement(cameraPos, dir, closestTargetDist);
+    if (structureHit) {
+      closestTargetDist = structureHit.distance;
+      actualImpactPoint = cameraPos.clone().add(dir.clone().multiplyScalar(structureHit.distance));
+      hitBot = null; // the sandbags stopped the round before any body behind them
+      this.damageLocalEmplacement(structureHit.emplacement.id, weaponDamage(weapon, false, structureHit.distance));
+      this.hitMarkerTimer = 0.25;
+      this.sounds.hitMarker();
+      this.createImpactSparks(actualImpactPoint);
     }
 
     // An enemy workshop jeep takes the round too, crewed or not: every build
