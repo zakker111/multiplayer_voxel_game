@@ -128,22 +128,41 @@ const MODE_LOADING: Record<StartMode, { name: string; blurb: string; tips: strin
   },
 };
 
-/** How long an online start waits for a real server connection before the
- *  loading screen gives up and offers Try again / Back to menu. A WebSocket
- *  handshake plus the init snapshot takes a couple of seconds on a good link,
- *  so a few seconds of silence means nobody is going to answer. */
-const ONLINE_CONNECT_TIMEOUT_MS = 8000;
+/** When the loading screen admits the wait is longer than usual. Silence here
+ *  is not failure: the client keeps re-dialling on its own, so this only adds a
+ *  line of reassurance under the progress bar. */
+const ONLINE_NOTICE_MS = 8000;
+
+/** When an online start finally concludes that nothing is answering. A refused
+ *  socket is the fast case; a Render instance waking from idle or a tunnel that
+ *  has to re-establish can take the better part of a minute, and NetworkClient
+ *  re-dials two seconds after a dead transport in the meantime. Tearing the
+ *  game down at the first few seconds of silence threw away sessions that were
+ *  about to come up, so the error card waits for this much uninterrupted
+ *  silence instead. */
+const ONLINE_GIVE_UP_MS = 60000;
 
 /**
  * Resolve true once the online session has a real server connection, and false
- * at the deadline. `connect()` resolves even when no transport ever came up, so
- * the connection itself is what a starting match has to wait on. */
-function waitForServerConnection(game: Game, timeoutMs: number): Promise<boolean> {
+ * only after `giveUpMs` of silence. `connect()` resolves even when no transport
+ * ever came up, so the connection itself is what a starting match has to wait
+ * on; `onNotice` fires once when the wait outlives `noticeMs` so the loading
+ * screen can say it is still trying instead of looking stuck. */
+function waitForServerConnection(
+  game: Game,
+  { noticeMs, giveUpMs, onNotice }: { noticeMs: number; giveUpMs: number; onNotice: () => void },
+): Promise<boolean> {
   return new Promise((resolve) => {
     const startedAt = performance.now();
+    let noticed = false;
     const poll = () => {
       if (game.networkClient?.isConnected()) { resolve(true); return; }
-      if (performance.now() - startedAt >= timeoutMs) { resolve(false); return; }
+      const elapsed = performance.now() - startedAt;
+      if (!noticed && elapsed >= noticeMs) {
+        noticed = true;
+        onNotice();
+      }
+      if (elapsed >= giveUpMs) { resolve(false); return; }
       window.setTimeout(poll, 200);
     };
     poll();
@@ -192,6 +211,7 @@ function App() {
   const [started, setStarted] = useState(false);
   const [gameMode, setGameMode] = useState<StartMode | null>(null);
   const [loadError, setLoadError] = useState('');
+  const [loadNotice, setLoadNotice] = useState('');
   const [bootAttempt, setBootAttempt] = useState(0);
   const [selectedTeam, setSelectedTeam] = useState<'red' | 'blue'>('blue');
   const [isPointerLocked, setIsPointerLocked] = useState(false);
@@ -205,6 +225,7 @@ function App() {
   const [modalTeam, setModalTeam] = useState<'blue' | 'red'>('blue');
   const [serverUrl, setServerUrl] = useState<string | undefined>(undefined);
   const [copiedInvite, setCopiedInvite] = useState(false);
+  const [copiedServer, setCopiedServer] = useState('');
   const [serverProbes, setServerProbes] = useState<ServerProbe[]>([]);
   const [probeRound, setProbeRound] = useState(0);
   const pageOrigin = typeof window !== 'undefined' ? window.location.origin : '';
@@ -352,6 +373,7 @@ function App() {
     const boot = async () => {
       try {
         setLoadError('');
+        setLoadNotice('');
         await nextPaint();
         if (cancelled) return;
 
@@ -364,14 +386,25 @@ function App() {
 
         // Online play is server-authoritative: with nothing answering, the match
         // has no state and every build/mine/shoot is dropped. Wait for a real
-        // connection, and if none arrives say so here rather than leaving the
-        // player on DEPLOYING with no error and no way out.
+        // connection while the client keeps retrying, and only if nothing
+        // answers at all say so here rather than leaving the player on
+        // DEPLOYING with no error and no way out.
         if (gameMode === 'online' || (gameMode === 'beta' && !!serverUrl?.trim())) {
-          const connected = await waitForServerConnection(game, ONLINE_CONNECT_TIMEOUT_MS);
+          const connected = await waitForServerConnection(game, {
+            noticeMs: ONLINE_NOTICE_MS,
+            giveUpMs: ONLINE_GIVE_UP_MS,
+            onNotice: () => {
+              if (cancelled) return;
+              setLoadNotice(
+                'Still trying to reach the server — a cold host or a tunnel can take up to a minute. The match starts as soon as it answers.',
+              );
+            },
+          });
           if (cancelled) return;
+          setLoadNotice('');
           if (!connected) {
             const target = serverUrl?.trim() ? serverUrl.replace(/^wss?:\/\//, '') : window.location.host;
-            console.warn(`No game server answered at ${target} within ${ONLINE_CONNECT_TIMEOUT_MS}ms`);
+            console.warn(`No game server answered at ${target} within ${ONLINE_GIVE_UP_MS}ms`);
             gameRef.current = null;
             try {
               game.destroy();
@@ -427,8 +460,23 @@ function App() {
 
   const backToMenu = () => {
     setLoadError('');
+    setLoadNotice('');
     setGameMode(null);
     pendingSpectatorRef.current = false;
+  };
+
+  /** A server the browser blocks cannot be selected from its row, so the row
+   *  offers the address instead: pasted into a new tab it opens that server
+   *  directly, and pasted into an https client it can be joined from there. */
+  const copyServerAddress = (origin: string) => {
+    try {
+      navigator.clipboard.writeText(origin).then(() => {
+        setCopiedServer(origin);
+        setTimeout(() => setCopiedServer((current) => (current === origin ? '' : current)), 2500);
+      }).catch((err) => console.error('Failed to copy server address', err));
+    } catch (err) {
+      console.error('Failed to copy server address', err);
+    }
   };
 
   const copyInviteLink = (targetTeam?: 'red' | 'blue') => {
@@ -576,6 +624,9 @@ function App() {
                 {loadError || 'Loading the arena — this can take a moment on slower devices.'}
               </span>
             </div>
+            {loadNotice && !loadError && (
+              <p className="mb-2 text-[11px] leading-relaxed text-amber-300/90">{loadNotice}</p>
+            )}
             {!loadError && (
               <div
                 className="relative h-3 overflow-hidden rounded-full border border-gray-700 bg-gray-800"
@@ -585,6 +636,16 @@ function App() {
               >
                 <div className="loading-bar-indeterminate absolute inset-y-0 left-0 w-1/3 rounded-full bg-gradient-to-r from-blue-500 via-emerald-400 to-[#00ff88]" />
               </div>
+            )}
+
+            {loadNotice && !loadError && (
+              <button
+                type="button"
+                onClick={backToMenu}
+                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-xs font-semibold text-gray-300 transition-colors hover:bg-gray-700 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" /> Back to menu
+              </button>
             )}
 
             {loadError && (
@@ -686,42 +747,67 @@ function App() {
                     const selected = probe.origin === chosenOrigin;
                     const blocked = probe.state === 'blocked';
                     return (
-                      <button
+                      <div
                         key={probe.origin}
-                        type="button"
-                        disabled={blocked}
-                        title={blocked ? 'This page is https, so the browser blocks an http server. Open the server URL directly.' : undefined}
-                        onClick={() => setCustomServerUrl(probe.origin === pageOrigin ? '' : wsAddressOf(probe.origin))}
-                        className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border text-left text-xs transition-colors ${
-                          blocked ? 'bg-gray-900/40 border-gray-800 opacity-60 cursor-not-allowed'
-                            : selected ? 'bg-blue-950/40 border-blue-500 cursor-pointer'
-                            : 'bg-gray-900/60 border-gray-800 hover:border-gray-600 cursor-pointer'
+                        className={`w-full rounded-lg border text-xs transition-colors ${
+                          blocked ? 'bg-gray-900/40 border-amber-900/50'
+                            : selected ? 'bg-blue-950/40 border-blue-500'
+                            : 'bg-gray-900/60 border-gray-800 hover:border-gray-600'
                         }`}
                       >
-                        <span className="flex items-center gap-2 min-w-0">
-                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                            probe.state === 'online' ? 'bg-emerald-400'
-                              : probe.state === 'checking' ? 'bg-amber-400 animate-pulse'
-                              : 'bg-gray-600'
-                          }`} />
-                          <span className="truncate">
-                            <span className="font-semibold text-gray-200">{probe.name}</span>
-                            <span className="ml-1.5 font-mono text-[11px] text-gray-500">
-                              {probe.origin.replace(/^https?:\/\//, '')}
+                        <div className="flex items-center justify-between gap-2 px-2.5 py-2">
+                          <button
+                            type="button"
+                            disabled={blocked}
+                            title={blocked ? `The browser blocks ${probe.origin} from this https page. Copy the address, or use the server's https address.` : undefined}
+                            onClick={() => setCustomServerUrl(probe.origin === pageOrigin ? '' : wsAddressOf(probe.origin))}
+                            className={`flex flex-1 items-center gap-2 min-w-0 text-left ${blocked ? 'cursor-default opacity-60' : 'cursor-pointer'}`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              probe.state === 'online' ? 'bg-emerald-400'
+                                : probe.state === 'checking' ? 'bg-amber-400 animate-pulse'
+                                : blocked ? 'bg-amber-600' : 'bg-gray-600'
+                            }`} />
+                            <span className="truncate">
+                              <span className="font-semibold text-gray-200">{probe.name}</span>
+                              <span className="ml-1.5 font-mono text-[11px] text-gray-500">
+                                {probe.origin.replace(/^https?:\/\//, '')}
+                              </span>
                             </span>
+                          </button>
+                          <span className="flex shrink-0 items-center gap-2">
+                            <span className={`text-[11px] font-mono ${
+                              probe.state === 'online' ? 'text-emerald-400'
+                                : probe.state === 'checking' ? 'text-amber-400'
+                                : blocked ? 'text-amber-300/80' : 'text-gray-500'
+                            }`}>
+                              {probe.state === 'online'
+                                ? (probe.players !== undefined ? `${probe.players} online` : 'online')
+                                : probe.state === 'checking' ? 'checking…'
+                                : blocked ? 'needs https' : 'offline'}
+                            </span>
+                            {blocked && (
+                              <button
+                                type="button"
+                                onClick={() => copyServerAddress(probe.origin)}
+                                title={`Copy ${probe.origin}`}
+                                className="inline-flex items-center gap-1 rounded-md border border-gray-700 bg-gray-800 px-2 py-1 text-[10px] font-semibold text-gray-200 transition-colors hover:bg-gray-700 cursor-pointer"
+                              >
+                                {copiedServer === probe.origin
+                                  ? <><Check className="w-3 h-3 text-emerald-400" /> Copied</>
+                                  : <><Copy className="w-3 h-3" /> Copy address</>}
+                              </button>
+                            )}
                           </span>
-                        </span>
-                        <span className={`shrink-0 text-[11px] font-mono ${
-                          probe.state === 'online' ? 'text-emerald-400'
-                            : probe.state === 'checking' ? 'text-amber-400'
-                            : 'text-gray-500'
-                        }`}>
-                          {probe.state === 'online'
-                            ? (probe.players !== undefined ? `${probe.players} online` : 'online')
-                            : probe.state === 'checking' ? 'checking…'
-                            : blocked ? 'needs https' : 'offline'}
-                        </span>
-                      </button>
+                        </div>
+                        {blocked && (
+                          <p className="px-2.5 pb-2 text-[10px] leading-relaxed text-amber-300/80">
+                            This page is https, so the browser refuses <span className="font-mono">{probe.origin}</span>. Open
+                            that address in its own tab to play there, or put the game behind https and use its https
+                            address in this list instead.
+                          </p>
+                        )}
+                      </div>
                     );
                   })}
                   {serverProbes.length === 0 && (
@@ -1088,7 +1174,7 @@ function App() {
                     <span>
                       {gameState.blueFlagStatus === 'captured' ? `✨ Captured! (Respawn in ${Math.ceil(gameState.blueFlagTimer || 0)}s)` :
                        gameState.blueFlagStatus === 'carried' ? '🏃 Taken by Enemy!' :
-                       gameState.blueFlagStatus === 'dropped' ? `⚠️ Dropped (${Math.ceil(gameState.blueFlagTimer || 0)}s)` :
+                       gameState.blueFlagStatus === 'dropped' ? (gameState.blueFlagTimer ? `⚠️ Dropped (${Math.ceil(gameState.blueFlagTimer)}s)` : '⚠️ Dropped') :
                        '🛡️ At Base'}
                     </span>
                   </div>
@@ -1102,7 +1188,7 @@ function App() {
                     <span>
                       {gameState.redFlagStatus === 'captured' ? `✨ Captured! (Respawn in ${Math.ceil(gameState.redFlagTimer || 0)}s)` :
                        gameState.redFlagStatus === 'carried' ? '🏃 Taken by Enemy!' :
-                       gameState.redFlagStatus === 'dropped' ? `⚠️ Dropped (${Math.ceil(gameState.redFlagTimer || 0)}s)` :
+                       gameState.redFlagStatus === 'dropped' ? (gameState.redFlagTimer ? `⚠️ Dropped (${Math.ceil(gameState.redFlagTimer)}s)` : '⚠️ Dropped') :
                        '🛡️ At Base'}
                     </span>
                   </div>

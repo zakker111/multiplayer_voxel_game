@@ -8624,8 +8624,29 @@ export class Game {
   private emitState(): void {
     if (this.onStateChange) {
       const weapon = this.weapons[this.equipment];
+      // Online play keeps `flag.carrier` null on purpose: the server owns who
+      // holds what (`server*FlagCarrierId`), and the visual flag stays hidden at
+      // its post while a carrier wears the backpack copy. Reading the flag
+      // objects there made every badge say "At Base" while a bot ran with the
+      // flag, and hid enemy carriers from the carrier line. Offline matches
+      // still have real carriers on the flag objects, so each mode reads its own.
+      const serverFlags = this.gameMode === 'online';
+      const carrierNameOf = (id: string | null): string => {
+        if (!id) return '';
+        if (id === this.localPlayerId) return `You (${this.playerTeam.toUpperCase()})`;
+        const remote = this.remotePlayers.get(id);
+        const state = remote?.state;
+        if (!state) return '';
+        const name = state.name ?? 'Soldier';
+        return state.team ? `${name} (${state.team.toUpperCase()})` : name;
+      };
+
       let carrierName = '';
-      if (this.player.carryingFlag) {
+      if (serverFlags) {
+        carrierName = this.player.carryingFlag
+          ? `You (${this.playerTeam.toUpperCase()})`
+          : carrierNameOf(this.serverRedFlagCarrierId) || carrierNameOf(this.serverBlueFlagCarrierId);
+      } else if (this.player.carryingFlag) {
         carrierName = `You (${this.playerTeam.toUpperCase()})`;
       } else if (this.redFlag?.carrier) {
         carrierName = `${this.redFlag.carrier.name} (${this.redFlag.carrier.isPlayer ? this.playerTeam.toUpperCase() : this.redFlag.carrier.bot?.team.toUpperCase()})`;
@@ -8639,11 +8660,11 @@ export class Game {
         if (this.blueFlag.isCaptured) {
           blueFlagStatus = 'captured';
           blueFlagTimer = this.blueFlag.capturedTimer;
-        } else if (this.blueFlag.carrier) {
+        } else if (serverFlags ? this.serverBlueFlagCarrierId !== null : !!this.blueFlag.carrier) {
           blueFlagStatus = 'carried';
-        } else if (this.blueFlag.isDropped) {
+        } else if (serverFlags ? !this.serverBlueFlagAtBase : this.blueFlag.isDropped) {
           blueFlagStatus = 'dropped';
-          blueFlagTimer = this.blueFlag.dropTimer;
+          blueFlagTimer = serverFlags ? 0 : this.blueFlag.dropTimer;
         }
       }
 
@@ -8653,11 +8674,11 @@ export class Game {
         if (this.redFlag.isCaptured) {
           redFlagStatus = 'captured';
           redFlagTimer = this.redFlag.capturedTimer;
-        } else if (this.redFlag.carrier) {
+        } else if (serverFlags ? this.serverRedFlagCarrierId !== null : !!this.redFlag.carrier) {
           redFlagStatus = 'carried';
-        } else if (this.redFlag.isDropped) {
+        } else if (serverFlags ? !this.serverRedFlagAtBase : this.redFlag.isDropped) {
           redFlagStatus = 'dropped';
-          redFlagTimer = this.redFlag.dropTimer;
+          redFlagTimer = serverFlags ? 0 : this.redFlag.dropTimer;
         }
       }
 

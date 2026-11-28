@@ -71,6 +71,12 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
 
 1. **🌐 Online Multiplayer (`'online'` client mode)**:
    - Interactive lobby: a **probed server list** (this page's own origin, entries in `public/servers.json`, servers joined before) plus an address field for anything else, custom callsign, team pick (Blue/Red). Invite links via `?mode=online&team=red`.
+     A probe that returns `blocked` (an http origin while the page is https) is not an
+     offline server: the row is outlined amber, keeps its `needs https` badge, explains
+     that the browser refuses the address, and carries its own **Copy address** button
+     (`copyServerAddress`, 2.5 s `Copied` state) because the row itself is disabled and
+     cannot be clicked. The address opens that server directly in its own tab; the https
+     address of the same server can be selected normally.
    - Server synchronizes players, positions, equipment, flag states, voxel modifications, and match scores at 20Hz. Teams are kept at 10v10 by retiring a bot when a human joins that team and backfilling a bot when a human leaves/is kicked/disconnects.
    - Legacy client-side bots are DISABLED in online mode (server owns all bots) to prevent duplicates.
 2. **🤖 Bot Match (`'multiplayer'` client mode)**:
@@ -139,6 +145,14 @@ percentages and no staged timers: the overlay clears only after
 - There is no 2-player test launcher any more. To test two clients, open a
   second tab or device with `?mode=online&team=red` (or use the in-game invite
   link).
+- An online start waits on a **real** connection with two budgets, not one:
+  `ONLINE_NOTICE_MS` (8 s) only adds a "still trying" line and a **Back to menu**
+  button under the bar, and `ONLINE_GIVE_UP_MS` (60 s) of uninterrupted silence
+  is what destroys the game and shows the dead-server card. `NetworkClient`
+  re-dials two seconds after a dead transport on its own; killing the game at
+  8 s threw away sessions (cold host, re-establishing tunnel) that were about
+  to come up. `waitForServerConnection` resolves the moment any transport
+  connects, so a late answer still starts the match.
 
 ---
 
@@ -365,6 +379,13 @@ rate-limited to one action per 2.5s and capped at four attempts:
   world position**, and each frame the bearing is recomputed with
   `relativeBearingDegrees()` (shared, pure) so the arc keeps pointing at the
   shooter while you turn. Degrees: 0 = ahead, +90 = right, ±180 = behind.
+- Flag badges / carrier line: offline matches read `flag.carrier`,
+  `isDropped` and `isCaptured`, but **online play keeps `flag.carrier` null on
+  purpose** (the server owns the carrier, and the visual flag is hidden at its
+  post while the carrier wears the backpack copy). `emitState()` therefore reads
+  `server*FlagCarrierId` / `server*FlagAtBase` when `gameMode === 'online'` and
+  resolves the carrier's name from `remotePlayers`; reading the flag objects
+  there made every badge say "At Base" while a bot ran with the flag.
 - `pingMs`: the client sends `{ type: 'ping', t }` every 2s and the server echoes
   `{ type: 'pong', t }`; the HUD shows the round-trip time (green/amber/red).
 - `tests/feedback.test.mjs` covers the shield on both damage paths, regen timing

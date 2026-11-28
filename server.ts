@@ -70,7 +70,7 @@ async function startServer() {
       serverTime: Date.now(),
       connectedPlayers: wss.clients.size,
       tickRate: 20,
-      version: '1.5.0',
+      version: '1.6.0',
       // Live head-count (bots included): `connectedPlayers` is sockets only, so
       // an active bot match would otherwise look empty to monitoring.
       roster: game.getRosterCounts(),

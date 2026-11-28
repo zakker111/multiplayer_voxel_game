@@ -1,6 +1,6 @@
 {
   "name": "voxel-fps",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Fast-paced 3D Voxel FPS Capture The Flag multiplayer game with destructible terrain, WW2 weapons, and tactical AI bots built with Three.js, React, and TypeScript.",
   "license": "MIT",
   "type": "module",
