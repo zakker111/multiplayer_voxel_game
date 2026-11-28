@@ -90,7 +90,8 @@ engineers may dig one forward firebase 40–95m short of the enemy stand. Suppor
 engineers build a main structure on their post, then a 10m side annex when the
 site is quiet and blocks remain. Non-engineers keep attacking or holding the
 post; panic cover remains available to everyone. A `GRABFLAG` runner alone at
-25–90m pauses up to 2.5s for a teammate before pushing.
+110–200m pauses up to 2.5s for a teammate before pushing (the stuck detector
+counts that pause as stationary by design).
 
 Every bot is humanised: a 0.25–0.55s target-acquisition delay, an ~8° aim cone,
 distance-based hit falloff, weapon-aware kiting, reload-and-reposition instead of
@@ -135,7 +136,7 @@ Client → server: `join`, `playerInput`, `shoot`, `useTool`, `build`, `reload`,
 
 ## Tests
 
-From the repository root: `npm test` (96 `node:test` cases). The suites load the
+From the repository root: `npm test` (305 `node:test` cases). The suites load the
 real `serverGame` / `serverWorld` / `serverBot` bundles from `dist/tests/`, so
 they exercise real behaviour: voxel build/mine rules, bot trench building and
 stuck-state handling, engineer assignment and forward-base/annex construction,

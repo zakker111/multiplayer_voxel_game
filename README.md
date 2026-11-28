@@ -5,7 +5,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 ![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/typescript-5.7+-blue.svg)
-![Tests](https://img.shields.io/badge/tests-302%2F302%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-305%2F305%20passing-brightgreen.svg)
 
 ---
 
@@ -21,7 +21,7 @@ A high-performance, full-stack 3D voxel first-person shooter with Red vs Blue Ca
 - **🧱 Destructible & Buildable Voxel World**: Procedural terrain; gunfire blasts voxels (3 hits), spade digs trenches, pickaxe harvests blocks into inventory. Building supports stacking, bridging, and tower play — placement validated by a unified client/server `canBuild()` flood-fill (structural support + adjacency), so what you see is what the server accepts.
 - **🎯 Crew-Served Guns**: Blueprint builds include MG nests, cannons, mortars, supply crates and spotting posts. Press **F** to man one: your hand weapon disappears so the seat reads clearly, a cannon or mortar gets a right-click gunner zoom, and the mortar HUD prints its landing point (**X / Z / range**) while every round scatters inside the blast ring instead of cratering the same tile.
 - **🛠️ Dismantle Your Own Builds (online)**: Press **X** next to a friendly emplacement to tear it down; its blueprint cost — and anything a supply crate held — goes back to the workshop stock, so a misplaced nest is no longer permanent. A crewed build comes down too: its gunner (bot or player) steps out through the same safe exit a wrecked build uses. The same key scuttles a friendly jeep in reach: its cost returns to the stock and its crew steps out, so a vehicle wedged in a doorway is not 40 blocks of dead weight for the round. Built voxel blocks already come back when the pickaxe breaks them.
-- **🏭 Team Workshops (online)**: Each team has a protected garage east of its base and a shared stockpile (starts at 50, capacity 200). Mine natural terrain with the pickaxe and press **E** near your workshop to deposit. Mined blocks can also be used for building; free respawn blocks and recovered built blocks cannot be deposited. Carried mined blocks are lost on respawn, and stockpiles reset each round. Jeeps are available for 40 team blocks.
+- **🏭 Team Workshops (online)**: Each team has a protected garage east of its base and a shared stockpile (starts at 80, capacity 200). Mine natural terrain with the pickaxe and press **E** near your workshop to deposit. Mined blocks can also be used for building; free respawn blocks and recovered built blocks cannot be deposited. Carried mined blocks are lost on respawn, and stockpiles reset each round. Jeeps are available for 40 team blocks.
 - **🚙 Blocky Jeeps (online)**: Press G near your team workshop to build a two-seat jeep for 40 team blocks (maximum two active per team). Press F to board an empty jeep as driver or a driven one as passenger; WASD drives and Space brakes. Vehicles are server-controlled, absorb enemy shots and leave a temporary wreck when destroyed. Flag carriers cannot ride, and drivers cannot pick up flags or fire. Leaving the driver's seat or losing the jeep also puts the passenger safely on the ground. Assault bots can build and drive jeeps toward objectives using the vehicle's real rectangular footprint; one bot per team drives while engineers and defenders stay on foot, and line bots hop into a free passenger seat when a driven team jeep comes within reach. A crewed jeep draws team-coloured driver and passenger figures in its seats, so it reads as occupied from outside.
 - **🧪 Beta Development Mode**: A menu option (`?mode=beta`) that runs the **full authoritative online code path** — workshops, jeeps and workshop logistics bots included — while online CTF stays the main game. Use it to playtest new server-side features before they land for everyone; the HUD shows a Beta badge.
 - **⏳ Mode-Aware Loading Screen**: Every start mode opens on a deployment screen with that mode's title and three field tips (workshop and jeep for Beta, crew-served guns for Online, flag runs for Bot Match, tools for Sandbox). The bar is indeterminate and sweeps until the first rendered frame — no simulated percentages or fixed waits, so a slow device never appears frozen at a fake "82%". If the arena fails to build, the screen keeps the tips and offers **Try again** / **Back to menu** instead of hanging.
@@ -111,7 +111,7 @@ already running — you drop into it with the team you choose.
    - **Hosted**: run the same launcher or `npm start` on a VPS, or use the
      Render/Docker setups in [DEPLOYMENT.md](DEPLOYMENT.md).
 3. **Joining** — open the server's URL, choose **Multiplayer**, and pick the
-   server in the list (below) or type the address into **Custom Server**. Invite
+   server in the list or type its address into the field under the list. Invite
    links carry the server too: `?mode=online&team=red&server=ws://host:port`.
 
 > One process serves both the web client and the authoritative WebSocket game
@@ -124,12 +124,16 @@ The **Multiplayer → Choose Server** box checks servers and shows whether each 
 is up, with its live socket count:
 
 - **This server** — the one that served the page, always listed.
-- **Entries from `public/servers.json`** — edit that file to advertise your own:
+- **Entries from `public/servers.json`** — a JSON array; add your own as
   `{ "name": "My LAN game", "url": "http://192.168.1.24:3000" }` (`ws://`,
-  `wss://` and bare `host:port` also work).
+  `wss://` and bare `host:port` also work). It ships empty: the page's own server
+  is always listed.
 - **Saved servers** — every server this browser has joined before.
 
-Click a row to select it, then **Connect & Deploy**. **Check again** re-probes.
+Click a row to select it, then **Connect & Deploy**; anything not listed goes in
+the address field underneath. **Check again** re-probes. An http server listed
+on an https page shows as **needs https** and cannot be clicked — the browser
+blocks that request, so open the server's own URL instead.
 The probe is a `GET /api/status`, which also returns `{ status, connectedPlayers,
 roster, round }` for scripts; `GET /api/health` is the minimal liveness check.
 
@@ -145,7 +149,7 @@ npm run dev
 
 # Full verification pipeline (used by CI)
 npm run lint      # tsc --noEmit
-npm test          # node --test tests/  (302 regression tests)
+npm test          # node --test tests/  (305 regression tests)
 npm run smoke     # live WS/HTTP/SSE check against a running server
 npm run build     # vite bundle + dist/server.cjs + dist/admin.cjs
 npm start         # production server (reads process.env.PORT)
@@ -213,7 +217,7 @@ Banned IPs/names are rejected at the WebSocket upgrade stage with a clear messag
 
 ## 🧪 Testing & Playtesting
 
-- **Automated**: `npm test` runs 294 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
+- **Automated**: `npm test` runs 305 regression tests against the real server classes — voxel build/mine rules (ground place, stack, bridge, reject mid-air/height/occupied, mine-to-destruction, collapse check), bot TRENCH construction and stuck-state handling, engineer assignment and forward-base/annex construction, workshop deposits/jeep economics, bot jeep driving and workshop logistics bots, rally staging, structure telemetry, CTF flag drop rules, spawn bounds, weapon balance, the round lifecycle, and the spawn-shield/regen/killfeed/latency layer. GitHub Actions CI (`ci.yml`) runs lint → build → test on every push/PR.
 - **Bot simulation**: `npm run measure:bots -- 30` runs a headless 30-minute bot-only round against the real server. It reports pickups, captures, deaths, structure starts and completions, blocks placed and stuck recoveries. On the old 448m layout (±160 stands with the spawn band only 32m behind them) runs produced 0–12 captures and 12–63 pickups; on the current 512m layout (±140 stands, ±210–240 spawns) two 30-minute runs produced 17 and 33 captures with 38 and 88 pickups, 381–411 deaths, 1428–3284 blocks and completed structures of every kind. Two samples per layout, so read the direction as measured and the exact numbers as noisy.
 - **Beta battle simulation**: `node scripts/beta-simulate.mjs 30 30 3 10 12345` runs three full 30-minute 10v10 matches on the real server tick loop (rounds, blueprints, jeeps, workshops and bots), reporting round-scoped captures, pickups, returns, flag droughts, hardware by kind, jeeps and stalls. The last argument is a seed, so the same command reproduces the report exactly (run *i* uses `seed + i - 1`); every run prints its seed and the banner prints the rerun command. The harness checks its own counters and throws instead of reporting an impossible number.
 - **Live smoke test**: with a server running on `SMOKE_PORT` (default 3110), `npm run smoke` drives WS join/input/respawn, malformed frames, the HTTP token auth path and the SSE init stream.

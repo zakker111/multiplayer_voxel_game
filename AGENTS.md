@@ -70,7 +70,7 @@ Welcome to the **Voxel FPS** codebase. This guide provides artificial intelligen
 ## 3. Game Modes & Lobby
 
 1. **🌐 Online Multiplayer (`'online'` client mode)**:
-   - Interactive lobby: **Official Server** (auto-detected `wss://` from page origin, or `ws://localhost:<PORT>` in dev) or a **Custom Server URL**, custom callsign, team pick (Blue/Red). Invite links via `?mode=online&team=red`.
+   - Interactive lobby: a **probed server list** (this page's own origin, entries in `public/servers.json`, servers joined before) plus an address field for anything else, custom callsign, team pick (Blue/Red). Invite links via `?mode=online&team=red`.
    - Server synchronizes players, positions, equipment, flag states, voxel modifications, and match scores at 20Hz. Teams are kept at 10v10 by retiring a bot when a human joins that team and backfilling a bot when a human leaves/is kicked/disconnects.
    - Legacy client-side bots are DISABLED in online mode (server owns all bots) to prevent duplicates.
 2. **🤖 Bot Match (`'multiplayer'` client mode)**:
@@ -279,7 +279,7 @@ the bot re-plans instead of pretending to dig. `BUILD` uses the same pool.
 
 ### Stuck detection & recovery
 `checkProgress()` samples displacement once per second (CAMP/TRENCH/BUILD/DEFEND
-are allowed to stand still). Two dead samples call `recoverFromStuck()`, which is
+and the `GRABFLAG` rally pause are allowed to stand still). Two dead samples call `recoverFromStuck()`, which is
 rate-limited to one action per 2.5s and capped at four attempts:
 1. mine the blocking voxel ahead (`ctx.digBlock` → `botDig()`, 3.5m reach check),
 2. otherwise re-route to a fresh sideways waypoint,
@@ -311,8 +311,11 @@ rate-limited to one action per 2.5s and capped at four attempts:
   `OBJECTIVE_COMMIT_RANGE` (24m) and only retreats below `OBJECTIVE_RETREAT_HP` (15%),
   and it fires on the move. Before this, any visible enemy (75m) cancelled the run.
 - **Rally staging**: a `GRABFLAG` runner with no teammate within 18m and no enemy
-  within 25m pauses for up to 2.5s when 25–90m from the stand, letting the next
-  wave form up. The timer is capped and resets on respawn.
+  within 25m pauses for up to 2.5s when 110–200m from the stand, letting the next
+  wave form up. The timer is capped and resets on respawn. `checkProgress()`
+  treats that pause as stationary by design: it used to fire 2.1s into it and
+  drop the run for a 4s `ADVANCE`, which was 86% of the stuck recoveries on
+  blue flag runs and half of all run abandonments.
 - **Measured objective activity**: `npm run measure:bots -- 30` runs a headless
   bot-only round with the real `ServerGame` and reports captures, pickups,
   deaths, structure starts/completions, blocks placed and stuck recoveries.
@@ -445,7 +448,7 @@ The single source of truth is `ClientMessage` in `src/shared/types.ts`.
 ```bash
 npm install
 npm run lint        # tsc --noEmit (client + server)
-npm test            # node --test tests/ — 294 regression tests (voxel rules, bots, rounds,
+npm test            # node --test tests/ — 305 regression tests (voxel rules, bots, rounds,
                     # workshop/jeep/logistics, spawn shield/regen, feedback, integrity)
                     # (pretest bundles src/server/serverWorld.ts, serverBot.ts, shared/types.ts into dist/tests/)
 npm run smoke       # live check against an already-running server (SMOKE_PORT, default 3110):
