@@ -445,11 +445,23 @@ async function startServer() {
   const MAX_CATCHUP_STEPS = 10; // at most half a second of sim per fire
   const tickClock = new TickClock(TICK_INTERVAL, MAX_CATCHUP_STEPS);
   let lastBehindLogMs = 0;
+  let lastTickErrorLogMs = 0;
   const gameInterval = setInterval(() => {
     const now = Date.now();
     const { steps, droppedSeconds } = tickClock.advance(now);
-    for (let i = 0; i < steps; i++) game.update(STEP_SECONDS);
-    game.broadcastState();
+    try {
+      for (let i = 0; i < steps; i++) game.update(STEP_SECONDS);
+      game.broadcastState();
+    } catch (error) {
+      // A throw from one frame used to escape this callback and take the whole
+      // process with it: one bad tick (bots, a build, a broadcast) ended every
+      // match on the server. Frames do not depend on each other, so log the
+      // first failure of a second and keep the round running.
+      if (now - lastTickErrorLogMs >= 1000) {
+        lastTickErrorLogMs = now;
+        log.error('game tick failed', (error as Error)?.stack ?? String(error));
+      }
+    }
     if (droppedSeconds > 0 && now - lastBehindLogMs >= 10_000) {
       lastBehindLogMs = now;
       log.warn(`game loop is behind: dropped ${droppedSeconds.toFixed(2)}s of simulation (host short of CPU)`);
