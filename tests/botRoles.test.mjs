@@ -49,6 +49,29 @@ test('an assault runner ignores a distant contact instead of duelling', () => {
   assert.strictEqual(bot.stateName, 'GRABFLAG', 'a contact 35m away must not stop the flag run');
 });
 
+test('a runner waiting at the rally point is not mistaken for a stuck bot', () => {
+  // 180m out, alone: doGrabFlag deliberately stands still for 2.5s so a wave
+  // can form up. The stuck detector fired 2.1s into that pause and dropped the
+  // run for a 4s ADVANCE (measured: 86% of all recoveries on blue flag runs).
+  const world = new ServerWorld();
+  const bot = new ServerBot('staging-test', { x: 0, y: GROUND_Y, z: -40 }, 'blue', 'Waiter');
+  bot.role = 'assault';
+  const ctx = ctxFor(world);
+  ctx.blockedBy = () => false;
+  const tick = (t) => {
+    ctx.serverTime = t;
+    bot.botUpdate(1 / 20, ctx);
+  };
+
+  tick(0.05);
+  tick(0.1);
+  tick(1.2); // the startup sample always reads as movement, whatever the spawn
+  tick(2.2); // one dead sample inside the pause
+  bot.stagingSince = 2.2; // a pause that begins mid-match, as most of them do
+  tick(3.2); // a second dead sample: that is the stuck trigger
+  assert.strictEqual(bot.stateName, 'GRABFLAG', 'the deliberate pause must not read as being stuck');
+});
+
 test('support bots hold a defensive post in front of their own flag', () => {
   const world = new ServerWorld();
   const bot = new ServerBot('support-test', { x: 0, y: GROUND_Y, z: -120 }, 'blue', 'Holder');
@@ -76,6 +99,31 @@ test('a carrier drops cover between itself and a chaser', () => {
   assert.ok(built.length >= 2, `carrier should build cover, placed ${built.length}`);
   // The chaser is north of the carrier, so cover must be north of it too.
   assert.ok(built.every((c) => c.z > 100), 'cover belongs between carrier and chaser');
+});
+
+test('a carrier shoots a chaser behind it without breaking stride', () => {
+  const world = new ServerWorld();
+  const bot = new ServerBot('carrier-shoulder', { x: 0, y: GROUND_Y, z: 60 }, 'blue', 'Runner');
+  bot.carryingFlag = true;
+  // Behind the carrier, on the enemy side: exactly where a pursuer sits when
+  // the body is pointed home.
+  const chaser = { id: 'e8', position: { x: 0, y: GROUND_Y, z: 78 }, team: 'red', isDead: false, carryingFlag: false };
+  const ctx = ctxFor(world, [chaser]);
+  const shots = [];
+  ctx.fireWeapon = (shooter, target) => shots.push(target.id);
+
+  const start = { x: bot.position.x, z: bot.position.z };
+  run(bot, ctx, 30);
+
+  assert.strictEqual(bot.stateName, 'RETURN');
+  assert.ok(shots.length >= 1, `the carrier must return fire, fired ${shots.length}`);
+  assert.ok(shots.every((id) => id === 'e8'), 'the shot goes at the chaser');
+  const travelled = Math.hypot(bot.position.x - start.x, bot.position.z - start.z);
+  assert.ok(travelled > 4, `the carrier keeps running while shooting, moved ${travelled.toFixed(1)}m`);
+  // Facing the chaser, not the waypoint: the chaser is north, so the body's
+  // forward vector must point north while the feet still travel south.
+  const fz = -Math.cos(bot.rotation.yaw);
+  assert.ok(fz > 0.8, `the body turns onto the chaser behind it (forward z ${fz.toFixed(2)})`);
 });
 
 test('an empty magazine reloads instead of triggering a retreat', () => {

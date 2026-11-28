@@ -168,6 +168,13 @@ const OBJECTIVE_RETREAT_HP = 0.15;
 // Duelling every 75m sighting is what kept the roster at midfield (measured:
 // zero pickups in a 10-minute 10v10 bot-only match).
 const ASSAULT_IGNORE_RANGE = 9;
+// How long a lone runner waits at the rally point for a wave to form up before
+// pushing on alone. The wait is deliberate: the stuck detector has to know
+// about it, or it cancelled the run while the bot was standing to order
+// (measured: 86% of the stuck recoveries on blue flag runs happened during
+// this pause, median 2.1s into it, and each one dropped the run for a 4s
+// ADVANCE — half of all run abandonments and most of the zero-capture seeds).
+const ASSAULT_STAGING_SECONDS = 2.5;
 // A carrier re-rolls its escape lane this often, and may drop cover this often.
 // A straight line is a death sentence: chasers hold the same sight line and
 // rifle fire lands at 60m+. Jinking and screening on the same short beat is
@@ -977,7 +984,7 @@ export class ServerBot extends ServerPlayer {
     const threatNear = enemy !== null && dist < 25;
     if (!mateNear && !threatNear && startDist > 110 && startDist < 200) {
       if (this.stagingSince === null) this.stagingSince = t;
-      if (t - this.stagingSince < 2.5) {
+      if (t - this.stagingSince < ASSAULT_STAGING_SECONDS) {
         this.velocity.x = 0;
         this.velocity.z = 0;
         this.snapToGround(ctx);
@@ -1049,7 +1056,13 @@ export class ServerBot extends ServerPlayer {
     if (enemy) {
       // Fire on the move out to rifle range: a carrier that never shoots back
       // is a free kill for the chaser behind it. Feet keep moving either way.
-      if (dist < 45) this.aimAndShoot(enemy, ctx, t);
+      // moveTo re-faces the body at the walk direction every tick, which undoes
+      // the turn aimAndShoot just made, so the shot's 8° cone is never entered:
+      // aim again after moving, or the carrier can only shoot forwards.
+      if (dist < 45) {
+        this.faceToward(enemy.position.x, enemy.position.z);
+        this.aimAndShoot(enemy, ctx, t);
+      }
       // Wall off the chaser early and often. One wall per 3s screened only the
       // first few metres of a 280m run; at 1.6s the screen keeps pace with the
       // carrier, and the pickup zone is exactly where the chase starts.
@@ -1647,13 +1660,21 @@ export class ServerBot extends ServerPlayer {
     const waitingAtStand =
       this.botState === 'GRABFLAG' &&
       Math.hypot(objectiveStand.x - this.position.x, objectiveStand.z - this.position.z) < 4;
+    // Standing at the rally point to let a wave form up is a decision, not a
+    // stall. Without this the recovery fired 2.1s into the 2.5s pause and its
+    // final rung replaced the flag run with a 4s ADVANCE.
+    const stagingPause =
+      this.botState === 'GRABFLAG' &&
+      this.stagingSince !== null &&
+      t - this.stagingSince < ASSAULT_STAGING_SECONDS;
     const stationaryByDesign =
       this.botState === 'CAMP' ||
       this.botState === 'TRENCH' ||
       this.botState === 'BUILD' ||
       this.botState === 'DEFEND' ||
       this.botState === 'MAN_GUN' ||
-      waitingAtStand;
+      waitingAtStand ||
+      stagingPause;
     if (moved > 0.6) {
       this.stuckStrikes = 0;
       this.recoveryAttempts = 0;
