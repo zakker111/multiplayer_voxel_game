@@ -17,18 +17,36 @@ import { fileURLToPath } from 'node:url';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 process.chdir(root);
 
-const args = process.argv.slice(2);
-const portArg = args.find((arg) => arg.startsWith('--port='))?.split('=')[1]
-  ?? args.find((arg) => /^\d+$/.test(arg));
-const port = Number(portArg ?? process.env.PORT ?? 3000);
+const USAGE = 'usage: start-server[.bat|.sh] [port] [--rebuild]';
+let port = Number(process.env.PORT ?? 3000);
+// What to quote back when the port is rejected: the argument beats PORT, so
+// blaming PORT for a bad argument (or vice versa) sends people to the wrong
+// place.
+let portText = process.env.PORT ?? String(port);
+let rebuild = false;
+// One pass, two options. An unknown flag is a typo, not a reason to start a
+// stale build silently.
+for (const arg of process.argv.slice(2)) {
+  if (arg === '--rebuild') rebuild = true;
+  else if (/^\d+$/.test(arg)) {
+    port = Number(arg);
+    portText = arg;
+  }
+  else {
+    console.error(`[server] unknown option "${arg}"`);
+    console.error(USAGE);
+    process.exit(1);
+  }
+}
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  console.error(`[server] "${portArg ?? port}" is not a valid port (1-65535).`);
+  console.error(`[server] "${portText}" is not a valid port (1-65535).`);
+  console.error(USAGE);
   process.exit(1);
 }
 
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const isWindows = process.platform === 'win32';
+const npm = isWindows ? 'npm.cmd' : 'npm';
 
 /** Run a build step and stop with its exit code if it fails. */
 function run(command, argv, label) {
@@ -47,15 +65,23 @@ if (!existsSync('node_modules')) {
 }
 
 const bundleMissing = !existsSync(path.join('dist', 'server.cjs')) || !existsSync(path.join('dist', 'index.html'));
-if (bundleMissing || args.includes('--rebuild')) {
+if (bundleMissing || rebuild) {
   run(npm, ['run', 'build'], 'building the game (client + server)');
 }
 
+/**
+ * Addresses a friend on the same network can actually open. Docker bridges,
+ * VPN tunnels and host-only adapters answer on the interface too, so printing
+ * them handed people an address nothing else on the LAN could reach.
+ */
+const VIRTUAL_ADAPTER = /^(br-|docker|veth|virbr|vmnet|vboxnet|tun|tap|utun|zt)/;
 function lanAddresses() {
   const found = [];
-  for (const entries of Object.values(networkInterfaces())) {
+  for (const [name, entries] of Object.entries(networkInterfaces())) {
+    if (VIRTUAL_ADAPTER.test(name)) continue;
     for (const entry of entries ?? []) {
-      if (entry.family === 'IPv4' && !entry.internal) found.push(entry.address);
+      // 169.254.x.x is a self-assigned address, not one a router handed out.
+      if (entry.family === 'IPv4' && !entry.internal && !entry.address.startsWith('169.254.')) found.push(entry.address);
     }
   }
   return found;
@@ -74,8 +100,8 @@ console.log('  Playing across the internet needs a public address:');
 console.log(`    - forward TCP ${port} on your router, then share http://<your-public-ip>:${port}`);
 console.log('    - or use a tunnel / VPS (see DEPLOYMENT.md)');
 console.log('');
-console.log('  In the game: Multiplayer -> Choose Server -> Servers found,');
-console.log(`  or type ws://<address>:${port} into the Custom Server field.`);
+console.log('  In the game: Multiplayer -> the server appears under "Servers found",');
+console.log(`  or type this address into the field below the list: localhost:${port}`);
 console.log(`${line}\n`);
 console.log('[server] starting... (Ctrl+C to stop)\n');
 
@@ -84,13 +110,19 @@ const child = spawn(process.execPath, ['dist/server.cjs'], {
   env: { ...process.env, PORT: String(port), NODE_ENV: 'production' },
 });
 
-child.on('exit', (code) => process.exit(code ?? 0));
+// Ctrl+C on Windows does not reach the child through stdio inherit, so stop it
+// ourselves and exit cleanly; any other exit keeps the server's own status so a
+// crash does not look like a normal shutdown to the .bat/.sh wrapper.
+let stopping = false;
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    stopping = true;
+    child.kill(signal);
+  });
+}
+
+child.on('exit', (code) => process.exit(stopping ? 0 : (code ?? 1)));
 child.on('error', (error) => {
   console.error('[server] could not start:', error.message);
   process.exit(1);
 });
-
-// Ctrl+C on Windows does not reach the child through stdio inherit.
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => child.kill(signal));
-}

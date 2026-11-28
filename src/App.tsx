@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game, GameState } from './game/game';
 import { WORKSHOP_REACH, JEEP_COST, JEEP_MAX_HP, JEEP_TEAM_LIMIT, SUPPLY_CRATE_CAPACITY, SUPPLY_CRATE_DRAW, SHELL_PACK_COST, SHELL_PACK_LIMIT, emplacementSpec, type EmplacementKind } from './shared/types';
-import { Globe, Shield, Server, ArrowLeft, Play, Wifi, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower, RefreshCw } from 'lucide-react';
+import { Globe, Shield, ArrowLeft, Play, Check, Crosshair, Copy, Link2, Volume2, VolumeX, RadioTower, RefreshCw } from 'lucide-react';
 
 /** HUD names for the bench blueprints; the shared table only carries numbers. */
 const EMPLACEMENT_LABELS: Record<EmplacementKind, string> = {
@@ -32,9 +32,9 @@ function formatRoundClock(seconds: number): string {
 function httpOriginOf(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, '');
   if (!trimmed) return '';
-  if (/^wss:\/\//i.test(trimmed)) return trimmed.replace(/^wss:\/\//i, 'https://');
-  if (/^ws:\/\//i.test(trimmed)) return trimmed.replace(/^ws:\/\//i, 'http://');
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  // With a scheme it is already http(s)/ws(s): ws becomes http and wss https.
+  // Bare text is assumed to be a host the page can reach the same way it did.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed.replace(/^ws(s?):\/\//i, 'http$1://');
   const protocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https://' : 'http://';
   return protocol + trimmed;
 }
@@ -45,12 +45,20 @@ function wsAddressOf(raw: string): string {
 }
 
 const CUSTOM_SERVERS_KEY = 'voxel-fps.custom-servers';
+const MAX_SAVED_SERVERS = 5;
 
-/** Servers this player has joined before, newest first. */
+/** Servers this player has joined before, newest first, as http(s) origins. */
 function readSavedServers(): string[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(CUSTOM_SERVERS_KEY) ?? '[]');
-    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+    if (!Array.isArray(parsed)) return [];
+    // Older entries may be whatever was typed (ws://, bare host:port), so they
+    // are normalised here: every caller compares origins, never raw input.
+    const origins = parsed
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map(httpOriginOf)
+      .filter(Boolean);
+    return origins.filter((origin, index) => origins.indexOf(origin) === index);
   } catch {
     return [];
   }
@@ -60,18 +68,20 @@ function rememberServer(address: string): void {
   const origin = httpOriginOf(address);
   if (!origin) return;
   try {
-    const next = [origin, ...readSavedServers().filter((entry) => httpOriginOf(entry) !== origin)].slice(0, 5);
+    const next = [origin, ...readSavedServers().filter((entry) => entry !== origin)].slice(0, MAX_SAVED_SERVERS);
     localStorage.setItem(CUSTOM_SERVERS_KEY, JSON.stringify(next));
   } catch {
     // Private browsing: remembering servers is a convenience, not a requirement.
   }
 }
 
-/** One row in the lobby's "servers found" list. */
+/** One row in the lobby's "servers found" list. `blocked` is an http server
+ *  the browser refuses to reach from an https page, which is not the same as
+ *  one that is down. */
 type ServerProbe = {
   origin: string;
   name: string;
-  state: 'checking' | 'online' | 'offline';
+  state: 'checking' | 'online' | 'offline' | 'blocked';
   players?: number;
 };
 
@@ -117,6 +127,28 @@ const MODE_LOADING: Record<StartMode, { name: string; blurb: string; tips: strin
     ],
   },
 };
+
+/** How long an online start waits for a real server connection before the
+ *  loading screen gives up and offers Try again / Back to menu. A WebSocket
+ *  handshake plus the init snapshot takes a couple of seconds on a good link,
+ *  so a few seconds of silence means nobody is going to answer. */
+const ONLINE_CONNECT_TIMEOUT_MS = 8000;
+
+/**
+ * Resolve true once the online session has a real server connection, and false
+ * at the deadline. `connect()` resolves even when no transport ever came up, so
+ * the connection itself is what a starting match has to wait on. */
+function waitForServerConnection(game: Game, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const startedAt = performance.now();
+    const poll = () => {
+      if (game.networkClient?.isConnected()) { resolve(true); return; }
+      if (performance.now() - startedAt >= timeoutMs) { resolve(false); return; }
+      window.setTimeout(poll, 200);
+    };
+    poll();
+  });
+}
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -167,7 +199,7 @@ function App() {
   // Multiplayer Server & Team Selection state
   const isGitHubPages = typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
   const [showMultiplayerModal, setShowMultiplayerModal] = useState(false);
-  const [serverType, setServerType] = useState<'default' | 'custom'>(() => (typeof window !== 'undefined' && window.location.hostname.endsWith('github.io') ? 'custom' : 'default'));
+  // Empty means this page's own server; the field is the only way to pick another.
   const [customServerUrl, setCustomServerUrl] = useState('');
   const [playerName, setPlayerName] = useState(() => 'Soldier_' + Math.floor(100 + Math.random() * 900));
   const [modalTeam, setModalTeam] = useState<'blue' | 'red'>('blue');
@@ -176,6 +208,9 @@ function App() {
   const [serverProbes, setServerProbes] = useState<ServerProbe[]>([]);
   const [probeRound, setProbeRound] = useState(0);
   const pageOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  // The server Connect & Deploy will use: this page's own origin unless an
+  // address was typed. Drives which row in the list is highlighted.
+  const chosenOrigin = customServerUrl.trim() ? httpOriginOf(customServerUrl) : pageOrigin;
 
   // Auto-launch support for automated previewing and AI testing via URL query parameters (?mode=spectator, ?mode=bots, ?mode=online)
   useEffect(() => {
@@ -221,55 +256,57 @@ function App() {
   // whether it is up. The probe is a CORS-enabled GET the server already
   // exposes, so a dead host shows as an offline row instead of a failed join.
   useEffect(() => {
-    if (!showMultiplayerModal || typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return;
+    // The list belongs to an open lobby: a closed lobby must not leave row
+    // states from the last visit on screen while the next probe is in flight.
+    if (!showMultiplayerModal) {
+      setServerProbes([]);
+      return;
+    }
     let cancelled = false;
     const here = window.location.origin;
 
-    const probeOne = async (origin: string) => {
-      let state: ServerProbe['state'] = 'offline';
-      let players: number | undefined;
+    // What one /api/status says. The https check is separate from the fetch:
+    // the browser blocks that request before it leaves, so such a server is
+    // unreachable, not down, and the row says which.
+    const probe = async (origin: string): Promise<Pick<ServerProbe, 'state' | 'players'>> => {
+      if (window.location.protocol === 'https:' && origin.startsWith('http:')) return { state: 'blocked' };
       try {
-        // An https page cannot probe an http server: mixed content is blocked
-        // by the browser, so report it as offline without a console error.
-        const blocked = window.location.protocol === 'https:' && origin.startsWith('http:');
-        if (!blocked) {
-          const response = await fetch(`${origin}/api/status`, {
-            cache: 'no-store',
-            signal: AbortSignal.timeout(2000),
-          });
-          if (response.ok) {
-            const status = await response.json();
-            state = 'online';
-            players = typeof status?.connectedPlayers === 'number' ? status.connectedPlayers : undefined;
-          }
-        }
+        const response = await fetch(`${origin}/api/status`, { cache: 'no-store', signal: AbortSignal.timeout(2000) });
+        if (!response.ok) return { state: 'offline' };
+        const status = await response.json();
+        const players = typeof status?.connectedPlayers === 'number' ? status.connectedPlayers : undefined;
+        return { state: 'online', players };
       } catch {
-        state = 'offline';
+        // No answer inside 2s or no JSON: down, or not a game server.
+        return { state: 'offline' };
       }
-      if (cancelled) return;
-      setServerProbes((current) => current.map((probe) => (probe.origin === origin ? { ...probe, state, players } : probe)));
+    };
+
+    // public/servers.json is a plain array of { name, url }; a host without one
+    // just has no advertised servers.
+    const listed = async (): Promise<Array<{ name: string; origin: string }>> => {
+      try {
+        // Relative to the page, not the origin: a static host serves the client
+        // from a subpath (GitHub Pages /repo/), where /servers.json is a 404.
+        const url = new URL('servers.json', document.baseURI).href;
+        const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+        const entries = response.ok ? await response.json() : null;
+        if (!Array.isArray(entries)) return [];
+        return entries
+          .filter((entry) => entry && typeof entry.url === 'string')
+          .map((entry) => ({ name: String(entry.name ?? entry.url), origin: httpOriginOf(entry.url) }));
+      } catch {
+        return [];
+      }
     };
 
     const discover = async () => {
-      const candidates: Array<{ name: string; origin: string }> = [{ name: 'This server', origin: here }];
-      try {
-        const response = await fetch(`${here}/servers.json`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
-        if (response.ok) {
-          const data = await response.json();
-          const list = Array.isArray(data) ? data : data?.servers;
-          if (Array.isArray(list)) {
-            for (const entry of list) {
-              if (entry && typeof entry.url === 'string') {
-                candidates.push({ name: String(entry.name ?? entry.url), origin: httpOriginOf(entry.url) });
-              }
-            }
-          }
-        }
-      } catch {
-        // A host without a server list still works: the page origin is listed.
-      }
-      for (const saved of readSavedServers()) candidates.push({ name: 'Saved server', origin: httpOriginOf(saved) });
-
+      const candidates = [
+        { name: 'This server', origin: here },
+        ...(await listed()),
+        ...readSavedServers().map((origin) => ({ name: 'Saved server', origin })),
+      ];
       const seen = new Set<string>();
       const unique = candidates.filter((candidate) => {
         if (!candidate.origin || seen.has(candidate.origin)) return false;
@@ -277,8 +314,9 @@ function App() {
         return true;
       });
       if (cancelled) return;
-      setServerProbes(unique.map((candidate) => ({ origin: candidate.origin, name: candidate.name, state: 'checking' })));
-      await Promise.all(unique.map((candidate) => probeOne(candidate.origin)));
+      setServerProbes(unique.map((candidate) => ({ ...candidate, state: 'checking' })));
+      const probed = await Promise.all(unique.map(async (candidate) => ({ ...candidate, ...(await probe(candidate.origin)) })));
+      if (!cancelled) setServerProbes(probed);
     };
 
     void discover();
@@ -324,6 +362,27 @@ function App() {
         // to the actual first frame rather than a simulated percentage.
         game.start();
 
+        // Online play is server-authoritative: with nothing answering, the match
+        // has no state and every build/mine/shoot is dropped. Wait for a real
+        // connection, and if none arrives say so here rather than leaving the
+        // player on DEPLOYING with no error and no way out.
+        if (gameMode === 'online' || (gameMode === 'beta' && !!serverUrl?.trim())) {
+          const connected = await waitForServerConnection(game, ONLINE_CONNECT_TIMEOUT_MS);
+          if (cancelled) return;
+          if (!connected) {
+            const target = serverUrl?.trim() ? serverUrl.replace(/^wss?:\/\//, '') : window.location.host;
+            console.warn(`No game server answered at ${target} within ${ONLINE_CONNECT_TIMEOUT_MS}ms`);
+            gameRef.current = null;
+            try {
+              game.destroy();
+            } catch (error) {
+              console.error('Failed to shut down the unreachable match', error);
+            }
+            setLoadError(`No answer from the game server at ${target}. It may be offline, or the address may be wrong.`);
+            return;
+          }
+        }
+
         if (pendingSpectatorRef.current) {
           game.toggleSpectator();
           pendingSpectatorRef.current = false;
@@ -358,7 +417,7 @@ function App() {
   };
 
   const handleDeployMultiplayer = () => {
-    const target = serverType === 'custom' && customServerUrl.trim() ? customServerUrl.trim() : undefined;
+    const target = customServerUrl.trim() || undefined;
     if (target) rememberServer(target);
     handleStart('online', modalTeam, target);
     setShowMultiplayerModal(false);
@@ -378,7 +437,7 @@ function App() {
       const pathname = window.location.pathname.replace(/\/$/, '');
       const team = targetTeam || (modalTeam === 'blue' ? 'red' : 'blue');
       let url = `${origin}${pathname}/?mode=online&team=${team}`;
-      if (serverType === 'custom' && customServerUrl.trim()) {
+      if (customServerUrl.trim()) {
         url += `&server=${encodeURIComponent(customServerUrl.trim())}`;
       }
       navigator.clipboard.writeText(url);
@@ -493,7 +552,7 @@ function App() {
                   <p>🎯 1 headshot / 3 body shots to kill</p>
                   <p>🔫 Rifle: 10 rounds | SMG: 30 rounds (unlimited ammo)</p>
                   <p>🏃 Running + shooting = less accurate | 🧎 Crouching = more accurate</p>
-                  <p>🏗️ <b>How to build:</b> Harvest blocks with pickaxe (4), then right-click to place instantly like Minecraft!</p>
+                  <p>🏗️ <b>How to build:</b> Harvest blocks with pickaxe (4), press E at your workshop to bank them, then press B at the blueprint bench and craft a build into slot 5, 6 or 7.</p>
                   <p>💥 All terrain is destroyable by gunfire (3 shots per voxel)</p>
                   <p>🧪 Singleplayer mode: No bots, test building & combat freely</p>
                 </div>
@@ -599,7 +658,7 @@ function App() {
                 <div className="mb-3 p-3 bg-amber-950/40 border border-amber-800/40 rounded-xl text-xs text-amber-300 flex items-start gap-2">
                   <span className="text-base leading-none">ℹ️</span>
                   <span>
-                    <strong>GitHub Pages Client:</strong> You are playing on static GitHub Pages. To play online multiplayer across the internet, enter your remote server URL (e.g., from Railway, Render, or VPS) below, or play <strong>Bot Match</strong> locally!
+                    <strong>GitHub Pages Client:</strong> You are playing on static GitHub Pages. To play online multiplayer across the internet, enter your remote server URL (e.g., from Railway, Render, or VPS) below, or play <strong>Play vs Bots</strong> locally!
                   </span>
                 </div>
               )}
@@ -624,23 +683,19 @@ function App() {
                 </div>
                 <div className="space-y-1.5">
                   {serverProbes.map((probe) => {
-                    const selected = serverType === 'default'
-                      ? probe.origin === pageOrigin
-                      : probe.origin === httpOriginOf(customServerUrl);
+                    const selected = probe.origin === chosenOrigin;
+                    const blocked = probe.state === 'blocked';
                     return (
                       <button
                         key={probe.origin}
                         type="button"
-                        onClick={() => {
-                          if (probe.origin === pageOrigin) {
-                            setServerType('default');
-                          } else {
-                            setServerType('custom');
-                            setCustomServerUrl(wsAddressOf(probe.origin));
-                          }
-                        }}
-                        className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border text-left text-xs transition-colors cursor-pointer ${
-                          selected ? 'bg-blue-950/40 border-blue-500' : 'bg-gray-900/60 border-gray-800 hover:border-gray-600'
+                        disabled={blocked}
+                        title={blocked ? 'This page is https, so the browser blocks an http server. Open the server URL directly.' : undefined}
+                        onClick={() => setCustomServerUrl(probe.origin === pageOrigin ? '' : wsAddressOf(probe.origin))}
+                        className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border text-left text-xs transition-colors ${
+                          blocked ? 'bg-gray-900/40 border-gray-800 opacity-60 cursor-not-allowed'
+                            : selected ? 'bg-blue-950/40 border-blue-500 cursor-pointer'
+                            : 'bg-gray-900/60 border-gray-800 hover:border-gray-600 cursor-pointer'
                         }`}
                       >
                         <span className="flex items-center gap-2 min-w-0">
@@ -663,7 +718,8 @@ function App() {
                         }`}>
                           {probe.state === 'online'
                             ? (probe.players !== undefined ? `${probe.players} online` : 'online')
-                            : probe.state === 'checking' ? 'checking…' : 'offline'}
+                            : probe.state === 'checking' ? 'checking…'
+                            : blocked ? 'needs https' : 'offline'}
                         </span>
                       </button>
                     );
@@ -677,59 +733,16 @@ function App() {
                 </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <button
-                  type="button"
-                  onClick={() => setServerType('default')}
-                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                    serverType === 'default'
-                      ? 'bg-blue-950/40 border-blue-500 shadow-sm shadow-blue-500/20'
-                      : 'bg-gray-800/60 border-gray-700 hover:border-gray-600'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-sm flex items-center gap-1.5">
-                      <Server className="w-4 h-4 text-blue-400" /> Official Server
-                    </span>
-                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-800/40">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Online
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-400">
-                    Host: <span className="text-gray-300 font-mono">{typeof window !== 'undefined' ? (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host : 'ws://localhost:3000'}</span>
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setServerType('custom')}
-                  className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                    serverType === 'custom'
-                      ? 'bg-purple-950/40 border-purple-500 shadow-sm shadow-purple-500/20'
-                      : 'bg-gray-800/60 border-gray-700 hover:border-gray-600'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-sm flex items-center gap-1.5">
-                      <Wifi className="w-4 h-4 text-purple-400" /> Custom Server
-                    </span>
-                    <span className="text-[11px] text-gray-400">External ws://</span>
-                  </div>
-                  <p className="text-xs text-gray-400">Connect to remote or private host</p>
-                </button>
-              </div>
-
-              {serverType === 'custom' && (
-                <div className="mt-2">
-                  <input
-                    type="text"
-                    value={customServerUrl}
-                    onChange={(e) => setCustomServerUrl(e.target.value)}
-                    placeholder="192.168.1.24:3000, ws://localhost:3000 or wss://..."
-                    className="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 font-mono"
-                  />
-                </div>
-              )}
+              {/* The list above is the chooser; this is only for a server it
+                  cannot know about. Typing selects it, clearing falls back to
+                  this page's own server. */}
+              <input
+                type="text"
+                value={customServerUrl}
+                onChange={(event) => setCustomServerUrl(event.target.value)}
+                placeholder="Or type a server address: 192.168.1.24:3000"
+                className="w-full bg-gray-950 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
+              />
             </div>
 
             {/* 2. Player Callsign */}

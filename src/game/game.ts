@@ -466,6 +466,21 @@ function makeWeapon(stats: WeaponStats): Weapon {
   };
 }
 
+/** How a moving body travels relative to where it faces. A carrier keeps its
+ *  chest on the chaser while its feet run the escape lane, so its legs must not
+ *  swing as if it were sprinting forwards or it reads as running backwards. */
+type Gait = 'forward' | 'strafe' | 'backpedal';
+
+function gaitFor(travelX: number, travelZ: number, yaw: number): Gait {
+  const len = Math.hypot(travelX, travelZ);
+  if (len < 1e-4) return 'forward';
+  // The model's front is -Z, so its forward vector is (-sin yaw, -cos yaw).
+  const forwardness = (travelX * -Math.sin(yaw) + travelZ * -Math.cos(yaw)) / len;
+  if (forwardness < -0.35) return 'backpedal';
+  if (forwardness < 0.35) return 'strafe';
+  return 'forward';
+}
+
 const TEAM_COLORS: Record<Team, { body: number; accent: number; legs: number; label: string }> = {
   red: { body: 0xcc2222, accent: 0xff4444, legs: 0x661111, label: 'RED' },
   blue: { body: 0x2244cc, accent: 0x4488ff, legs: 0x112266, label: 'BLUE' },
@@ -4506,44 +4521,15 @@ export class Game {
       }
     });
 
-    // `connect()` resolves even when no transport ever came up, so verify that a
-    // real server connection exists rather than trusting the promise. The grace
-    // period keeps a merely slow handshake from being mistaken for a dead server.
-    this.networkClient.connect().then(() => {
-      setTimeout(() => {
-        if (this.networkClient && !this.networkClient.isConnected()) this.fallBackToLocalMatch();
-      }, 4000);
-    });
+    // The boot path owns "nobody answered": it waits for a real connection and
+    // shows the loading screen's error card if none arrives, so an unreachable
+    // server never turns into a silent local match that looks online.
+    void this.networkClient.connect();
   }
 
-  /**
-   * Online and Beta play are server-authoritative. With no reachable server the
-   * client used to stay in its online mode, receive no state (so the match
-   * looked empty — no bots) and silently drop every build/mine/shoot message,
-   * which reads as "nothing works". Start a local bot match instead so the game
-   * is playable, and say why.
-   */
-  private fallBackToLocalMatch(): void {
-    if (this.gameMode !== 'online') return; // already local — nothing to undo
-    // Beta with a server that never answered plays its bot match instead of
-    // retrying forever, with the local workshop and jeeps so nothing is missing.
-    if (this.betaLabel) {
-      console.warn('Beta server unreachable — starting a local bot match');
-      this.networkClient?.disconnect();
-      this.networkClient = null;
-      this.startLocalMatch();
-      this.showMessage('⚠️ Beta server unreachable — local bot match with your workshop and jeeps (G build, F board).');
-      return;
-    }
-    console.warn('No game server reachable — falling back to a local bot match');
-    this.networkClient?.disconnect();
-    this.networkClient = null;
-    this.startLocalMatch();
-    this.showMessage('⚠️ No game server reachable — started a local bot match. Run "npm run dev" for online play.');
-  }
-
-  /** Client-side bots and local voxel edits: a normal bot match, and what an
-   *  online session falls back to when no server turns up. */
+  /** Client-side bots and local voxel edits: a normal offline bot match. An
+   *  online session that cannot reach a server reports it on the loading screen
+   *  instead of quietly turning into this. */
   private startLocalMatch(): void {
     this.gameMode = 'multiplayer';
     this.player.serverAuthoritativeRespawn = false;
@@ -7016,13 +7002,37 @@ export class Game {
 
       if (isMoving) {
         const swing = Math.sin(performance.now() * 0.01) * 0.45;
-        if (leftLeg) leftLeg.rotation.x = swing;
-        if (rightLeg) rightLeg.rotation.x = -swing;
-        if (leftArm) leftArm.rotation.x = -swing;
-        if (rightArm) rightArm.rotation.x = swing;
+        // Which way the body is actually travelling: a server bot that keeps its
+        // aim on a pursuer while withdrawing crosses its own facing.
+        const gait = gaitFor(
+          remote.targetPosition.x - remote.mesh.position.x,
+          remote.targetPosition.z - remote.mesh.position.z,
+          remote.mesh.rotation.y,
+        );
+        if (leftLeg && rightLeg) {
+          if (gait === 'strafe') {
+            // Side-step: the legs scissor sideways instead of swinging fore/aft.
+            leftLeg.rotation.x = 0;
+            rightLeg.rotation.x = 0;
+            leftLeg.rotation.z = swing * 0.55;
+            rightLeg.rotation.z = -swing * 0.55;
+          } else {
+            // A backpedal reverses and shortens the stride; forwards is unchanged.
+            const stride = gait === 'backpedal' ? -swing * 0.7 : swing;
+            leftLeg.rotation.z = 0;
+            rightLeg.rotation.z = 0;
+            leftLeg.rotation.x = stride;
+            rightLeg.rotation.x = -stride;
+          }
+        }
+        // Arms swing only when running forwards: a bot (or player) firing over
+        // its shoulder holds the weapon on the target.
+        const armSwing = gait === 'forward' ? swing : 0;
+        if (leftArm) leftArm.rotation.x = -armSwing;
+        if (rightArm) rightArm.rotation.x = armSwing;
       } else {
-        if (leftLeg) leftLeg.rotation.x = 0;
-        if (rightLeg) rightLeg.rotation.x = 0;
+        if (leftLeg) { leftLeg.rotation.x = 0; leftLeg.rotation.z = 0; }
+        if (rightLeg) { rightLeg.rotation.x = 0; rightLeg.rotation.z = 0; }
         if (leftArm) leftArm.rotation.x = 0;
         if (rightArm) rightArm.rotation.x = 0;
       }

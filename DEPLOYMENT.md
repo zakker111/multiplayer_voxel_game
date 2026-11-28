@@ -156,7 +156,7 @@ Clients on HTTPS domains automatically use `wss://` — no code edits required a
 
 `.github/workflows/deploy-pages.yml` publishes the client to `https://<user>.github.io/<repo>/` on pushes to main. Pages is static (no game server), so players either:
 - play local modes (Bot Match / Sandbox / Spectator), or
-- open **Multiplayer → Custom Server** and paste your deployed server URL (Render/VPS/tunnel), or bake it into the link: `https://<user>.github.io/<repo>/?mode=online&server=wss://your-app.onrender.com`.
+- open **Multiplayer** and paste your deployed server URL (Render/VPS/tunnel) into the address field under the server list, or bake it into the link: `https://<user>.github.io/<repo>/?mode=online&server=wss://your-app.onrender.com`.
 
 ---
 
@@ -272,6 +272,6 @@ Checklist:
 
 - **Playtesting with friends:** Render Starter (`0.5c-512mb`, $7/mo) + invite links. Zero maintenance, no spin-down.
 - **Community server:** VPS ($5/mo) + PM2 + Nginx + domain SSL, `ADMIN_TOKEN` set for moderation.
-- **CI/demo client without server cost:** GitHub Pages + one shared Render/VPS server via Custom Server URL.
+- **CI/demo client without server cost:** GitHub Pages + one shared Render/VPS server, joined from the address field under the server list (or a `?server=` link).
 
 MIT licensed — see [LICENSE](LICENSE). Developer/architecture reference: [AGENTS.md](AGENTS.md).
