@@ -281,7 +281,11 @@ export const WORKSHOP_CENTERS = {
   red: { x: 45, z: 185 },
 } as const;
 
-export const WORKSHOP_START_STOCK = 50;
+/** Blocks each team can spend before anyone has mined. It has to cover the MG
+ *  nest (70): that is the build the whole bench exists for, and a round that
+ *  opens with it refused — while bots, which never mine, could not build one at
+ *  all — reads as a broken bench rather than as an economy. */
+export const WORKSHOP_START_STOCK = 80;
 export const WORKSHOP_CAPACITY = 200;
 export const WORKSHOP_REACH = 8;
 

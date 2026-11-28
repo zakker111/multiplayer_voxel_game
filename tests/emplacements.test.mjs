@@ -72,6 +72,20 @@ const place = (game, id, kind, spot, yaw = 0, slot = 0) =>
 const message = (frames, text) =>
   frames.filter((f) => f.type === 'emplacementMessage' && f.message === text);
 
+test('the opening stockpile pays for an MG nest at the bench', () => {
+  // The nest is the build the bench exists for. With a start stockpile under
+  // its 70 blocks the craft is refused on the first click of a round, which
+  // reads as a broken bench (and bots, which never mine, could never field one
+  // at all until teammates deposited).
+  const { game, id, frames } = setup('blue');
+  craft(game, id, 'mgNest', 0);
+  assert.deepEqual(
+    frames.filter((f) => f.type === 'blueprintsUpdated').at(-1)?.blueprints,
+    ['mgNest', null, null],
+    `refused with: ${frames.filter((f) => f.type === 'emplacementMessage').map((f) => f.message).join(', ')}`,
+  );
+});
+
 test('every emplacement kind is a complete spec', () => {
   const kinds = ['mgNest', 'cannon', 'mortar', 'supplyCrate', 'spottingPost'];
   assert.deepEqual(Object.keys(EMPLACEMENTS).sort(), [...kinds].sort());
