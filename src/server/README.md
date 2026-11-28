@@ -136,7 +136,7 @@ Client → server: `join`, `playerInput`, `shoot`, `useTool`, `build`, `reload`,
 
 ## Tests
 
-From the repository root: `npm test` (305 `node:test` cases). The suites load the
+From the repository root: `npm test` (306 `node:test` cases). The suites load the
 real `serverGame` / `serverWorld` / `serverBot` bundles from `dist/tests/`, so
 they exercise real behaviour: voxel build/mine rules, bot trench building and
 stuck-state handling, engineer assignment and forward-base/annex construction,
